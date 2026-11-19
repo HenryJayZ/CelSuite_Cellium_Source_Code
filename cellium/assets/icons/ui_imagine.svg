@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- glass photo card -->
+  <rect x="2.2" y="5.6" width="15.0" height="15.4" rx="3.4" fill="#FFFFFF" fill-opacity="0.10"/>
+  <!-- landscape: sun + ridge -->
+  <circle cx="12.9" cy="9.3" r="1.3"/>
+  <path d="M2.7 17.9l4.8-5.1a2.2 2.2 0 0 1 3.2 0l4.9 5.1"/>
+  <!-- generation sparkle -->
+  <path d="M19.7 1.1Q19.7 4.4 23.0 4.4Q19.7 4.4 19.7 7.7Q19.7 4.4 16.4 4.4Q19.7 4.4 19.7 1.1Z" fill="#FFFFFF" stroke="none"/>
+</svg>
