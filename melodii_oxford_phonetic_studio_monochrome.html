@@ -1,0 +1,3084 @@
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Melodii &amp; Oxford Phonetic Studio (Monochrome)</title>
+<style>
+  :root {
+    --bg-main: #090909;
+    --bg-shell: #111111;
+    --bg-card: #181818;
+    --bg-input: #0d0d0d;
+    --border: #2c2c2c;
+    --border-active: #ffffff;
+    --text-main: #f5f5f5;
+    --text-muted: #8e8e8e;
+    --accent-fg: #ffffff;
+    --accent-bg: #ffffff;
+    --accent-inv: #090909;
+  }
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  html, body {
+    width: 100%;
+    min-height: 100vh;
+    background: var(--bg-main);
+    color: var(--text-main);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    display: block;
+    overflow-x: hidden;
+  }
+
+  /* COMPACT SINGLE-SCREEN STUDIO SHELL (FITS MOBILE VIEWPORT + SAFE BOTTOM PADDING FOR GEMINI ORB) */
+  .page-wrap {
+    width: 100%;
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 8px 8px 88px;
+  }
+  .studio-shell {
+    width: 100%;
+    background: var(--bg-shell);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  @media (min-width: 820px) {
+    .studio-shell {
+      display: grid;
+      grid-template-columns: 1.05fr 1fr;
+      padding: 14px;
+      gap: 14px;
+      align-items: start;
+    }
+  }
+  .col {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  /* MINIMAL TOP STATUS HEADER */
+  .top-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-main);
+    flex-shrink: 0;
+  }
+  .brand-title {
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.3px;
+    color: var(--text-main);
+    white-space: nowrap;
+  }
+  .badge-row {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .pill {
+    font-size: 9.5px;
+    font-family: monospace;
+    color: var(--text-main);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    padding: 2px 6px;
+    border-radius: 5px;
+    white-space: nowrap;
+  }
+  .pill-btn {
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .pill-btn:active, .pill-btn.loaded {
+    background: var(--accent-bg);
+    color: var(--accent-inv);
+    border-color: var(--border-active);
+  }
+
+  /* DUAL ENGINE MODE BAR (MODE 1: MELODII vs MODE 2: REAL SPEECH) */
+  .mode-switch-bar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px;
+  }
+  .mode-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    font-weight: 800;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+  .mode-btn.active {
+    background: var(--accent-bg);
+    color: var(--accent-inv);
+    border-color: var(--border-active);
+  }
+
+  /* DICTIONARY DOWNLOAD PROGRESS SLIDER BAR */
+  .dict-dl-bar {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 5px 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 9.5px;
+    font-family: monospace;
+  }
+  .dict-dl-info {
+    color: var(--text-main);
+    font-weight: 700;
+    white-space: nowrap;
+    min-width: 138px;
+  }
+  .dict-dl-slider {
+    flex: 1;
+    accent-color: #ffffff;
+    height: 4px;
+    pointer-events: none;
+  }
+  .dict-dl-btn {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    font-size: 9px;
+    font-weight: 800;
+    padding: 3px 7px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .dict-dl-btn:active {
+    background: var(--accent-bg);
+    color: var(--accent-inv);
+  }
+
+  /* COLORFUL SYNTHESIZER STAGE WITH FLOATING HUD BUTTONS AROUND ITS EDGES */
+  .stage-box {
+    position: relative;
+    width: 100%;
+    height: 148px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #04060c;
+    border: 1px solid var(--border);
+  }
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .stage-hud-top {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    right: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    pointer-events: none;
+    gap: 4px;
+  }
+  .hud-tag {
+    font-size: 9.5px;
+    font-family: monospace;
+    font-weight: 700;
+    color: #e2e8f0;
+    background: rgba(8, 10, 16, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    padding: 2px 6px;
+    border-radius: 5px;
+    white-space: nowrap;
+  }
+  .stage-float-Controls {
+    position: absolute;
+    bottom: 6px;
+    left: 6px;
+    right: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 4px;
+    pointer-events: none;
+  }
+  .float-btn-group {
+    display: flex;
+    gap: 4px;
+    pointer-events: auto;
+    flex-wrap: wrap;
+  }
+  .mini-toggle {
+    font-size: 9.5px;
+    font-weight: 800;
+    color: var(--text-main);
+    background: rgba(13, 13, 13, 0.86);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 4px 7px;
+    border-radius: 5px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .mini-toggle.active {
+    background: var(--accent-bg);
+    color: var(--accent-inv);
+    border-color: var(--border-active);
+  }
+  .save-link {
+    display: none;
+    background: var(--accent-bg);
+    color: var(--accent-inv);
+    font-size: 9.5px;
+    font-weight: 800;
+    padding: 4px 7px;
+    border-radius: 5px;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  /* FIXED-HEIGHT TELEPROMPTER BAR */
+  .teleprompter-bar {
+    width: 100%;
+    height: 34px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    overflow: hidden;
+  }
+  .teleprompter-track {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-muted);
+  }
+  .tp-word {
+    display: inline-block;
+    padding: 1px 4px;
+    margin-right: 2px;
+    border-radius: 4px;
+    color: var(--text-muted);
+  }
+  .tp-word-done {
+    color: #bdbdbd;
+  }
+  .tp-word-active {
+    background: var(--accent-bg);
+    color: var(--accent-inv);
+  }
+  .ipa-pill {
+    font-family: monospace;
+    font-size: 10px;
+    font-weight: 800;
+    color: var(--accent-inv);
+    background: var(--accent-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* COMPACT TEXT & PHRASE DECK (ALWAYS VISIBLE NEAR TOP) */
+  .input-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 7px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .input-row {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+  textarea {
+    flex: 1;
+    height: 44px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: var(--text-main);
+    font-size: 12.5px;
+    font-weight: 600;
+    font-family: inherit;
+    resize: none;
+    outline: none;
+    line-height: 1.28;
+  }
+  textarea:focus {
+    border-color: var(--border-active);
+  }
+  .sing-btn {
+    background: var(--accent-bg);
+    color: var(--accent-inv);
+    border: 1px solid var(--border-active);
+    border-radius: 6px;
+    padding: 0 12px;
+    font-size: 11px;
+    font-weight: 800;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .sing-btn:active {
+    opacity: 0.85;
+  }
+  .phrase-strip {
+    display: flex;
+    gap: 5px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .phrase-strip::-webkit-scrollbar {
+    display: none;
+  }
+  .phrase-btn {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 700;
+    padding: 4px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .phrase-btn:active, .phrase-btn:hover {
+    background: var(--accent-bg);
+    color: var(--accent-inv);
+    border-color: var(--border-active);
+  }
+  .phonetic-preview {
+    display: none;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 7px;
+    font-family: monospace;
+    font-size: 9.5px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .phonetic-preview.open {
+    display: block;
+  }
+
+  /* SECTION BAR WITH QUICK COLLAPSE TOGGLES */
+  .sec-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 9.5px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    padding: 0 2px;
+  }
+  .sec-actions {
+    display: flex;
+    gap: 4px;
+  }
+  .tab-chip {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 9px;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .tab-chip.active {
+    background: var(--accent-bg);
+    color: var(--accent-inv);
+    border-color: var(--border-active);
+  }
+
+  /* 16 VOICES & HEAVENLY INSTRUMENTS (SWIPEABLE 2-ROW RIBBON ON MOBILE, 4x4 GRID ON DESKTOP) */
+  .voice-grid {
+    display: grid;
+    grid-template-rows: repeat(2, auto);
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(104px, 1fr);
+    gap: 5px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+  .voice-grid::-webkit-scrollbar {
+    display: none;
+  }
+  @media (min-width: 640px) {
+    .voice-grid {
+      grid-template-columns: repeat(4, 1fr);
+      grid-template-rows: auto;
+      grid-auto-flow: row;
+    }
+  }
+  .voice-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 6px 7px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--text-main);
+  }
+  .voice-card .v-icon {
+    font-size: 15px;
+    filter: grayscale(100%);
+    flex-shrink: 0;
+  }
+  .voice-card .v-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .voice-card .v-name {
+    font-size: 10.5px;
+    font-weight: 800;
+    color: inherit;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .voice-card .v-sub {
+    font-size: 8.5px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .voice-card.active, .voice-card:active {
+    background: var(--accent-bg);
+    color: var(--accent-inv);
+    border-color: var(--border-active);
+  }
+  .voice-card.active .v-sub, .voice-card:active .v-sub {
+    color: #333333;
+  }
+
+  /* COMPACT SHAPER DECK (3x2 SLIDER MATRIX - NO TALL SCROLLING) */
+  .shaper-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .shaper-card.collapsed {
+    display: none;
+  }
+  .style-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+  }
+  .style-chip {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 9.5px;
+    font-weight: 700;
+    padding: 5px 3px;
+    border-radius: 5px;
+    cursor: pointer;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .style-chip.active {
+    background: var(--accent-bg);
+    border-color: var(--border-active);
+    color: var(--accent-inv);
+  }
+  .sliders-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px 8px;
+  }
+  .s-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .s-top {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--text-main);
+  }
+  .s-val {
+    font-family: monospace;
+    color: var(--text-muted);
+  }
+  input[type="range"] {
+    width: 100%;
+    accent-color: #ffffff;
+    height: 4px;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<div class="page-wrap">
+  <div class="studio-shell">
+    <!-- LEFT/TOP COLUMN: STAGE WITH FLOATING CONTROLS + TELEPROMPTER + COMPACT INPUT -->
+    <div class="col">
+      <div class="top-bar">
+        <div class="brand">
+          <span class="dot"></span>
+          <span class="brand-title">MELODII STUDIO</span>
+        </div>
+        <div class="badge-row">
+          <span class="pill" id="voiceBadge">Melodii (Female)</span>
+          <span class="pill" id="toneBadge">NEUTRAL</span>
+          <button class="pill pill-btn" id="dictStatusBtn" title="Tap to sync 135,000-word CMU Dictionary or import local .dict file">📚 DICT: CORE+</button>
+          <input type="file" id="customDictInput" accept=".dict,.txt" style="display:none">
+          <span class="pill" id="queueBadge">Idle</span>
+        </div>
+      </div>
+
+      <!-- 2-MODE ENGINE SWITCHER: MODE 1 (MELODII) vs MODE 2 (REAL SPEECH) -->
+      <div class="mode-switch-bar">
+        <button class="mode-btn active" id="modeMelodiiBtn" data-mode="melodii">🎵 MODE 1: MELODII ENGINE</button>
+        <button class="mode-btn" id="modeRealSpeechBtn" data-mode="real_speech">🗣️ MODE 2: REAL SPEECH</button>
+      </div>
+
+      <!-- LIVE DICTIONARY DOWNLOAD SLIDER & MB COUNTER (~3.58 MB UNCOMPRESSED / ~0.95 MB GZIP) -->
+      <div class="dict-dl-bar" id="dictDlBar">
+        <span class="dict-dl-info" id="dictDlText">CMU DICT: 0.00 / 3.58 MB (0%)</span>
+        <input type="range" class="dict-dl-slider" id="dictDlSlider" min="0" max="100" value="5">
+        <button class="dict-dl-btn" id="dictDlActionBtn">⬇ SYNC 3.6MB</button>
+      </div>
+
+      <!-- COLORFUL STAGE WITH FLOATING QUICK-ACTION BUTTONS INSIDE CORNERS -->
+      <div class="stage-box" id="stageBox">
+        <canvas id="stageCanvas"></canvas>
+        <div class="stage-hud-top">
+          <span class="hud-tag" id="tractHud">F1: 730 • F2: 1090</span>
+          <span class="hud-tag" id="noteHud">Pitch: 235 Hz</span>
+        </div>
+        <div class="stage-float-Controls">
+          <div class="float-btn-group">
+            <button class="mini-toggle" id="stopBtn">◼ STOP</button>
+            <button class="mini-toggle active" id="grooveBeatBtn">BEAT: ON</button>
+            <button class="mini-toggle" id="liveTypeBtn">TYPE SING: OFF</button>
+          </div>
+          <div class="float-btn-group">
+            <button class="mini-toggle" id="exportWavBtn">⬇ WAV</button>
+            <a class="save-link" id="saveWavLink" href="#" download="Melodii_Vocal.wav">SAVE</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- SINGLE-LINE TELEPROMPTER BAR -->
+      <div class="teleprompter-bar">
+        <div class="teleprompter-track" id="wordStream">Hello world, this is the rhythm of the night</div>
+        <span class="ipa-pill" id="ipaPill">READY</span>
+      </div>
+
+      <!-- COMPACT INPUT + INSTANT PHRASE STRIP -->
+      <div class="input-card">
+        <div class="input-row">
+          <textarea id="textInput" spellcheck="false" placeholder="Type words, questions (?), or stretched words (Hiiii!)...">Hello world, this is the rhythm of the night</textarea>
+          <button class="sing-btn" id="playCurrentBtn">▶ SING</button>
+        </div>
+
+        <div class="phrase-strip">
+          <button class="phrase-btn" data-phrase="The choir sang a solemn autumn hymn on Wednesday night">Hymn &amp; Choir Test</button>
+          <button class="phrase-btn" data-phrase="The colonel waited in the queue on the quiet island">Colonel &amp; Queue Test</button>
+          <button class="phrase-btn" data-phrase="The weather is so warm and heavenly today">Heavenly Weather</button>
+          <button class="phrase-btn" data-phrase="Hiiii! Lets goooo!">Hiiii! Lets goooo!</button>
+          <button class="phrase-btn" data-phrase="I am fat">I am fat</button>
+          <button class="phrase-btn" data-phrase="Hello World!, This is the rhythm of the night!">Rhythm of the night!</button>
+          <button class="phrase-btn" data-phrase="Hello?">Hello?</button>
+          <button class="phrase-btn" data-phrase="Floating softly through the golden clouds">Golden Clouds</button>
+        </div>
+
+        <div class="phonetic-preview" id="ipaPreview">
+          G2P: [HH EH L OW] [W ER L D] [DH IH S] [IH Z] [DH AH] [R IH DH AH M] [AH V] [DH AH] [N AY T]
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT/BOTTOM COLUMN: 16 VOICES + COMPACT 3x2 SHAPER -->
+    <div class="col">
+      <div class="sec-title">
+        <span id="statusLine">16 VOICES &amp; HEAVENLY INSTRUMENTS (SWIPE / TAP)</span>
+        <div class="sec-actions">
+          <button class="tab-chip" id="toggleG2PBtn">G2P</button>
+          <button class="tab-chip active" id="toggleShaperBtn">SLIDERS</button>
+        </div>
+      </div>
+
+      <div class="voice-grid">
+        <button class="voice-card active" data-voice="melodii_f">
+          <span class="v-icon">🎤</span>
+          <div class="v-meta"><span class="v-name">Melodii (F)</span><span class="v-sub">Funk Chop</span></div>
+        </button>
+        <button class="voice-card" data-voice="melodii_m">
+          <span class="v-icon">🎧</span>
+          <div class="v-meta"><span class="v-name">Soul Boy (M)</span><span class="v-sub">Warm Groove</span></div>
+        </button>
+        <button class="voice-card" data-voice="whistle">
+          <span class="v-icon">😙</span>
+          <div class="v-meta"><span class="v-name">Whistle</span><span class="v-sub">Breeze Flute</span></div>
+        </button>
+        <button class="voice-card" data-voice="guitar">
+          <span class="v-icon">🎸</span>
+          <div class="v-meta"><span class="v-name">Guitar Talk</span><span class="v-sub">Wildlife Box</span></div>
+        </button>
+        <button class="voice-card" data-voice="celesta">
+          <span class="v-icon">🎐</span>
+          <div class="v-meta"><span class="v-name">Celesta Bell</span><span class="v-sub">Music Box</span></div>
+        </button>
+        <button class="voice-card" data-voice="ocarina">
+          <span class="v-icon">🪈</span>
+          <div class="v-meta"><span class="v-name">Ocarina</span><span class="v-sub">Sweet Clay</span></div>
+        </button>
+        <button class="voice-card" data-voice="kalimba">
+          <span class="v-icon">✨</span>
+          <div class="v-meta"><span class="v-name">Kalimba</span><span class="v-sub">Thumb Tines</span></div>
+        </button>
+        <button class="voice-card" data-voice="rhodes">
+          <span class="v-icon">🎹</span>
+          <div class="v-meta"><span class="v-name">Dream Keys</span><span class="v-sub">Warm Rhodes</span></div>
+        </button>
+        <button class="voice-card" data-voice="cello">
+          <span class="v-icon">🎻</span>
+          <div class="v-meta"><span class="v-name">Warm Cello</span><span class="v-sub">Bowed Soul</span></div>
+        </button>
+        <button class="voice-card" data-voice="seraph">
+          <span class="v-icon">🕊️</span>
+          <div class="v-meta"><span class="v-name">Seraph Air</span><span class="v-sub">Angel Halo</span></div>
+        </button>
+        <button class="voice-card" data-voice="choir">
+          <span class="v-icon">👼</span>
+          <div class="v-meta"><span class="v-name">Choir SATB</span><span class="v-sub">Cathedral</span></div>
+        </button>
+        <button class="voice-card" data-voice="human_f">
+          <span class="v-icon">👩</span>
+          <div class="v-meta"><span class="v-name">Human (F)</span><span class="v-sub">Natural Talk</span></div>
+        </button>
+        <button class="voice-card" data-voice="human_m">
+          <span class="v-icon">👨</span>
+          <div class="v-meta"><span class="v-name">Human (M)</span><span class="v-sub">Deep Talk</span></div>
+        </button>
+        <button class="voice-card" data-voice="child">
+          <span class="v-icon">🧒</span>
+          <div class="v-meta"><span class="v-name">Child Voice</span><span class="v-sub">Bright Kid</span></div>
+        </button>
+        <button class="voice-card" data-voice="old_man">
+          <span class="v-icon">👴</span>
+          <div class="v-meta"><span class="v-name">Old Man</span><span class="v-sub">Wise Elder</span></div>
+        </button>
+        <button class="voice-card" data-voice="animalese">
+          <span class="v-icon">🐾</span>
+          <div class="v-meta"><span class="v-name">Isabelle NPC</span><span class="v-sub">Cozy Village</span></div>
+        </button>
+      </div>
+
+      <!-- COMPACT 3x2 SLIDER SHAPER DECK -->
+      <div class="shaper-card" id="shaperCard">
+        <div class="style-row">
+          <button class="style-chip active" data-style="melodii">MELODII FUNK</button>
+          <button class="style-chip" data-style="speech">NATURAL TALK</button>
+          <button class="style-chip" data-style="hymn">HYMN CHORDS</button>
+          <button class="style-chip" data-style="rap">RHYTHM FLOW</button>
+        </div>
+
+        <div class="sliders-grid">
+          <div class="s-item">
+            <div class="s-top"><span>PITCH</span><span class="s-val" id="lblPitch">0 st</span></div>
+            <input type="range" id="rngPitch" min="-12" max="12" step="1" value="0">
+          </div>
+          <div class="s-item">
+            <div class="s-top"><span>THROAT</span><span class="s-val" id="lblTract">100%</span></div>
+            <input type="range" id="rngTract" min="72" max="138" step="1" value="100">
+          </div>
+          <div class="s-item">
+            <div class="s-top"><span>SPEED</span><span class="s-val" id="lblSpeed">1.0x</span></div>
+            <input type="range" id="rngSpeed" min="60" max="190" step="5" value="100">
+          </div>
+          <div class="s-item">
+            <div class="s-top"><span>SCOOP</span><span class="s-val" id="lblScoop">105%</span></div>
+            <input type="range" id="rngScoop" min="0" max="150" step="5" value="105">
+          </div>
+          <div class="s-item">
+            <div class="s-top"><span>BREATH</span><span class="s-val" id="lblBreath">90%</span></div>
+            <input type="range" id="rngBreath" min="0" max="150" step="5" value="90">
+          </div>
+          <div class="s-item">
+            <div class="s-top"><span>REVERB</span><span class="s-val" id="lblReverb">100%</span></div>
+            <input type="range" id="rngReverb" min="0" max="150" step="5" value="100">
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// 1. ARPABET / IPA PHONEME ACOUSTIC TABLE (WITH TRUE DIPHTHONG GLIDES)
+// ============================================================================
+const PHONEMES = {
+  AA: { f1: 750, f2: 1180, f3: 2540, open: 0.90, wide: 0.70, isVowel: true, dur: 1.15 },
+  AE: { f1: 680, f2: 1720, f3: 2450, open: 0.82, wide: 0.85, isVowel: true, dur: 1.10 },
+  AH: { f1: 620, f2: 1220, f3: 2500, open: 0.65, wide: 0.62, isVowel: true, dur: 0.95 },
+  AO: { f1: 560, f2: 880,  f3: 2520, open: 0.72, wide: 0.45, isVowel: true, dur: 1.15 },
+  EH: { f1: 530, f2: 1840, f3: 2480, open: 0.62, wide: 0.82, isVowel: true, dur: 1.00 },
+  ER: { f1: 470, f2: 1380, f3: 1690, open: 0.55, wide: 0.52, isVowel: true, dur: 1.20 },
+  IH: { f1: 390, f2: 1990, f3: 2550, open: 0.45, wide: 0.86, isVowel: true, dur: 0.90 },
+  IY: { f1: 280, f2: 2290, f3: 3010, open: 0.35, wide: 0.95, isVowel: true, dur: 1.15 },
+  UH: { f1: 440, f2: 1020, f3: 2380, open: 0.48, wide: 0.45, isVowel: true, dur: 0.90 },
+  UW: { f1: 310, f2: 850,  f3: 2350, f1End: 290, f2End: 720,  f3End: 2300, open: 0.38, wide: 0.30, isVowel: true, dur: 1.20 },
+
+  EY: { f1: 510, f2: 1900, f3: 2520, f1End: 290, f2End: 2280, f3End: 2950, open: 0.68, wide: 0.92, isVowel: true, dur: 1.30 },
+  AY: { f1: 740, f2: 1180, f3: 2520, f1End: 300, f2End: 2220, f3End: 2900, open: 0.88, wide: 0.90, isVowel: true, dur: 1.35 },
+  OW: { f1: 490, f2: 920,  f3: 2480, f1End: 320, f2End: 740,  f3End: 2350, open: 0.74, wide: 0.38, isVowel: true, dur: 1.30 },
+  AW: { f1: 740, f2: 1220, f3: 2520, f1End: 340, f2End: 780,  f3End: 2360, open: 0.88, wide: 0.40, isVowel: true, dur: 1.35 },
+  OY: { f1: 520, f2: 860,  f3: 2480, f1End: 290, f2End: 2240, f3End: 2920, open: 0.72, wide: 0.88, isVowel: true, dur: 1.35 },
+
+  DH: { f1: 380, f2: 1680, f3: 2580, open: 0.32, wide: 0.68, isVowel: false, voicedCons: true, dur: 0.52, noiseF: 2600, noiseG: 0.04 },
+  TH: { f1: 400, f2: 1720, f3: 2650, open: 0.32, wide: 0.68, isVowel: false, voicedCons: false, dur: 0.55, noiseF: 3800, noiseG: 0.09 },
+
+  L:  { f1: 370, f2: 1120, f3: 2560, open: 0.45, wide: 0.64, isVowel: false, voicedCons: true, glide: true, dur: 0.60 },
+  R:  { f1: 410, f2: 1280, f3: 1660, open: 0.48, wide: 0.50, isVowel: false, voicedCons: true, glide: true, dur: 0.60 },
+  W:  { f1: 290, f2: 620,  f3: 2180, open: 0.30, wide: 0.28, isVowel: false, voicedCons: true, glide: true, dur: 0.58 },
+  Y:  { f1: 280, f2: 2180, f3: 2920, open: 0.36, wide: 0.90, isVowel: false, voicedCons: true, glide: true, dur: 0.55 },
+
+  M:  { f1: 270, f2: 920,  f3: 2220, open: 0.12, wide: 0.54, isVowel: false, voicedCons: true, nasal: true, dur: 0.62 },
+  N:  { f1: 300, f2: 1380, f3: 2420, open: 0.20, wide: 0.62, isVowel: false, voicedCons: true, nasal: true, dur: 0.58 },
+  NG: { f1: 290, f2: 1920, f3: 2550, open: 0.25, wide: 0.66, isVowel: false, voicedCons: true, nasal: true, dur: 0.65 },
+
+  B:  { f1: 340, f2: 1080, f3: 2320, open: 0.22, wide: 0.52, isVowel: false, voicedCons: true, plosive: true, dur: 0.45, noiseF: 950,  noiseG: 0.05 },
+  D:  { f1: 360, f2: 1700, f3: 2600, open: 0.32, wide: 0.70, isVowel: false, voicedCons: true, plosive: true, dur: 0.45, noiseF: 2700, noiseG: 0.06 },
+  G:  { f1: 390, f2: 1480, f3: 2420, open: 0.40, wide: 0.62, isVowel: false, voicedCons: true, plosive: true, dur: 0.45, noiseF: 1800, noiseG: 0.06 },
+  V:  { f1: 370, f2: 1240, f3: 2400, open: 0.26, wide: 0.58, isVowel: false, voicedCons: true, dur: 0.52, noiseF: 1850, noiseG: 0.08 },
+  Z:  { f1: 320, f2: 1880, f3: 2800, open: 0.26, wide: 0.78, isVowel: false, voicedCons: true, dur: 0.55, noiseF: 4200, noiseG: 0.10 },
+  ZH: { f1: 340, f2: 1960, f3: 2660, open: 0.34, wide: 0.64, isVowel: false, voicedCons: true, dur: 0.56, noiseF: 3000, noiseG: 0.10 },
+  JH: { f1: 350, f2: 1980, f3: 2760, open: 0.36, wide: 0.76, isVowel: false, voicedCons: true, plosive: true, dur: 0.55, noiseF: 2900, noiseG: 0.11 },
+
+  HH: { f1: 580, f2: 1550, f3: 2520, open: 0.58, wide: 0.66, isVowel: false, voicedCons: false, dur: 0.48, noiseF: 1600, noiseG: 0.09 },
+  P:  { f1: 350, f2: 1100, f3: 2300, open: 0.18, wide: 0.50, isVowel: false, voicedCons: false, plosive: true, dur: 0.42, noiseF: 1150, noiseG: 0.08 },
+  T:  { f1: 360, f2: 1750, f3: 2650, open: 0.28, wide: 0.72, isVowel: false, voicedCons: false, plosive: true, dur: 0.42, noiseF: 3600, noiseG: 0.09 },
+  K:  { f1: 410, f2: 1450, f3: 2400, open: 0.40, wide: 0.62, isVowel: false, voicedCons: false, plosive: true, dur: 0.44, noiseF: 2150, noiseG: 0.09 },
+  F:  { f1: 400, f2: 1300, f3: 2400, open: 0.24, wide: 0.60, isVowel: false, voicedCons: false, dur: 0.52, noiseF: 2300, noiseG: 0.09 },
+  S:  { f1: 320, f2: 1900, f3: 2800, open: 0.24, wide: 0.80, isVowel: false, voicedCons: false, dur: 0.54, noiseF: 4800, noiseG: 0.11 },
+  SH: { f1: 340, f2: 1980, f3: 2680, open: 0.34, wide: 0.62, isVowel: false, voicedCons: false, dur: 0.56, noiseF: 3100, noiseG: 0.12 },
+  CH: { f1: 350, f2: 1960, f3: 2740, open: 0.35, wide: 0.72, isVowel: false, voicedCons: false, plosive: true, dur: 0.54, noiseF: 3200, noiseG: 0.12 }
+};
+
+// ============================================================================
+// 2. OXFORD + CMU DEEP PHONETIC LEXICON, MORPHOLOGICAL STEMMER & 135K CLOUD CACHE
+// ============================================================================
+const OXFORD_LEXICON = {
+  I: ['AY1'], IM: ['AY1', 'M'], IVE: ['AY1', 'V'], ILL: ['AY1', 'L'], ID: ['AY1', 'D'],
+  AM: ['AE1', 'M'], FAT: ['F', 'AE1', 'T'], HI: ['HH', 'AY1'], HEY: ['HH', 'EY1'],
+  LET: ['L', 'EH1', 'T'], LETS: ['L', 'EH1', 'T', 'S'], YES: ['Y', 'EH1', 'S'],
+  YAY: ['Y', 'EY1'], YO: ['Y', 'OW1'], BRO: ['B', 'R', 'OW1'], OKAY: ['OW2', 'K', 'EY1'],
+  MY: ['M', 'AY1'], BY: ['B', 'AY1'], TRY: ['T', 'R', 'AY1'], CRY: ['K', 'R', 'AY1'],
+  FLY: ['F', 'L', 'AY1'], SKY: ['S', 'K', 'AY1'], SHY: ['SH', 'AY1'], DRY: ['D', 'R', 'AY1'],
+  THE: ['DH', 'AH0'], THIS: ['DH', 'IH1', 'S'], THAT: ['DH', 'AE1', 'T'],
+  THESE: ['DH', 'IY1', 'Z'], THOSE: ['DH', 'OW1', 'Z'], THERE: ['DH', 'EH1', 'R'],
+  THEIR: ['DH', 'EH1', 'R'], THEY: ['DH', 'EY1'], THEM: ['DH', 'EH1', 'M'],
+  THEN: ['DH', 'EH1', 'N'], THAN: ['DH', 'AE1', 'N'], THOUGH: ['DH', 'OW1'],
+  WITH: ['W', 'IH1', 'DH'], WEATHER: ['W', 'EH1', 'DH', 'ER0'], RHYTHM: ['R', 'IH1', 'DH', 'AH0', 'M'],
+  BROTHER: ['B', 'R', 'AH1', 'DH', 'ER0'], MOTHER: ['M', 'AH1', 'DH', 'ER0'], FATHER: ['F', 'AA1', 'DH', 'ER0'],
+  TOGETHER: ['T', 'AH0', 'G', 'EH1', 'DH', 'ER0'], OTHER: ['AH1', 'DH', 'ER0'], ANOTHER: ['AH0', 'N', 'AH1', 'DH', 'ER0'],
+  THROUGH: ['TH', 'R', 'UW1'], THOUGHT: ['TH', 'AO1', 'T'], THINK: ['TH', 'IH1', 'NG', 'K'],
+  THING: ['TH', 'IH1', 'NG'], THINGS: ['TH', 'IH1', 'NG', 'Z'], HELLO: ['HH', 'EH0', 'L', 'OW1'],
+  WORLD: ['W', 'ER1', 'L', 'D'], WILDLIFE: ['W', 'AY1', 'L', 'D', 'L', 'AY2', 'F'],
+  HEAVEN: ['HH', 'EH1', 'V', 'AH0', 'N'], HEAVENLY: ['HH', 'EH1', 'V', 'AH0', 'N', 'L', 'IY0'],
+  MELODY: ['M', 'EH1', 'L', 'AH0', 'D', 'IY0'], MELODII: ['M', 'EH1', 'L', 'OW0', 'D', 'IY1'],
+  SCRATCHING: ['S', 'K', 'R', 'AE1', 'CH', 'IH0', 'NG'], HALLELUJAH: ['HH', 'AE2', 'L', 'AH0', 'L', 'UW1', 'Y', 'AH0'],
+  WELCOME: ['W', 'EH1', 'L', 'K', 'AH0', 'M'], HENNY: ['HH', 'EH1', 'N', 'IY0'],
+  HENRY: ['HH', 'EH1', 'N', 'R', 'IY0'], GEMINI: ['JH', 'EH1', 'M', 'AH0', 'N', 'AY2'],
+  TODAY: ['T', 'AH0', 'D', 'EY1'], TONIGHT: ['T', 'AH0', 'N', 'AY1', 'T'],
+  NIGHT: ['N', 'AY1', 'T'], LIGHT: ['L', 'AY1', 'T'], RIGHT: ['R', 'AY1', 'T'],
+  HIGH: ['HH', 'AY1'], CLOUDS: ['K', 'L', 'AW1', 'D', 'Z'], GOLDEN: ['G', 'OW1', 'L', 'D', 'AH0', 'N'],
+  FLOATING: ['F', 'L', 'OW1', 'T', 'IH0', 'NG'], MAGIC: ['M', 'AE1', 'JH', 'IH0', 'K'],
+  MUSIC: ['M', 'Y', 'UW1', 'Z', 'IH0', 'K'], LOVE: ['L', 'AH1', 'V'], LOVED: ['L', 'AH1', 'V', 'D'],
+  SOME: ['S', 'AH1', 'M'], COME: ['K', 'AH1', 'M'], ONE: ['W', 'AH1', 'N'], TWO: ['T', 'UW1'],
+  SEVEN: ['S', 'EH1', 'V', 'AH0', 'N'], WINDOWS: ['W', 'IH1', 'N', 'D', 'OW0', 'Z'],
+  GUITAR: ['G', 'IH0', 'T', 'AA1', 'R'], HORSES: ['HH', 'AO1', 'R', 'S', 'IH0', 'Z'],
+  RUNNING: ['R', 'AH1', 'N', 'IH0', 'NG'], BEACH: ['B', 'IY1', 'CH'], AGAIN: ['AH0', 'G', 'EH1', 'N'],
+  PLEASE: ['P', 'L', 'IY1', 'Z'], PLAYED: ['P', 'L', 'EY1', 'D'], PLAY: ['P', 'L', 'EY1'],
+  YOU: ['Y', 'UW1'], YOUR: ['Y', 'AO1', 'R'], ARE: ['AA1', 'R'], WERE: ['W', 'ER1'],
+  WAS: ['W', 'AA1', 'Z'], IS: ['IH1', 'Z'], AS: ['AE1', 'Z'], HAS: ['HH', 'AE1', 'Z'],
+  HIS: ['HH', 'IH1', 'Z'], OF: ['AH0', 'V'], TO: ['T', 'UW0'], DO: ['D', 'UW1'],
+  WHO: ['HH', 'UW1'], WHAT: ['W', 'AH1', 'T'], WHERE: ['W', 'EH1', 'R'], WHEN: ['W', 'EH1', 'N'],
+  WHY: ['W', 'AY1'], HOW: ['HH', 'AW1'], NOW: ['N', 'AW1'], DOWN: ['D', 'AW1', 'N'],
+  SO: ['S', 'OW1'], GO: ['G', 'OW1'], NO: ['N', 'OW1'], WARM: ['W', 'AO1', 'R', 'M'],
+  PURE: ['P', 'Y', 'UH1', 'R'], NOSTALGIA: ['N', 'AA0', 'S', 'T', 'AE1', 'L', 'JH', 'AH0']
+};
+
+// Embedded high-priority irregular English dictionary (silent letters, Greek/French/Latin roots, sight words)
+const EMBEDDED_IRREGULAR_PACK = [
+  "HYMN:HH IH1 M|HYMNS:HH IH1 M Z|HYMNAL:HH IH1 M N AH0 L|AUTUMN:AO1 T AH0 M|SOLEMN:S AA1 L AH0 M|COLUMN:K AA1 L AH0 M|COLUMNS:K AA1 L AH0 M Z|CONDEMN:K AH0 N D EH1 M|DAMN:D AE1 M",
+  "COLONEL:K ER1 N AH0 L|CHOIR:K W AY1 ER0|CHOIRS:K W AY1 ER0 Z|QUEUE:K Y UW1|QUEUES:K Y UW1 Z|ISLAND:AY1 L AH0 N D|ISLANDS:AY1 L AH0 N D Z|AISLE:AY1 L|AISLES:AY1 L Z|ISLE:AY1 L",
+  "SUBTLE:S AH1 T AH0 L|SUBTLY:S AH1 T L IY0|DEBT:D EH1 T|DEBTS:D EH1 T S|DEBTOR:D EH1 T ER0|DOUBT:D AW1 T|DOUBTS:D AW1 T S|DOUBTFUL:D AW1 T F AH0 L|RECEIPT:R IH0 S IY1 T|RECEIPTS:R IH0 S IY1 T S",
+  "YACHT:Y AA1 T|YACHTS:Y AA1 T S|SWORD:S AO1 R D|SWORDS:S AO1 R D Z|ANSWER:AE1 N S ER0|ANSWERS:AE1 N S ER0 Z|ANSWERED:AE1 N S ER0 D|WHOLE:HH OW1 L|WHOSE:HH UW1 Z|WHOM:HH UW1 M",
+  "KNIGHT:N AY1 T|KNIGHTS:N AY1 T S|KNIFE:N AY1 F|KNIVES:N AY1 V Z|KNEE:N IY1|KNEES:N IY1 Z|KNEEL:N IY1 L|KNOW:N OW1|KNOWS:N OW1 Z|KNEW:N UW1|KNOWN:N OW1 N|KNOWLEDGE:N AA1 L AH0 JH",
+  "KNOCK:N AA1 K|KNOT:N AA1 T|KNIT:N IH1 T|KNUCKLE:N AH1 K AH0 L|WRITE:R AY1 T|WRITES:R AY1 T S|WROTE:R OW1 T|WRITTEN:R IH1 T AH0 N|WRITER:R AY1 T ER0|WRONG:R AO1 NG|WRIST:R IH1 S T|WRAP:R AE1 P|WRATH:R AE1 TH|WRECK:R EH1 K|WRESTLE:R EH1 S AH0 L|WRINKLE:R IH1 NG K AH0 L",
+  "GNAW:N AO1|GNOME:N OW1 M|GNAT:N AE1 T|SIGN:S AY1 N|SIGNS:S AY1 N Z|SIGNED:S AY1 N D|DESIGN:D IH0 Z AY1 N|DESIGNED:D IH0 Z AY1 N D|RESIGN:R IH0 Z AY1 N|ASSIGN:AH0 S AY1 N|ALIGN:AH0 L AY1 N|BENIGN:B IH0 N AY1 N|FOREIGN:F AO1 R AH0 N|FOREIGNER:F AO1 R AH0 N ER0|REIGN:R EY1 N|SOVEREIGN:S AA1 V R AH0 N|CAMPAIGN:K AE0 M P EY1 N|CHAMPAGNE:SH AE0 M P EY1 N|COLOGNE:K AH0 L OW1 N|LASAGNA:L AH0 Z AA1 N Y AH0|BOLOGNA:B AH0 L OW1 N IY0",
+  "PSALM:S AA1 M|PSALMS:S AA1 M Z|PSYCHOLOGY:S AY2 K AA1 L AH0 JH IY0|PSYCHOLOGIST:S AY0 K AA1 L AH0 JH AH0 S T|PSYCHIC:S AY1 K IH0 K|PSYCHO:S AY1 K OW0|PSYCHIATRIST:S AY0 K AY1 AH0 T R AH0 S T|PNEUMONIA:N UW0 M OW1 N Y AH0|PTERODACTYL:T EH2 R AH0 D AE1 K T AH0 L|PSEUDO:S UW1 D OW0",
+  "PLUMBER:P L AH1 M ER0|PLUMBING:P L AH1 M IH0 NG|CLIMB:K L AY1 M|CLIMBS:K L AY1 M Z|CLIMBED:K L AY1 M D|CLIMBING:K L AY1 M IH0 NG|CLIMBER:K L AY1 M ER0|COMB:K OW1 M|TOMB:T UW1 M|WOMB:W UW1 M|BOMB:B AA1 M|BOMBS:B AA1 M Z|THUMB:TH AH1 M|THUMBS:TH AH1 M Z|NUMB:N AH1 M|CRUMB:K R AH1 M|DUMB:D AH1 M|LAMB:L AE1 M|LIMB:L IH1 M",
+  "CASTLE:K AE1 S AH0 L|CASTLES:K AE1 S AH0 L Z|WHISTLE:W IH1 S AH0 L|WHISTLES:W IH1 S AH0 L Z|WHISTLING:W IH1 S L IH0 NG|LISTEN:L IH1 S AH0 N|LISTENS:L IH1 S AH0 N Z|LISTENING:L IH1 S AH0 N IH0 NG|LISTENED:L IH1 S AH0 N D|FASTEN:F AE1 S AH0 N|GLISTEN:G L IH1 S AH0 N|MOISTEN:M OY1 S AH0 N|SOFTEN:S AO1 F AH0 N|OFTEN:AO1 F AH0 N|CHRISTMAS:K R IH1 S M AH0 S|HUSTLE:HH AH1 S AH0 L|BUSTLE:B AH1 S AH0 L|RUSTLE:R AH1 S AH0 L|THISTLE:TH IH1 S AH0 L|APOSTLE:AH0 P AA1 S AH0 L|MORTGAGE:M AO1 R G IH0 JH|CUPBOARD:K AH1 B ER0 D|RASPBERRY:R AE1 Z B EH2 R IY0",
+  "WEDNESDAY:W EH1 N Z D EY0|FEBRUARY:F EH1 B Y UW0 EH2 R IY0|LIBRARY:L AY1 B R EH2 R IY0|SECRETARY:S EH1 K R AH0 T EH2 R IY0|COMFORTABLE:K AH1 M F T ER0 B AH0 L|VEGETABLE:V EH1 JH T AH0 B AH0 L|VEGETABLES:V EH1 JH T AH0 B AH0 L Z|CHOCOLATE:CH AO1 K L AH0 T|BUSINESS:B IH1 Z N AH0 S|BUSY:B IH1 Z IY0|BURY:B EH1 R IY0|BURIED:B EH1 R IY0 D|MINUTE:M IH1 N AH0 T|MINUTES:M IH1 N AH0 T S|CIRCUIT:S ER1 K AH0 T|BISCUIT:B IH1 S K AH0 T|LETTUCE:L EH1 T AH0 S|WOMAN:W UH1 M AH0 N|WOMEN:W IH1 M AH0 N",
+  "BUILD:B IH1 L D|BUILDS:B IH1 L D Z|BUILT:B IH1 L T|BUILDING:B IH1 L D IH0 NG|GUILT:G IH1 L T|GUILTY:G IH1 L T IY0|GUIDE:G AY1 D|GUIDES:G AY1 D Z|GUEST:G EH1 S T|GUESTS:G EH1 S T S|GUESS:G EH1 S|GUARD:G AA1 R D|GUARANTEE:G EH2 R AH0 N T IY1|GUITAR:G IH0 T AA1 R|DISGUISE:D IH0 S G AY1 Z|TONGUE:T AH1 NG|VOGUE:V OW1 G|ROGUE:R OW1 G|LEAGUE:L IY1 G|COLLEAGUE:K AA1 L IY0 G|FATIGUE:F AH0 T IY1 G|INTRIGUE:IH0 N T R IY1 G|PLAGUE:P L EY1 G|VAGUE:V EY1 G|DIALOGUE:D AY1 AH0 L AO0 G|CATALOGUE:K AE1 T AH0 L AO0 G",
+  "UNIQUE:Y UW0 N IY1 K|ANTIQUE:AE0 N T IY1 K|TECHNIQUE:T EH0 K N IY1 K|BOUTIQUE:B UW0 T IY1 K|CRITIQUE:K R IH0 T IY1 K|PHYSIQUE:F IH0 Z IY1 K|MYSTIQUE:M IH0 S T IY1 K|MOSQUE:M AA1 S K|PLAQUE:P L AE1 K|OPAQUE:OW0 P EY1 K|CONQUER:K AA1 NG K ER0|LIQUOR:L IH1 K ER0",
+  "LAUGH:L AE1 F|LAUGHS:L AE1 F S|LAUGHED:L AE1 F T|LAUGHING:L AE1 F IH0 NG|LAUGHTER:L AE1 F T ER0|COUGH:K AO1 F|COUGHS:K AO1 F S|ROUGH:R AH1 F|TOUGH:T AH1 F|ENOUGH:IH0 N AH1 F|SLOUGH:S L AW1|TROUGH:T R AO1 F|DOUGH:D OW1|ALTHOUGH:AO2 L DH OW1|THOROUGH:TH ER1 OW0|BOROUGH:B ER1 OW0|BOUGH:B AW1|PLOUGH:P L AW1|DROUGHT:D R AW1 T",
+  "HEIGHT:HH AY1 T|HEIGHTS:HH AY1 T S|WEIGHT:W EY1 T|WEIGHTS:W EY1 T S|EIGHT:EY1 T|EIGHTH:EY1 T TH|EIGHTEEN:EY0 T IY1 N|EIGHTY:EY1 T IY0|FREIGHT:F R EY1 T|NEIGHBOR:N EY1 B ER0|NEIGHBORS:N EY1 B ER0 Z|NEIGHBORHOOD:N EY1 B ER0 HH UH2 D|WEIGH:W EY1|WEIGHS:W EY1 Z|SLEIGH:S L EY1|VEIN:V EY1 N|VEINS:V EY1 N Z|REIN:R EY1 N|VEIL:V EY1 L|HEIR:EH1 R|HEIRESS:EH1 R AH0 S|WEIRD:W IH1 R D|SEIZE:S IY1 Z|LEISURE:L IY1 ZH ER0|CEILING:S IY1 L IH0 NG|RECEIVE:R IH0 S IY1 V|RECEIVED:R IH0 S IY1 V D|DECEIVE:D IH0 S IY1 V|CONCEIVE:K AH0 N S IY1 V|PERCEIVE:P ER0 S IY1 V",
+  "CHAOS:K EY1 AA0 S|CHASM:K AE1 Z AH0 M|CHARISMA:K ER0 IH1 Z M AH0|CHEMIST:K EH1 M AH0 S T|CHEMICAL:K EH1 M IH0 K AH0 L|CHEMISTRY:K EH1 M AH0 S T R IY0|CHORUS:K AO1 R AH0 S|CHORD:K AO1 R D|CHORDS:K AO1 R D Z|ANCHOR:AE1 NG K ER0|ECHO:EH1 K OW0|EPOCH:EH1 P AH0 K|MONARCH:M AA1 N AA0 R K|STOMACH:S T AH1 M AH0 K|ACHE:EY1 K|HEADACHE:HH EH1 D EY2 K|ORCHESTRA:AO1 R K AH0 S T R AH0|ORCHID:AO1 R K AH0 D|ARCHIVE:AA1 R K AY2 V|ARCHIVES:AA1 R K AY2 V Z|ARCHITECT:AA1 R K AH0 T EH2 K T|ARCHITECTURE:AA1 R K AH0 T EH2 K CH ER0|HIERARCHY:HH AY1 ER0 AA2 R K IY0|ANARCHY:AE1 N ER0 K IY0|MECHANIC:M AH0 K AE1 N IH0 K|MECHANICAL:M AH0 K AE1 N IH0 K AH0 L|MACHINE:M AH0 SH IY1 N|MACHINES:M AH0 SH IY1 N Z|MACHINERY:M AH0 SH IY1 N ER0 IY0|CHEF:SH EH1 F|CHIVALRY:SH IH1 V AH0 L R IY0|CHANDELIER:SH AE2 N D AH0 L IH1 R|CHARADE:SH ER0 EY1 D|CHAUFFEUR:SH OW1 F ER0|PARACHUTE:P EH1 R AH0 SH UW2 T|BROCHURE:B R OW0 SH UH1 R|CACHET:K AE0 SH EY1|CLICHE:K L IY0 SH EY1|PISTACHIO:P IH0 S T AE1 SH IY0 OW2|MUSTACHE:M AH1 S T AE2 SH",
+  "SCHEDULE:S K EH1 JH UW0 L|SCHEDULES:S K EH1 JH UW0 L Z|SCHEME:S K IY1 M|SCHOOL:S K UW1 L|SCHOOLS:S K UW1 L Z|SCHOLAR:S K AA1 L ER0|SCHOLARSHIP:S K AA1 L ER0 SH IH2 P|SCIENCE:S AY1 AH0 N S|SCIENTIST:S AY1 AH0 N T AH0 S T|SCIENTIFIC:S AY2 AH0 N T IH1 F IH0 K|CONSCIENCE:K AA1 N SH AH0 N S|CONSCIOUS:K AA1 N SH AH0 S|SCISSORS:S IH1 Z ER0 Z|MUSCLE:M AH1 S AH0 L|MUSCLES:M AH1 S AH0 L Z|SCENE:S IY1 N|SCENERY:S IY1 N ER0 IY0|SCENT:S EH1 N T|FASCINATE:F AE1 S AH0 N EY2 T|FASCINATING:F AE1 S AH0 N EY2 T IH0 NG|CRESCENT:K R EH1 S AH0 N T|DESCEND:D IH0 S EH1 N D|ASCEND:AH0 S EH1 N D|DISCIPLE:D IH0 S AY1 P AH0 L",
+  "OCEAN:OW1 SH AH0 N|OCEANS:OW1 SH AH0 N Z|SPECIAL:S P EH1 SH AH0 L|ESPECIALLY:AH0 S P EH1 SH L IY0|SOCIAL:S OW1 SH AH0 L|OFFICIAL:AH0 F IH1 SH AH0 L|ARTIFICIAL:AA2 R T AH0 F IH1 SH AH0 L|COMMERCIAL:K AH0 M ER1 SH AH0 L|FINANCIAL:F AH0 N AE1 N SH AH0 L|ANCIENT:EY1 N SH AH0 N T|PATIENT:P EY1 SH AH0 N T|PATIENCE:P EY1 SH AH0 N S|EFFICIENT:IH0 F IH1 SH AH0 N T|SUFFICIENT:S AH0 F IH1 SH AH0 N T|PRECIOUS:P R EH1 SH AH0 S|DELICIOUS:D IH0 L IH1 SH AH0 S|SUSPICIOUS:S AH0 S P IH1 SH AH0 S|ANXIOUS:AE1 NG K SH AH0 S|MUSICIAN:M Y UW0 Z IH1 SH AH0 N|PHYSICIAN:F AH0 Z IH1 SH AH0 N|MAGICIAN:M AH0 JH IH1 SH AH0 N|POLITICIAN:P AA2 L AH0 T IH1 SH AH0 N",
+  "USUAL:Y UW1 ZH UW0 AH0 L|USUALLY:Y UW1 ZH UW0 AH0 L IY0|VISUAL:V IH1 ZH UW0 AH0 L|CASUAL:K AE1 ZH UW0 AH0 L|MEASURE:M EH1 ZH ER0|TREASURE:T R EH1 ZH ER0|PLEASURE:P L EH1 ZH ER0|CLOSURE:K L OW1 ZH ER0|EXPOSURE:IH0 K S P OW1 ZH ER0|VISION:V IH1 ZH AH0 N|DECISION:D IH0 S IH1 ZH AH0 N|PRECISION:P R IH0 S IH1 ZH AH0 N|TELEVISION:T EH1 L AH0 V IH2 ZH AH0 N|CONFUSION:K AH0 N F Y UW1 ZH AH0 N|ILLUSION:IH0 L UW1 ZH AH0 N|VERSION:V ER1 ZH AH0 N|ASIA:EY1 ZH AH0|REGIME:R AH0 ZH IY1 M|GENRE:ZH AA1 N R AH0|BEIGE:B EY1 ZH|GARAGE:G ER0 AA1 ZH|MASSAGE:M AH0 S AA1 ZH|MIRAGE:M IH0 R AA1 ZH|CAMOUFLAGE:K AE1 M AH0 F L AA2 ZH|PRESTIGE:P R EH0 S T IY1 ZH|BOURGEOIS:B UH1 R ZH W AA2",
+  "RENDEZVOUS:R AA1 N D EY0 V UW2|DEBUT:D EY1 B Y UW0|DEBRIS:D AH0 B R IY1|BALLET:B AE0 L EY1|BUFFET:B AH0 F EY1|GOURMET:G UH0 R M EY1|CHALET:SH AE0 L EY1|VALET:V AE0 L EY1|CROCHET:K R OW0 SH EY1|RICOCHET:R IH1 K AH0 SH EY2|BOUQUET:B OW0 K EY1|CROISSANT:K R W AA0 S AA1 N|FIANCE:F IY2 AA0 N S EY1|RESUME:R EH1 Z AH0 M EY2|CAFE:K AE0 F EY1|NAIVE:N AA0 IY1 V|ENTREE:AA1 N T R EY2|FAUX:F OW1|COUP:K UW1|CORPS:K AO1 R|VISCOUNT:V AY1 K AW2 N T|INDICT:IH0 N D AY1 T|INDICTED:IH0 N D AY1 T AH0 D|INDICTMENT:IH0 N D AY1 T M AH0 N T|LIEUTENANT:L UW0 T EH1 N AH0 N T|SERGEANT:S AA1 R JH AH0 N T|SOLDIER:S OW1 L JH ER0|SOLDIERS:S OW1 L JH ER0 Z",
+  "EPITOME:IH0 P IH1 T AH0 M IY0|HYPERBOLE:HH AY0 P ER1 B AH0 L IY0|CATASTROPHE:K AH0 T AE1 S T R AH0 F IY0|APOSTROPHE:AH0 P AA1 S T R AH0 F IY0|RECIPE:R EH1 S AH0 P IY0|RECIPES:R EH1 S AH0 P IY0 Z|ANEMONE:AH0 N EH1 M AH0 N IY0|SIMILE:S IH1 M AH0 L IY0|FINALE:F AH0 N AE1 L IY0|KARAOKE:K EH2 R IY0 OW1 K IY0|ORIGAMI:AO2 R AH0 G AA1 M IY0|TSUNAMI:S UW0 N AA1 M IY0|SPAGHETTI:S P AH0 G EH1 T IY0|CONFETTI:K AH0 N F EH1 T IY0|GRAFFITI:G R AH0 F IY1 T IY0|BROCCOLI:B R AA1 K AH0 L IY0|ZUCCHINI:Z UW0 K IY1 N IY0|TORTILLA:T AO0 R T IY1 Y AH0|QUESADILLA:K EY2 S AH0 D IY1 Y AH0|JALAPENO:HH AA2 L AH0 P EY1 N Y OW0",
+  "EYE:AY1|EYES:AY1 Z|BUY:B AY1|BUYS:B AY1 Z|BOUGHT:B AO1 T|GUY:G AY1|GUYS:G AY1 Z|KEY:K IY1|KEYS:K IY1 Z|MONKEY:M AH1 NG K IY0|DONKEY:D AA1 NG K IY0|MONEY:M AH1 N IY0|HONEY:HH AH1 N IY0|JOURNEY:JH ER1 N IY0|ATTORNEY:AH0 T ER1 N IY0|VALLEY:V AE1 L IY0|ALLEY:AE1 L IY0|OBEY:OW0 B EY1|SURVEY:S ER1 V EY2|CONVEY:K AH0 N V EY1|PREY:P R EY1|GREY:G R EY1|GRAY:G R EY1|BEAUTY:B Y UW1 T IY0|BEAUTIFUL:B Y UW1 T AH0 F AH0 L|PEOPLE:P IY1 P AH0 L|LEOPARD:L EH1 P ER0 D|JEOPARDY:JH EH1 P ER0 D IY0|FRIEND:F R EH1 N D|FRIENDS:F R EH1 N D Z|VIEW:V Y UW1|REVIEW:R IY0 V Y UW1|INTERVIEW:IH1 N T ER0 V Y UW2|QUIET:K W AY1 AH0 T|QUITE:K W AY1 T|CHOIR:K W AY1 ER0|IRON:AY1 ER0 N|IRONY:AY1 R AH0 N IY0|WORRY:W ER1 IY0|WORRIED:W ER1 IY0 D|BLOOD:B L AH1 D|FLOOD:F L AH1 D|DOOR:D AO1 R|FLOOR:F L AO1 R|POOR:P UH1 R|SURE:SH UH1 R|SUGAR:SH UH1 G ER0|PUT:P UH1 T|PUSH:P UH1 SH|PULL:P UH1 L|FULL:F UH1 L|BULL:B UH1 L|BUSH:B UH1 SH|WOLF:W UH1 L F|WOLVES:W UH1 L V Z|BOSOM:B UH1 Z AH0 M|COULD:K UH1 D|WOULD:W UH1 D|SHOULD:SH UH1 D|WALK:W AO1 K|WALKED:W AO1 K T|WALKING:W AO1 K IH0 NG|TALK:T AO1 K|TALKED:T AO1 K T|TALKING:T AO1 K IH0 NG|CHALK:CH AO1 K|STALK:S T AO1 K|CALM:K AA1 M|PALM:P AA1 M|BALM:B AA1 M|ALMOND:AA1 M AH0 N D|SALMON:S AE1 M AH0 N|HALF:HH AE1 F|HALVES:HH AE1 V Z|CALF:K AE1 F|BEHALF:B IH0 HH AE1 F|FOLK:F OW1 K|FOLKS:F OW1 K S|YOLK:Y OW1 K|COLONEL:K ER1 N AH0 L",
+  "MYTH:M IH1 TH|MYTHS:M IH1 TH S|GYM:JH IH1 M|LYNX:L IH1 NG K S|NYMPH:N IH1 M F|SYRUP:S IH1 R AH0 P|SYSTEM:S IH1 S T AH0 M|SYSTEMS:S IH1 S T AH0 M Z|SYMBOL:S IH1 M B AH0 L|SYMPTOM:S IH1 M P T AH0 M|CRYSTAL:K R IH1 S T AH0 L|CRYPT:K R IH1 P T|MYSTIC:M IH1 S T IH0 K|MYSTERY:M IH1 S T ER0 IY0|OXYGEN:AA1 K S AH0 JH AH0 N|PHYSICS:F IH1 Z IH0 K S|PHYSICAL:F IH1 Z IH0 K AH0 L|TYPICAL:T IH1 P IH0 K AH0 L|LYRIC:L IH1 R IH0 K|LYRICS:L IH1 R IH0 K S|CYNICAL:S IH1 N IH0 K AH0 L|PYRAMID:P IH1 R AH0 M IH0 D|SYMPATHY:S IH1 M P AH0 TH IY0|SYMPHONY:S IH1 M F AH0 N IY0|SYNTHESIS:S IH1 N TH AH0 S AH0 S|SYNTHESIZER:S IH1 N TH AH0 S AY2 Z ER0",
+  "TYRANT:T AY1 R AH0 N T|CYCLE:S AY1 K AH0 L|CYBER:S AY1 B ER0|DYNAMIC:D AY0 N AE1 M IH0 K|HYGIENE:HH AY1 JH IY2 N|HYBRID:HH AY1 B R AH0 D|HYDROGEN:HH AY1 D R AH0 JH AH0 N|HYPHEN:HH AY1 F AH0 N|PYTHON:P AY1 TH AA2 N|TYPHOON:T AY0 F UW1 N|TYPE:T AY1 P|TYPES:T AY1 P S|STYLE:S T AY1 L|STYLES:S T AY1 L Z|RHYME:R AY1 M|RHYMES:R AY1 M Z|THYME:T AY1 M|ANALYZE:AE1 N AH0 L AY2 Z|PARALYZE:P EH1 R AH0 L AY2 Z|CHAOS:K EY1 AA0 S|AESTHETIC:EH0 S TH EH1 T IH0 K|PHOENIX:F IY1 N IH0 K S|AMOEOBA:AH0 M IY1 B AH0|SUBPOENA:S AH0 P IY1 N AH0"
+];
+
+// Unpack embedded irregular dictionary into OXFORD_LEXICON at startup
+EMBEDDED_IRREGULAR_PACK.forEach(chunk => {
+  chunk.split('|').forEach(entry => {
+    const [word, phStr] = entry.split(':');
+    if (word && phStr) {
+      OXFORD_LEXICON[word] = phStr.trim().split(/\s+/);
+    }
+  });
+});
+
+// Unstressed English function words (automatically softened in Real Speech Mode)
+const FUNCTION_WORDS = new Set([
+  'THE', 'A', 'AN', 'TO', 'OF', 'IN', 'ON', 'FOR', 'WITH', 'AS', 'AT', 'BY', 'FROM',
+  'THAT', 'THIS', 'IS', 'WAS', 'ARE', 'WERE', 'BE', 'BEEN', 'AM', 'AND', 'OR', 'BUT',
+  'IF', 'SO', 'IT', 'ITS', 'HIS', 'HER', 'OUR', 'YOUR', 'THEIR', 'MY', 'ME', 'HIM',
+  'US', 'THEM', 'WE', 'YOU', 'HE', 'SHE', 'THEY', 'CAN', 'WILL', 'JUST', 'THAN', 'THEN'
+]);
+
+const UNVOICED_CONSONANTS = new Set(['P', 'T', 'K', 'F', 'TH', 'S', 'SH', 'CH', 'HH']);
+const SIBILANT_CONSONANTS = new Set(['S', 'Z', 'SH', 'ZH', 'CH', 'JH']);
+
+function stripStressCode(phToken) {
+  const base = phToken.replace(/[012]$/, '');
+  const m = phToken.match(/([012])$/);
+  const stress = m ? parseInt(m[1], 10) : (PHONEMES[base] && PHONEMES[base].isVowel ? 1 : 0);
+  return { code: base, stress };
+}
+
+function normalizeLexiconEntry(arr) {
+  return arr.map(tok => stripStressCode(tok).code);
+}
+
+function getLexiconEntryWithStress(wordUpper) {
+  const raw = OXFORD_LEXICON[wordUpper];
+  if (!raw) return null;
+  return raw.map(tok => stripStressCode(tok));
+}
+
+// Morphological Stemmer: Deduces plurals (-s/-es/-ies), past tense (-ed/-ied),gerunds (-ing), adverbs (-ly), comparatives (-er/-est)
+function lookupWordWithMorphology(w) {
+  const direct = getLexiconEntryWithStress(w);
+  if (direct) return direct;
+
+  // 1. -IES -> -Y (e.g., "SYMPHONIES" -> "SYMPHONY")
+  if (w.length > 4 && w.endsWith('IES')) {
+    const stem = getLexiconEntryWithStress(w.slice(0, -3) + 'Y');
+    if (stem) return [...stem, { code: 'Z', stress: 0 }];
+  }
+  // 2. -VES -> -F / -FE (e.g., "WOLVES" -> "WOLF")
+  if (w.length > 4 && w.endsWith('VES')) {
+    const stemF = getLexiconEntryWithStress(w.slice(0, -3) + 'F') || getLexiconEntryWithStress(w.slice(0, -3) + 'FE');
+    if (stemF) return [...stemF.slice(0, -1), { code: 'V', stress: 0 }, { code: 'Z', stress: 0 }];
+  }
+  // 3. -ES / -S plural & 3rd-person singular
+  if (w.length > 3 && w.endsWith('S') && !w.endsWith('SS') && !w.endsWith('US') && !w.endsWith('IS')) {
+    const stemEs = w.endsWith('ES') ? getLexiconEntryWithStress(w.slice(0, -2)) : null;
+    const stemS = getLexiconEntryWithStress(w.slice(0, -1));
+    const base = stemS || stemEs;
+    if (base && base.length > 0) {
+      const lastPh = base[base.length - 1].code;
+      if (SIBILANT_CONSONANTS.has(lastPh)) {
+        return [...base, { code: 'IH', stress: 0 }, { code: 'Z', stress: 0 }];
+      } else if (UNVOICED_CONSONANTS.has(lastPh)) {
+        return [...base, { code: 'S', stress: 0 }];
+      } else {
+        return [...base, { code: 'Z', stress: 0 }];
+      }
+    }
+  }
+  // 4. -IED -> -Y (e.g., "WORRIED" -> "WORRY")
+  if (w.length > 4 && w.endsWith('IED')) {
+    const stem = getLexiconEntryWithStress(w.slice(0, -3) + 'Y');
+    if (stem) return [...stem, { code: 'D', stress: 0 }];
+  }
+  // 5. -ED past tense (e.g., "HYMNED", "WHISTLED", "FASTENED", "ARCHIVED")
+  if (w.length > 4 && w.endsWith('ED')) {
+    let base = getLexiconEntryWithStress(w.slice(0, -1)) || getLexiconEntryWithStress(w.slice(0, -2));
+    if (!base && w.length > 5 && w[w.length - 3] === w[w.length - 4]) {
+      base = getLexiconEntryWithStress(w.slice(0, -3));
+    }
+    if (base && base.length > 0) {
+      const lastPh = base[base.length - 1].code;
+      if (lastPh === 'T' || lastPh === 'D') {
+        return [...base, { code: 'IH', stress: 0 }, { code: 'D', stress: 0 }];
+      } else if (UNVOICED_CONSONANTS.has(lastPh)) {
+        return [...base, { code: 'T', stress: 0 }];
+      } else {
+        return [...base, { code: 'D', stress: 0 }];
+      }
+    }
+  }
+  // 6. -ING participle (e.g., "WHISTLING", "CLIMBING", "QUEUING", "DOUBTING")
+  if (w.length > 5 && w.endsWith('ING')) {
+    let base = getLexiconEntryWithStress(w.slice(0, -3)) || getLexiconEntryWithStress(w.slice(0, -3) + 'E');
+    if (!base && w.length > 6 && w[w.length - 4] === w[w.length - 5]) {
+      base = getLexiconEntryWithStress(w.slice(0, -4));
+    }
+    if (base) {
+      return [...base, { code: 'IH', stress: 0 }, { code: 'NG', stress: 0 }];
+    }
+  }
+  // 7. -LY adverb (e.g., "SOLEMNLY", "QUIETLY")
+  if (w.length > 4 && w.endsWith('LY')) {
+    const base = getLexiconEntryWithStress(w.slice(0, -2));
+    if (base) return [...base, { code: 'L', stress: 0 }, { code: 'IY', stress: 0 }];
+  }
+  // 8. -ER / -EST / -NESS / -FUL / -LESS
+  if (w.length > 4 && w.endsWith('ER')) {
+    const base = getLexiconEntryWithStress(w.slice(0, -2)) || getLexiconEntryWithStress(w.slice(0, -1));
+    if (base) return [...base, { code: 'ER', stress: 0 }];
+  }
+  if (w.length > 5 && w.endsWith('NESS')) {
+    const base = getLexiconEntryWithStress(w.slice(0, -4));
+    if (base) return [...base, { code: 'N', stress: 0 }, { code: 'AH', stress: 0 }, { code: 'S', stress: 0 }];
+  }
+  return null;
+}
+
+function isVowelLetter(ch) {
+  return ch === 'A' || ch === 'E' || ch === 'I' || ch === 'O' || ch === 'U' || ch === 'Y';
+}
+
+// Detects stretched words like "Hiiii", "goooo", "soooo", "yaaaay" and normalizes them to their root word
+function analyzeAndNormalizeStretch(upperWord) {
+  if (!upperWord || upperWord.length <= 2) {
+    return { normalizedWord: upperWord, extraStretchChars: 0 };
+  }
+  if (OXFORD_LEXICON[upperWord] !== undefined) {
+    return { normalizedWord: upperWord, extraStretchChars: 0 };
+  }
+
+  let extraStretchChars = 0;
+  // Collapse runs of 3+ identical letters (e.g. "HIIII" -> "HI", "GOOOO" -> "GO", "PLEAAASE" -> "PLEASE")
+  let collapsedOne = '';
+  let collapsedTwo = '';
+  let i = 0;
+  while (i < upperWord.length) {
+    const ch = upperWord[i];
+    let runLen = 1;
+    while (i + runLen < upperWord.length && upperWord[i + runLen] === ch) {
+      runLen++;
+    }
+    if (runLen >= 3) {
+      extraStretchChars += (runLen - 1);
+      collapsedOne += ch;
+      collapsedTwo += ch + ch;
+    } else if (runLen === 2 && isVowelLetter(ch) && i + runLen === upperWord.length) {
+      // Trailing double vowel like "HII" or "SOO" where single vowel "HI" or "SO" is in lexicon
+      const testSingle = upperWord.slice(0, -1);
+      if (OXFORD_LEXICON[testSingle] !== undefined) {
+        extraStretchChars += 1;
+        collapsedOne += ch;
+        collapsedTwo += ch;
+      } else {
+        collapsedOne += ch + ch;
+        collapsedTwo += ch + ch;
+      }
+    } else {
+      collapsedOne += ch.repeat(runLen);
+      collapsedTwo += ch.repeat(runLen);
+    }
+    i += runLen;
+  }
+
+  if (extraStretchChars > 0) {
+    if (OXFORD_LEXICON[collapsedOne] !== undefined) {
+      return { normalizedWord: collapsedOne, extraStretchChars };
+    }
+    if (OXFORD_LEXICON[collapsedTwo] !== undefined) {
+      return { normalizedWord: collapsedTwo, extraStretchChars: Math.max(1, extraStretchChars - 1) };
+    }
+    return { normalizedWord: collapsedOne, extraStretchChars };
+  }
+
+  return { normalizedWord: upperWord, extraStretchChars: 0 };
+}
+
+// Deterministic lexical fingerprint so single words each get their own distinct melodic contour
+function computeLexicalSeed(wordStr, phonemes) {
+  let hash = 0;
+  const s = (wordStr || '') + ':' + (phonemes ? phonemes.join('-') : '');
+  for (let i = 0; i < s.length; i++) {
+    hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function compileWordToPhonemesWithStress(rawWord) {
+  const rawUpper = rawWord.toUpperCase().replace(/[^A-Z]/g, '');
+  if (rawUpper.length === 0) return [];
+
+  const morphDirect = lookupWordWithMorphology(rawUpper);
+  if (morphDirect) return morphDirect;
+
+  const { normalizedWord: w } = analyzeAndNormalizeStretch(rawUpper);
+  const morphNorm = lookupWordWithMorphology(w);
+  if (morphNorm) return morphNorm;
+
+  if (w === 'I') return [{ code: 'AY', stress: 1 }];
+  if (w === 'A') return [{ code: 'AH', stress: 0 }];
+
+  // Deductive Orthographic Silent-Letter & Context Rule Compiler
+  let cleanW = w;
+  // Terminal silent -MB (climb, comb, bomb, thumb) & terminal silent -MN (hymn, column, autumn, solemn)
+  cleanW = cleanW.replace(/MB$/, 'M').replace(/MN$/, 'M');
+  // Silent -STLE / -STEN (castle, whistle, listen, fasten)
+  cleanW = cleanW.replace(/STLE$/, 'SEL').replace(/STEN$/, 'SEN');
+  // Initial silent KN-, GN-, WR-, PS-, PN-, PT-
+  cleanW = cleanW.replace(/^(KN|GN)/, 'N').replace(/^WR/, 'R').replace(/^PS/, 'S').replace(/^PN/, 'N').replace(/^PT/, 'T');
+
+  const out = [];
+  const len = cleanW.length;
+
+  let hasSilentE = false;
+  if (len >= 4 && cleanW[len - 1] === 'E' && isVowelLetter(cleanW[len - 2]) === false && isVowelLetter(cleanW[len - 3])) {
+    const tail3 = cleanW.slice(len - 3);
+    if ((tail3 === 'THE') === false && (tail3 === 'NGE') === false) {
+      hasSilentE = true;
+    }
+  }
+
+  const parseLimit = hasSilentE ? len - 1 : len;
+  let i = 0;
+  let vowelSeenCount = 0;
+
+  function pushPh(code, stressVal) {
+    const isV = PHONEMES[code] && PHONEMES[code].isVowel;
+    let st = stressVal;
+    if (st === undefined) {
+      st = isV ? (vowelSeenCount === 0 ? 1 : 0) : 0;
+    }
+    if (isV) vowelSeenCount++;
+    out.push({ code, stress: st });
+  }
+
+  while (i < parseLimit) {
+    const rem = cleanW.slice(i);
+    const ch = cleanW[i];
+    const next = i + 1 < parseLimit ? cleanW[i + 1] : '';
+    const pair = ch + next;
+
+    if (rem.indexOf('TION') === 0 || rem.indexOf('SION') === 0) { pushPh('SH', 0); pushPh('AH', 0); pushPh('N', 0); i += 4; continue; }
+    if (rem.indexOf('CIAN') === 0) { pushPh('SH', 0); pushPh('AH', 0); pushPh('N', 0); i += 4; continue; }
+    if (rem.indexOf('CIOUS') === 0 || rem.indexOf('TIOUS') === 0) { pushPh('SH', 0); pushPh('AH', 0); pushPh('S', 0); i += 5; continue; }
+    if (rem.indexOf('SURE') === 0) { pushPh('ZH', 0); pushPh('ER', 0); i += 4; continue; }
+    if (rem.indexOf('TURE') === 0) { pushPh('CH', 0); pushPh('ER', 0); i += 4; continue; }
+    if (rem.indexOf('OUGH') === 0) { pushPh('OW', 1); i += 4; continue; }
+    if (rem.indexOf('AUGH') === 0) { pushPh('AO', 1); i += 4; continue; }
+    if (rem.indexOf('EIGH') === 0) { pushPh('EY', 1); i += 4; continue; }
+    if (rem.indexOf('IGH') === 0)  { pushPh('AY', 1); i += 3; continue; }
+    if (rem.indexOf('ING') === 0 && i + 3 === len) { pushPh('IH', 0); pushPh('NG', 0); i += 3; continue; }
+    if (rem.indexOf('TCH') === 0)  { pushPh('CH', 0); i += 3; continue; }
+    if (rem.indexOf('DGE') === 0)  { pushPh('JH', 0); i += 3; continue; }
+    if (rem.indexOf('QUE') === 0 && i + 3 === len) { pushPh('K', 0); i += 3; continue; }
+    if (rem.indexOf('GUE') === 0 && i + 3 === len) { pushPh('G', 0); i += 3; continue; }
+
+    if (pair === 'TH') {
+      const prevIsVowel = i > 0 && isVowelLetter(cleanW[i - 1]);
+      const nextIsVowel = i + 2 < len && isVowelLetter(cleanW[i + 2]);
+      pushPh((prevIsVowel && nextIsVowel) ? 'DH' : 'TH', 0);
+      i += 2;
+      continue;
+    }
+    if (pair === 'SH') { pushPh('SH', 0); i += 2; continue; }
+    if (pair === 'CH') { pushPh('CH', 0); i += 2; continue; }
+    if (pair === 'PH') { pushPh('F', 0);  i += 2; continue; }
+    if (pair === 'WH') { pushPh('W', 0);  i += 2; continue; }
+    if (pair === 'NG') { pushPh('NG', 0); i += 2; continue; }
+    if (pair === 'QU') { pushPh('K', 0); pushPh('W', 0); i += 2; continue; }
+    if (pair === 'CK') { pushPh('K', 0);  i += 2; continue; }
+    if (pair === 'GH') {
+      if (i === 0) pushPh('G', 0);
+      i += 2;
+      continue;
+    }
+
+    if (pair === 'OO' || pair === 'EW' || pair === 'UE' || pair === 'UI') { pushPh('UW'); i += 2; continue; }
+    if (pair === 'EE' || pair === 'EA' || pair === 'IE') { pushPh('IY'); i += 2; continue; }
+    if (pair === 'AI' || pair === 'AY' || pair === 'EI') { pushPh('EY'); i += 2; continue; }
+    if (pair === 'OA' || pair === 'OE') { pushPh('OW'); i += 2; continue; }
+    if (pair === 'OU' || pair === 'OW') { pushPh('AW'); i += 2; continue; }
+    if (pair === 'OI' || pair === 'OY') { pushPh('OY'); i += 2; continue; }
+    if (pair === 'AU' || pair === 'AW') { pushPh('AO'); i += 2; continue; }
+    if (pair === 'ER' || pair === 'IR' || pair === 'UR') { pushPh('ER'); i += 2; continue; }
+    if (pair === 'AR') { pushPh('AA'); pushPh('R', 0); i += 2; continue; }
+    if (pair === 'OR') { pushPh('AO'); pushPh('R', 0); i += 2; continue; }
+
+    if (ch === next && isVowelLetter(ch) === false) {
+      i++;
+      continue;
+    }
+
+    const isSilentETarget = hasSilentE && (i === len - 3);
+    if (ch === 'A') { pushPh(isSilentETarget ? 'EY' : 'AE'); i++; continue; }
+    if (ch === 'E') { pushPh((isSilentETarget || i === len - 1) ? 'IY' : 'EH'); i++; continue; }
+    if (ch === 'I') { pushPh((isSilentETarget || (i === len - 1 && len <= 2)) ? 'AY' : 'IH'); i++; continue; }
+    if (ch === 'O') { pushPh((isSilentETarget || i === len - 1) ? 'OW' : 'AA'); i++; continue; }
+    if (ch === 'U') { pushPh(isSilentETarget ? 'UW' : 'AH'); i++; continue; }
+    if (ch === 'Y') {
+      if (i === 0 && len > 1) pushPh('Y', 0);
+      else if (isSilentETarget || (i === len - 1 && len <= 3)) pushPh('AY', 1);
+      else if (i > 0 && i < len - 1 && !isVowelLetter(cleanW[i - 1]) && !isVowelLetter(next)) {
+        // Internal consonant-bounded Y (like HYMN, MYTH, GYM, SYSTEM, LYRIC) -> short IH
+        pushPh('IH', 1);
+      } else {
+        pushPh('IY', 0);
+      }
+      i++;
+      continue;
+    }
+
+    if (ch === 'C') { pushPh((next === 'E' || next === 'I' || next === 'Y') ? 'S' : 'K', 0); i++; continue; }
+    if (ch === 'G') { pushPh((next === 'E' || next === 'I' || next === 'Y') ? 'JH' : 'G', 0); i++; continue; }
+    if (ch === 'J') { pushPh('JH', 0); i++; continue; }
+    if (ch === 'H') { pushPh('HH', 0); i++; continue; }
+    if (ch === 'X') { pushPh('K', 0); pushPh('S', 0); i++; continue; }
+    if (PHONEMES[ch] !== undefined) {
+      pushPh(ch, 0);
+    }
+    i++;
+  }
+
+  return out.length > 0 ? out : [{ code: 'AH', stress: 0 }];
+}
+
+function compileWordToPhonemes(rawWord) {
+  return compileWordToPhonemesWithStress(rawWord).map(p => p.code);
+}
+
+// ============================================================================
+// 2B. AUTOMATIC 135,000-WORD CMU PRONOUNCING DICTIONARY SYNC + INDEXEDDB CACHE
+// ============================================================================
+let cmuDictLoadedCount = Object.keys(OXFORD_LEXICON).length;
+let cmuFullLoaded = false;
+let isCmuSyncing = false;
+
+function updateDictProgressUI(pct, labelText, isDone = false) {
+  const slider = document.getElementById('dictDlSlider');
+  const txt = document.getElementById('dictDlText');
+  const actBtn = document.getElementById('dictDlActionBtn');
+  const topBtn = document.getElementById('dictStatusBtn');
+  if (slider) slider.value = Math.max(0, Math.min(100, pct));
+  if (txt) txt.textContent = labelText;
+  if (actBtn) {
+    actBtn.textContent = isDone ? '📂 IMPORT .DICT' : (isCmuSyncing ? `${Math.round(pct)}%` : '⬇ SYNC 3.6MB');
+  }
+  if (topBtn && isDone) {
+    topBtn.textContent = `📚 DICT: ${(cmuDictLoadedCount / 1000).toFixed(0)}K CMU ✓`;
+    topBtn.classList.add('loaded');
+  }
+}
+
+async function parseRawCMUDictTextAsync(rawText, byteLen = 3580000) {
+  const lines = rawText.split(/\r?\n/);
+  const totalLines = lines.length;
+  let added = 0;
+  const chunkSize = 18000;
+  const totalMB = (byteLen / (1024 * 1024)).toFixed(2);
+
+  for (let start = 0; start < totalLines; start += chunkSize) {
+    const end = Math.min(totalLines, start + chunkSize);
+    for (let i = start; i < end; i++) {
+      const line = lines[i];
+      if (!line || line.charCodeAt(0) === 59) continue;
+      const spIdx = line.indexOf(' ');
+      if (spIdx <= 0) continue;
+      let word = line.slice(0, spIdx).toUpperCase();
+      if (word.indexOf('(') !== -1) continue;
+      word = word.replace(/[^A-Z]/g, '');
+      if (!word) continue;
+      const phPart = line.slice(spIdx + 1).trim();
+      const commentIdx = phPart.indexOf('#');
+      const cleanPh = (commentIdx !== -1 ? phPart.slice(0, commentIdx) : phPart).trim();
+      if (!cleanPh) continue;
+      OXFORD_LEXICON[word] = cleanPh.split(/\s+/);
+      added++;
+    }
+    const parsePct = 80 + Math.round(((end / totalLines) * 20));
+    updateDictProgressUI(parsePct, `INDEXING: ${(added / 1000).toFixed(0)}K words (${parsePct}%)`, false);
+    await new Promise(r => setTimeout(r, 8));
+  }
+
+  cmuDictLoadedCount = Object.keys(OXFORD_LEXICON).length;
+  cmuFullLoaded = added > 20000;
+  updateDictProgressUI(100, `CMU 135K READY (${totalMB} MB • ${(cmuDictLoadedCount / 1000).toFixed(0)}K words)`, true);
+  return added;
+}
+
+function openCMUIndexedDB() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error('IndexedDB unavailable'));
+    const req = indexedDB.open('MelodiiCMUDictDB', 1);
+    req.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('dictStore')) {
+        db.createObjectStore('dictStore');
+      }
+    };
+    req.onsuccess = e => resolve(e.target.result);
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+async function loadOrSyncFullCMUDict(manualTrigger = false) {
+  if (isCmuSyncing) return;
+  isCmuSyncing = true;
+  const expectedTotalBytes = 3585000; // ~3.58 MB uncompressed CMU dict
+
+  try {
+    const db = await openCMUIndexedDB();
+    const cachedText = await new Promise((resolve) => {
+      const tx = db.transaction('dictStore', 'readonly');
+      const getReq = tx.objectStore('dictStore').get('cmudict_raw');
+      getReq.onsuccess = () => resolve(getReq.result || null);
+      getReq.onerror = () => resolve(null);
+    });
+
+    if (cachedText && cachedText.length > 500000) {
+      updateDictProgressUI(80, 'LOADING CACHED 3.58 MB DICT...', false);
+      await parseRawCMUDictTextAsync(cachedText, cachedText.length);
+      updatePhoneticInspector();
+      isCmuSyncing = false;
+      return;
+    }
+  } catch (e) {}
+
+  const urls = [
+    'https://cdn.jsdelivr.net/gh/cmusphinx/cmudict@master/cmudict.dict',
+    'https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict'
+  ];
+
+  for (const url of urls) {
+    try {
+      updateDictProgressUI(4, 'CONNECTING TO CMU 135K CDN (3.58 MB)...', false);
+      const res = await fetch(url);
+      if (!res.ok) continue;
+
+      let text = '';
+      let receivedBytes = 0;
+
+      if (res.body && res.body.getReader) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        const chunks = [];
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            receivedBytes += value.byteLength;
+            chunks.push(decoder.decode(value, { stream: true }));
+            const mbNow = (receivedBytes / (1024 * 1024)).toFixed(2);
+            const dlPct = Math.min(78, Math.round((receivedBytes / expectedTotalBytes) * 78));
+            updateDictProgressUI(dlPct, `DOWNLOADING: ${mbNow} / 3.58 MB (${dlPct}%)`, false);
+          }
+        }
+        chunks.push(decoder.decode());
+        text = chunks.join('');
+      } else {
+        text = await res.text();
+        receivedBytes = text.length;
+      }
+
+      if (text && text.length > 500000) {
+        await parseRawCMUDictTextAsync(text, receivedBytes || text.length);
+        updatePhoneticInspector();
+        try {
+          const db = await openCMUIndexedDB();
+          const tx = db.transaction('dictStore', 'readwrite');
+          tx.objectStore('dictStore').put(text, 'cmudict_raw');
+        } catch (dbErr) {}
+        isCmuSyncing = false;
+        return;
+      }
+    } catch (fetchErr) {}
+  }
+
+  isCmuSyncing = false;
+  updateDictProgressUI(15, `OFFLINE CORE+ (${cmuDictLoadedCount} irregular words)`, false);
+  if (manualTrigger) {
+    const fileIn = document.getElementById('customDictInput');
+    if (fileIn) fileIn.click();
+  }
+}
+
+function parseSentenceToWords(text) {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return [];
+  const rawTokens = trimmed.split(/\s+/);
+  const words = [];
+
+  const sentenceHasQuestion = /\?\s*$/.test(trimmed);
+  const sentenceHasExclaim = /!\s*$/.test(trimmed);
+
+  rawTokens.forEach((raw) => {
+    const clean = raw.replace(/[^a-zA-Z]/g, '');
+    const hasComma = raw.indexOf(',') >= 0 || raw.indexOf(';') >= 0 || raw.indexOf(':') >= 0;
+    const hasPeriod = raw.indexOf('.') >= 0;
+    const tokenQuestion = raw.indexOf('?') >= 0;
+    const tokenExclaim = raw.indexOf('!') >= 0;
+    const stretchInfo = analyzeAndNormalizeStretch(clean.toUpperCase());
+    const phObjs = compileWordToPhonemesWithStress(clean);
+    const phList = phObjs.map(p => p.code);
+    const stressList = phObjs.map(p => p.stress);
+
+    if (phList.length > 0) {
+      const wIdx = words.length;
+      const stretchMult = stretchInfo.extraStretchChars > 0
+        ? Math.min(3.4, 1.0 + stretchInfo.extraStretchChars * 0.48)
+        : 1.0;
+
+      const isFunctionWord = FUNCTION_WORDS.has(stretchInfo.normalizedWord) && !tokenExclaim && !tokenQuestion;
+
+      words.push({
+        wordIdx: wIdx,
+        display: raw,
+        cleanUpper: stretchInfo.normalizedWord,
+        phonemes: phList,
+        stresses: stressList,
+        isFunctionWord,
+        stretchMult,
+        isStretched: stretchInfo.extraStretchChars > 0,
+        lexicalSeed: computeLexicalSeed(stretchInfo.normalizedWord, phList),
+        hasComma,
+        hasPeriod,
+        pauseAfter: (hasPeriod || tokenQuestion || tokenExclaim) ? 0.18 : (hasComma ? 0.12 : 0.032),
+        isQuestion: tokenQuestion,
+        isExclaim: tokenExclaim
+      });
+    }
+  });
+
+  if (words.length > 0) {
+    const lastWord = words[words.length - 1];
+    if (sentenceHasQuestion) lastWord.isQuestion = true;
+    if (sentenceHasExclaim) lastWord.isExclaim = true;
+  }
+
+  return words;
+}
+
+// ============================================================================
+// 3. 10 VOICE PROFILES (INCLUDING CHILD VOICE & OLD MAN VOICE)
+// ============================================================================
+const MELODII_MELODY_HZ = [
+  329.63, 369.99, 440.00, 493.88, 554.37, 493.88, 440.00, 369.99,
+  392.00, 440.00, 493.88, 587.33, 554.37, 493.88, 440.00, 329.63
+];
+
+// Diverse intra-word pitch contours (in semitones) so single words never all share one flat tune
+const SINGLE_WORD_ARCHETYPES_SEMI = [
+  [0, 3.0, 7.0, 4.0, 2.0],    // Soulful Rising Triad Arc
+  [4.0, 2.0, 0.0, 5.0, 7.0],  // Melodii Dip & Lift
+  [0, 5.0, 3.0, 7.0, 4.0],    // Bright Fourth Bounce
+  [7.0, 4.0, 2.0, 0.0, 3.0],  // Warm Cascade & Turn
+  [2.0, 5.0, 9.0, 7.0, 4.0],  // Neo-Soul Sixth Groove
+  [0, -2.0, 3.0, 5.0, 2.0]    // Expressive Scoop & Resolve
+];
+
+const SPEECH_CONTOUR_SEMI = [0, 1.2, 2.0, 1.5, 0.8, 0.2, -0.6, -1.5, -2.2];
+
+const CHOIR_CHORDS_HZ = [
+  [220.00, 277.18, 329.63, 440.00],
+  [196.00, 246.94, 293.66, 392.00],
+  [185.00, 220.00, 277.18, 369.99],
+  [164.81, 246.94, 329.63, 440.00]
+];
+
+const VOICE_PROFILES = {
+  melodii_f: {
+    name: 'Melodii (Female)',
+    baseHz: 235,
+    tractScale: 1.14,
+    syllableDur: 0.115,
+    defaultStyle: 'melodii',
+    vibRate: 5.5,
+    vibDepth: 4.5,
+    breath: 0.08,
+    sourceType: 'glottal'
+  },
+  melodii_m: {
+    name: 'Soul Boy (Male)',
+    baseHz: 132,
+    tractScale: 0.88,
+    syllableDur: 0.118,
+    defaultStyle: 'melodii',
+    vibRate: 5.2,
+    vibDepth: 3.8,
+    breath: 0.06,
+    sourceType: 'glottal'
+  },
+  human_f: {
+    name: 'Human Female',
+    baseHz: 215,
+    tractScale: 1.12,
+    syllableDur: 0.105,
+    defaultStyle: 'speech',
+    vibRate: 5.4,
+    vibDepth: 2.2,
+    breath: 0.09,
+    sourceType: 'glottal'
+  },
+  human_m: {
+    name: 'Human Male',
+    baseHz: 118,
+    tractScale: 0.85,
+    syllableDur: 0.108,
+    defaultStyle: 'speech',
+    vibRate: 5.0,
+    vibDepth: 1.8,
+    breath: 0.07,
+    sourceType: 'glottal'
+  },
+  child: {
+    name: 'Child Voice',
+    baseHz: 295,
+    tractScale: 1.30,
+    syllableDur: 0.098,
+    defaultStyle: 'speech',
+    vibRate: 5.8,
+    vibDepth: 3.0,
+    breath: 0.06,
+    sourceType: 'glottal'
+  },
+  old_man: {
+    name: 'Old Man Voice',
+    baseHz: 96,
+    tractScale: 0.80,
+    syllableDur: 0.142,
+    defaultStyle: 'speech',
+    vibRate: 4.3,
+    vibDepth: 9.5,
+    breath: 0.15,
+    sourceType: 'glottal'
+  },
+  choir: {
+    name: 'Angelic Choir',
+    baseHz: 220,
+    tractScale: 1.02,
+    syllableDur: 0.155,
+    defaultStyle: 'hymn',
+    vibRate: 5.2,
+    vibDepth: 6.0,
+    breath: 0.10,
+    sourceType: 'choir'
+  },
+  whistle: {
+    name: 'Soft Whistle',
+    baseHz: 440,
+    tractScale: 1.18,
+    syllableDur: 0.130,
+    defaultStyle: 'melodii',
+    vibRate: 5.5,
+    vibDepth: 7.5,
+    breath: 0.12,
+    sourceType: 'whistle'
+  },
+  guitar: {
+    name: 'Wildlife Guitar',
+    baseHz: 220,
+    tractScale: 1.00,
+    syllableDur: 0.120,
+    defaultStyle: 'melodii',
+    vibRate: 5.0,
+    vibDepth: 2.0,
+    breath: 0.04,
+    sourceType: 'guitar'
+  },
+  celesta: {
+    name: 'Celesta Bell',
+    baseHz: 350,
+    tractScale: 1.16,
+    syllableDur: 0.135,
+    defaultStyle: 'melodii',
+    vibRate: 5.2,
+    vibDepth: 2.5,
+    breath: 0.03,
+    sourceType: 'celesta'
+  },
+  ocarina: {
+    name: 'Ocarina Flute',
+    baseHz: 392,
+    tractScale: 1.14,
+    syllableDur: 0.132,
+    defaultStyle: 'melodii',
+    vibRate: 5.3,
+    vibDepth: 6.2,
+    breath: 0.10,
+    sourceType: 'ocarina'
+  },
+  kalimba: {
+    name: 'Kalimba Tine',
+    baseHz: 277.18,
+    tractScale: 1.08,
+    syllableDur: 0.118,
+    defaultStyle: 'melodii',
+    vibRate: 4.8,
+    vibDepth: 1.8,
+    breath: 0.03,
+    sourceType: 'kalimba'
+  },
+  rhodes: {
+    name: 'Dream Keys',
+    baseHz: 220,
+    tractScale: 1.05,
+    syllableDur: 0.140,
+    defaultStyle: 'hymn',
+    vibRate: 4.6,
+    vibDepth: 4.2,
+    breath: 0.04,
+    sourceType: 'rhodes'
+  },
+  cello: {
+    name: 'Warm Cello',
+    baseHz: 130.81,
+    tractScale: 0.88,
+    syllableDur: 0.145,
+    defaultStyle: 'melodii',
+    vibRate: 4.9,
+    vibDepth: 6.5,
+    breath: 0.05,
+    sourceType: 'cello'
+  },
+  seraph: {
+    name: 'Seraph Air',
+    baseHz: 293.66,
+    tractScale: 1.22,
+    syllableDur: 0.150,
+    defaultStyle: 'hymn',
+    vibRate: 5.4,
+    vibDepth: 6.8,
+    breath: 0.11,
+    sourceType: 'seraph'
+  },
+  animalese: {
+    name: 'Isabelle NPC',
+    baseHz: 330,
+    tractScale: 1.34,
+    syllableDur: 0.075,
+    defaultStyle: 'melodii',
+    vibRate: 6.0,
+    vibDepth: 3.0,
+    breath: 0.05,
+    sourceType: 'glottal'
+  }
+};
+
+// ============================================================================
+// 4. STATE, WINDOWED TELEPROMPTER & UI BINDINGS
+// ============================================================================
+let engineMode = 'melodii'; // 'melodii' (Mode 1: Original) or 'real_speech' (Mode 2: Real Speech)
+let activeVoice = 'melodii_f';
+let activeStyle = 'melodii';
+let pitchShiftSt = 0;
+let userTractMult = 1.00;
+let speedMult = 1.00;
+let scoopMult = 1.05;
+let breathMult = 0.90;
+let reverbMult = 1.00;
+let grooveBeatOn = true;
+let liveTypeOn = false;
+let liveTypeDebounceTimer = null;
+
+let audioCtx = null;
+let analyser = null;
+let vocalGraph = null;
+let glottalWave = null;
+let pinkNoiseBuf = null;
+
+// Streaming Lookahead Queue State
+let streamQueue = [];
+let streamCursorTime = 0;
+let streamQueueIdx = 0;
+let streamTimerID = null;
+let isStreaming = false;
+let currentWordsList = [];
+
+let visualTimeline = [];
+let mouthState = { open: 0.12, wide: 0.52, wordIdx: -1, ipa: 'READY', energy: 0 };
+
+const textInput = document.getElementById('textInput');
+const ipaPreview = document.getElementById('ipaPreview');
+const wordStream = document.getElementById('wordStream');
+const ipaPill = document.getElementById('ipaPill');
+const tractHud = document.getElementById('tractHud');
+const noteHud = document.getElementById('noteHud');
+const voiceBadge = document.getElementById('voiceBadge');
+const toneBadge = document.getElementById('toneBadge');
+const queueBadge = document.getElementById('queueBadge');
+const statusLine = document.getElementById('statusLine');
+const stopBtn = document.getElementById('stopBtn');
+const grooveBeatBtn = document.getElementById('grooveBeatBtn');
+const liveTypeBtn = document.getElementById('liveTypeBtn');
+const exportWavBtn = document.getElementById('exportWavBtn');
+const saveWavLink = document.getElementById('saveWavLink');
+const canvas = document.getElementById('stageCanvas');
+const ctx2d = canvas.getContext('2d');
+
+try {
+  const savedTxt = localStorage.getItem('melodii_mono_text');
+  if (savedTxt !== null && savedTxt.trim().length > 0) {
+    textInput.value = savedTxt;
+  }
+} catch (e) {}
+
+function renderWindowedTeleprompter(words, activeWordIdx) {
+  wordStream.innerHTML = '';
+  if (words.length === 0) {
+    wordStream.textContent = 'Type any phrase below...';
+    return;
+  }
+
+  const centerIdx = activeWordIdx >= 0 ? activeWordIdx : 0;
+  const startIdx = Math.max(0, centerIdx - 2);
+  const endIdx = Math.min(words.length, startIdx + 6);
+
+  if (startIdx > 0) {
+    const dots = document.createElement('span');
+    dots.className = 'tp-word';
+    dots.textContent = '...';
+    wordStream.appendChild(dots);
+  }
+
+  for (let i = startIdx; i < endIdx; i++) {
+    const span = document.createElement('span');
+    span.textContent = words[i].display;
+    if (i === activeWordIdx) {
+      span.className = 'tp-word tp-word-active';
+    } else if (activeWordIdx >= 0 && i < activeWordIdx) {
+      span.className = 'tp-word tp-word-done';
+    } else {
+      span.className = 'tp-word';
+    }
+    wordStream.appendChild(span);
+  }
+
+  if (endIdx < words.length) {
+    const dots = document.createElement('span');
+    dots.className = 'tp-word';
+    dots.textContent = '...';
+    wordStream.appendChild(dots);
+  }
+}
+
+function updatePhoneticInspector() {
+  const text = textInput.value;
+  try { localStorage.setItem('melodii_mono_text', text); } catch (e) {}
+
+  currentWordsList = parseSentenceToWords(text);
+
+  const hasQ = currentWordsList.some(w => w.isQuestion);
+  const hasE = currentWordsList.some(w => w.isExclaim);
+  const hasStretch = currentWordsList.some(w => w.isStretched);
+  let toneLabel = 'NEUTRAL';
+  if (hasQ && hasE) toneLabel = 'EXCITED QUESTION ?!';
+  else if (hasQ) toneLabel = 'QUESTIONING ?';
+  else if (hasE) toneLabel = 'EXCITED !';
+  else if (hasStretch) toneLabel = 'STRETCHED ~';
+  if (toneBadge) toneBadge.textContent = toneLabel;
+
+  const previewWords = currentWordsList.slice(0, 24).map(w => {
+    const tag = (w.isQuestion && w.isExclaim) ? '?!' : (w.isQuestion ? '?' : (w.isExclaim ? '!' : ''));
+    const stretchTag = w.isStretched ? `~${w.stretchMult.toFixed(1)}x` : '';
+    return `[${w.phonemes.join(' ')}${stretchTag}${tag ? ' ' + tag : ''}]`;
+  }).join(' ');
+  const suffix = currentWordsList.length > 24 ? ` ... (+${currentWordsList.length - 24} more words)` : '';
+  ipaPreview.textContent = 'G2P: ' + (previewWords.length > 0 ? previewWords + suffix : '[READY]');
+  renderWindowedTeleprompter(currentWordsList, -1);
+}
+updatePhoneticInspector();
+
+// Bind Sliders
+document.getElementById('rngPitch').addEventListener('input', e => {
+  pitchShiftSt = parseInt(e.target.value, 10);
+  const s = pitchShiftSt > 0 ? '+' : '';
+  document.getElementById('lblPitch').textContent = `${s}${pitchShiftSt} st`;
+});
+document.getElementById('rngTract').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10);
+  userTractMult = v / 100;
+  document.getElementById('lblTract').textContent = v + '%';
+});
+document.getElementById('rngSpeed').addEventListener('input', e => {
+  speedMult = parseInt(e.target.value, 10) / 100;
+  document.getElementById('lblSpeed').textContent = speedMult.toFixed(1) + 'x';
+});
+document.getElementById('rngScoop').addEventListener('input', e => {
+  scoopMult = parseInt(e.target.value, 10) / 100;
+  document.getElementById('lblScoop').textContent = e.target.value + '%';
+});
+document.getElementById('rngBreath').addEventListener('input', e => {
+  breathMult = parseInt(e.target.value, 10) / 100;
+  document.getElementById('lblBreath').textContent = e.target.value + '%';
+});
+document.getElementById('rngReverb').addEventListener('input', e => {
+  reverbMult = parseInt(e.target.value, 10) / 100;
+  document.getElementById('lblReverb').textContent = e.target.value + '%';
+  if (vocalGraph !== null) {
+    vocalGraph.verbReturn.gain.value = 0.32 * reverbMult;
+  }
+});
+
+document.querySelectorAll('.style-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('.style-chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    activeStyle = chip.dataset.style;
+    startStreamingSpeech(textInput.value, activeVoice);
+  });
+});
+
+stopBtn.addEventListener('click', () => {
+  stopStreamingSpeech();
+  statusLine.textContent = 'Audio playback stopped';
+});
+
+grooveBeatBtn.addEventListener('click', () => {
+  grooveBeatOn = grooveBeatOn === false;
+  grooveBeatBtn.classList.toggle('active', grooveBeatOn);
+  grooveBeatBtn.textContent = grooveBeatOn ? 'BEAT: ON' : 'BEAT: OFF';
+});
+
+liveTypeBtn.addEventListener('click', () => {
+  liveTypeOn = liveTypeOn === false;
+  liveTypeBtn.classList.toggle('active', liveTypeOn);
+  liveTypeBtn.textContent = liveTypeOn ? 'TYPE SING: ON' : 'TYPE SING: OFF';
+});
+
+textInput.addEventListener('input', () => {
+  updatePhoneticInspector();
+  if (liveTypeOn) {
+    if (liveTypeDebounceTimer !== null) clearTimeout(liveTypeDebounceTimer);
+    const val = textInput.value;
+    if (val.endsWith(' ') || val.endsWith('?') || val.endsWith('!')) {
+      const parts = val.trim().split(/\s+/);
+      const lastWord = parts[parts.length - 1];
+      if (lastWord) startStreamingSpeech(lastWord, activeVoice);
+    } else {
+      liveTypeDebounceTimer = setTimeout(() => {
+        const parts = textInput.value.trim().split(/\s+/);
+        const lastWord = parts[parts.length - 1];
+        if (lastWord) startStreamingSpeech(lastWord, activeVoice);
+      }, 250);
+    }
+  }
+});
+
+document.querySelectorAll('.phrase-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    textInput.value = btn.dataset.phrase;
+    updatePhoneticInspector();
+    startStreamingSpeech(textInput.value, activeVoice);
+  });
+});
+
+// Compact Section Toggles (Show/Hide Sliders or G2P Inspector without cluttering)
+const shaperCard = document.getElementById('shaperCard');
+const toggleShaperBtn = document.getElementById('toggleShaperBtn');
+const toggleG2PBtn = document.getElementById('toggleG2PBtn');
+const playCurrentBtn = document.getElementById('playCurrentBtn');
+
+if (toggleShaperBtn && shaperCard) {
+  toggleShaperBtn.addEventListener('click', () => {
+    const isHidden = shaperCard.classList.toggle('collapsed');
+    toggleShaperBtn.classList.toggle('active', !isHidden);
+  });
+}
+if (toggleG2PBtn && ipaPreview) {
+  toggleG2PBtn.addEventListener('click', () => {
+    const isOpen = ipaPreview.classList.toggle('open');
+    toggleG2PBtn.classList.toggle('active', isOpen);
+  });
+}
+if (playCurrentBtn) {
+  playCurrentBtn.addEventListener('click', () => {
+    startStreamingSpeech(textInput.value, activeVoice);
+  });
+}
+
+// Bind 2-Mode Engine Switcher (Mode 1: Melodii vs Mode 2: Real Speech)
+const modeMelodiiBtn = document.getElementById('modeMelodiiBtn');
+const modeRealSpeechBtn = document.getElementById('modeRealSpeechBtn');
+const dictStatusBtn = document.getElementById('dictStatusBtn');
+const customDictInput = document.getElementById('customDictInput');
+
+function setEngineMode(newMode) {
+  engineMode = newMode;
+  if (modeMelodiiBtn) modeMelodiiBtn.classList.toggle('active', engineMode === 'melodii');
+  if (modeRealSpeechBtn) modeRealSpeechBtn.classList.toggle('active', engineMode === 'real_speech');
+  statusLine.textContent = engineMode === 'real_speech'
+    ? `Mode 2 Active: Stress-Timed Real Speech (${cmuDictLoadedCount.toLocaleString()} words)`
+    : `Mode 1 Active: Melodii Musical Engine (${cmuDictLoadedCount.toLocaleString()} words)`;
+  startStreamingSpeech(textInput.value, activeVoice);
+}
+
+if (modeMelodiiBtn) {
+  modeMelodiiBtn.addEventListener('click', () => setEngineMode('melodii'));
+}
+if (modeRealSpeechBtn) {
+  modeRealSpeechBtn.addEventListener('click', () => setEngineMode('real_speech'));
+}
+const dictDlActionBtn = document.getElementById('dictDlActionBtn');
+if (dictDlActionBtn) {
+  dictDlActionBtn.addEventListener('click', () => {
+    if (cmuFullLoaded && customDictInput) {
+      customDictInput.click();
+    } else {
+      loadOrSyncFullCMUDict(true);
+    }
+  });
+}
+if (dictStatusBtn) {
+  dictStatusBtn.addEventListener('click', () => {
+    if (cmuFullLoaded && customDictInput) {
+      customDictInput.click();
+    } else {
+      loadOrSyncFullCMUDict(true);
+    }
+  });
+}
+if (customDictInput) {
+  customDictInput.addEventListener('change', e => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async ev => {
+      const raw = String(ev.target.result || '');
+      const count = await parseRawCMUDictTextAsync(raw, raw.length);
+      statusLine.textContent = `Imported ${count.toLocaleString()} dictionary pronunciations`;
+      updatePhoneticInspector();
+    };
+    reader.readAsText(file);
+  });
+}
+
+// Auto-sync the 135,000-word CMU dictionary in background on startup
+setTimeout(() => { loadOrSyncFullCMUDict(false); }, 150);
+
+// ============================================================================
+// 5. STABLE HUMAN GLOTTAL & 5-FORMANT VOCAL TRACT GRAPH (ZERO IIR CRACKLING)
+// ============================================================================
+function createHumanGlottalPeriodicWave(ctx) {
+  const harmonics = 36;
+  const real = new Float32Array(harmonics);
+  const imag = new Float32Array(harmonics);
+  real[0] = 0;
+  imag[0] = 0;
+  for (let k = 1; k < harmonics; k++) {
+    const amp = 1.0 / Math.pow(k, 1.58);
+    real[k] = amp * Math.cos(k * 0.35);
+    imag[k] = amp * Math.sin(k * 0.35);
+  }
+  return ctx.createPeriodicWave(real, imag, { disableNormalization: false });
+}
+
+function makeWarmTapeCurve() {
+  const n = 4096;
+  const curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = Math.tanh(x * 1.25) / Math.tanh(1.25);
+  }
+  return curve;
+}
+
+function createPinkNoiseBuffer(ctx) {
+  const len = ctx.sampleRate * 2;
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+  for (let i = 0; i < len; i++) {
+    const w = Math.random() * 2 - 1;
+    b0 = 0.99886 * b0 + w * 0.0555179;
+    b1 = 0.99332 * b1 + w * 0.0750759;
+    b2 = 0.96900 * b2 + w * 0.1538520;
+    b3 = 0.86650 * b3 + w * 0.3104856;
+    b4 = 0.55000 * b4 + w * 0.5329522;
+    b5 = -0.7616 * b5 - w * 0.0168980;
+    d[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.035;
+    b6 = w * 0.115926;
+  }
+  return buf;
+}
+
+function createStudioReverbIR(ctx) {
+  const rate = ctx.sampleRate;
+  const len = Math.floor(rate * 1.35);
+  const ir = ctx.createBuffer(2, len, rate);
+  for (let c = 0; c < 2; c++) {
+    const d = ir.getChannelData(c);
+    for (let i = 0; i < len; i++) {
+      const t = i / len;
+      const env = Math.pow(1 - t, 2.4) * (1 - Math.exp(-i / (rate * 0.018)));
+      d[i] = (Math.random() * 2 - 1) * env * 0.55;
+    }
+  }
+  return ir;
+}
+
+function buildHumanVocalTractGraph(ctx, dest) {
+  const shaper = ctx.createWaveShaper();
+  shaper.curve = makeWarmTapeCurve();
+
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -14;
+  comp.knee.value = 16;
+  comp.ratio.value = 3.5;
+  comp.attack.value = 0.004;
+  comp.release.value = 0.16;
+
+  const masterOut = ctx.createGain();
+  masterOut.gain.value = 0.85;
+
+  comp.connect(shaper);
+  shaper.connect(masterOut);
+  masterOut.connect(dest);
+
+  const convolver = ctx.createConvolver();
+  convolver.buffer = createStudioReverbIR(ctx);
+  const verbReturn = ctx.createGain();
+  verbReturn.gain.value = 0.32 * reverbMult;
+  convolver.connect(verbReturn);
+  verbReturn.connect(comp);
+
+  const dryBus = ctx.createGain();
+  dryBus.gain.value = 0.85;
+  dryBus.connect(comp);
+
+  const mixBus = ctx.createGain();
+  mixBus.gain.value = 0.90;
+  mixBus.connect(dryBus);
+  mixBus.connect(convolver);
+
+  const glottalIn = ctx.createGain();
+  glottalIn.gain.value = 0.65;
+
+  const tractSum = ctx.createGain();
+  tractSum.gain.value = 1.20;
+
+  const fSpecs = [
+    { freq: 600,  q: 3.4, gain: 0.95 },
+    { freq: 1500, q: 4.0, gain: 0.78 },
+    { freq: 2500, q: 4.5, gain: 0.48 },
+    { freq: 3450, q: 5.0, gain: 0.24 },
+    { freq: 4450, q: 5.5, gain: 0.12 }
+  ];
+
+  const filters = fSpecs.map(spec => {
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = spec.freq;
+    bp.Q.value = spec.q;
+    const g = ctx.createGain();
+    g.gain.value = spec.gain;
+    glottalIn.connect(bp);
+    bp.connect(g);
+    g.connect(tractSum);
+    return bp;
+  });
+
+  const chestLP = ctx.createBiquadFilter();
+  chestLP.type = 'lowpass';
+  chestLP.frequency.value = 340;
+  const chestGain = ctx.createGain();
+  chestGain.gain.value = 0.42;
+  glottalIn.connect(chestLP);
+  chestLP.connect(chestGain);
+  chestGain.connect(tractSum);
+
+  tractSum.connect(mixBus);
+
+  const consBP = ctx.createBiquadFilter();
+  consBP.type = 'bandpass';
+  consBP.frequency.value = 2800;
+  consBP.Q.value = 2.0;
+  consBP.connect(mixBus);
+
+  return {
+    glottalIn,
+    mixBus,
+    dryBus,
+    verbReturn,
+    formants: filters,
+    consBP
+  };
+}
+
+function unlockAudioContext() {
+  if (audioCtx === null) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AC();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    glottalWave = createHumanGlottalPeriodicWave(audioCtx);
+    pinkNoiseBuf = createPinkNoiseBuffer(audioCtx);
+    vocalGraph = buildHumanVocalTractGraph(audioCtx, analyser);
+    analyser.connect(audioCtx.destination);
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+}
+
+// ============================================================================
+// 6. PITCH & PROSODY CALCULATOR (NATURAL SENTENCES + SINGLE-WORD TUNES + "?" / "!")
+// ============================================================================
+function computeTargetFrequencies(item) {
+  const profile = item.profile;
+  const ph = PHONEMES[item.phCode] || PHONEMES.AH;
+  const userPitchMult = Math.pow(2, pitchShiftSt / 12);
+  const isSingleWord = (item.totalWords === 1);
+
+  // Progress through the current word (0.0 at start -> 1.0 at final phoneme)
+  const wordProg = item.wordPhLen > 1 ? (item.pIdx / (item.wordPhLen - 1)) : 1.0;
+
+  // ==========================================================================
+  // MODE 2: REAL SPEECH ENGINE (NATURAL HUMAN INTONATION + LEXICAL STRESS)
+  // ==========================================================================
+  if (engineMode === 'real_speech') {
+    const sentenceProg = item.totalWords > 1 ? (item.wordIdx / (item.totalWords - 1)) : 0.0;
+    // Natural human breath-group declination (-2.2 semitones across sentence)
+    let f0Semi = 1.2 - (sentenceProg * 2.4);
+    let endGlideRatio = 1.0;
+
+    // Lexical stress pitch accent (Pierrehumbert H* pitch prominence on primary stressed vowels)
+    if (item.isFunctionWord && !isSingleWord) {
+      f0Semi -= 1.1;
+    } else if (item.stress === 1 && ph.isVowel) {
+      f0Semi += 2.1;
+    } else if (item.stress === 2 && ph.isVowel) {
+      f0Semi += 0.9;
+    } else if (!ph.isVowel) {
+      f0Semi -= 0.6;
+    }
+
+    // Clause-level prosody: Comma continuation rise, terminal fall, or question rise
+    if (item.hasComma && item.isLastVowelInWord) {
+      f0Semi += 1.4;
+      endGlideRatio = 1.06;
+    }
+    if (item.isQuestion) {
+      if (isSingleWord || item.wordIdx >= item.totalWords - 1) {
+        f0Semi += 1.2 + (wordProg * 3.4);
+        if (item.isLastVowelInWord || item.pIdx === item.wordPhLen - 1) {
+          endGlideRatio = 1.12;
+        }
+      }
+    } else if (item.isExclaim) {
+      if (item.stress === 1 || item.isFirstVowelInWord) {
+        f0Semi += 2.4;
+      }
+      if (item.wordIdx === item.totalWords - 1 && item.isLastVowelInWord) {
+        endGlideRatio = 0.92; // Assertive declarative fall
+      }
+    } else if (item.wordIdx === item.totalWords - 1 && item.isLastVowelInWord) {
+      // Natural terminal declarative cadence fall at end of statement
+      f0Semi -= 1.2;
+      endGlideRatio = 0.94;
+    }
+
+    const hz = profile.baseHz * Math.pow(2, f0Semi / 12) * userPitchMult;
+    return { freqs: [hz], endGlideRatio };
+  }
+
+  // ==========================================================================
+  // MODE 1: ORIGINAL MELODII ENGINE
+  // ==========================================================================
+  // 1. HYMN / CHOIR / RHODES / SERAPH CHORD MODE (Always stays purely in harmonic chord tune)
+  if (activeStyle === 'hymn' || profile.sourceType === 'choir') {
+    const chordIdx = isSingleWord
+      ? (item.lexicalSeed + item.wordVowelIdx) % CHOIR_CHORDS_HZ.length
+      : item.wordIdx % CHOIR_CHORDS_HZ.length;
+    const chord = CHOIR_CHORDS_HZ[chordIdx];
+    const octaveScale = profile.baseHz / 220.0;
+    const invLift = (isSingleWord && item.wordVowelIdx > 0)
+      ? Math.pow(2, ((item.wordVowelIdx % 2 === 1) ? 2 : -1) / 12)
+      : 1.0;
+    const gentleEndGlide = (item.isQuestion && item.isLastVowelInWord) ? 1.05 : 1.0;
+    return {
+      freqs: chord.map(hz => hz * octaveScale * invLift * userPitchMult),
+      endGlideRatio: gentleEndGlide
+    };
+  }
+
+  // 2. SINGLE-WORD MODE: Uses word's unique lexicalSeed + intra-word stepping
+  if (isSingleWord) {
+    const archetype = SINGLE_WORD_ARCHETYPES_SEMI[item.lexicalSeed % SINGLE_WORD_ARCHETYPES_SEMI.length];
+    const rootOffsetSemi = ((item.lexicalSeed * 3) % 7) - 2;
+    const stepIdx = (item.wordVowelIdx + (ph.isVowel ? 0 : 1)) % archetype.length;
+    let noteSemi = rootOffsetSemi + archetype[stepIdx];
+    let endGlideRatio = 1.0;
+
+    if (ph.isVowel === false) {
+      noteSemi -= 1.2;
+    } else if (ph.f1End !== undefined && item.isQuestion === false) {
+      endGlideRatio = 1.045;
+    }
+
+    if (activeStyle === 'speech') {
+      noteSemi *= 0.55;
+    }
+
+    // Expressive single-word '?' or '!'
+    if (item.isQuestion) {
+      noteSemi += -0.6 + (wordProg * 3.8);
+      if (item.isLastVowelInWord || item.pIdx === item.wordPhLen - 1) {
+        endGlideRatio = 1.12; // Smooth, natural questioning lift
+      }
+    }
+    if (item.isExclaim) {
+      noteSemi += 2.0 + Math.sin(wordProg * Math.PI) * 1.8;
+    }
+
+    const hz = profile.baseHz * Math.pow(2, noteSemi / 12) * userPitchMult;
+    return { freqs: [hz], endGlideRatio };
+  }
+
+  // 3. MULTI-WORD SENTENCE MODE
+  // Keep sentences 100% natural and unforced!
+  // In musical styles (melodii / rap), NEVER detune notes off-scale with arbitrary semitone shifts.
+  if (activeStyle === 'speech') {
+    let contourSemi = SPEECH_CONTOUR_SEMI[item.wordIdx % SPEECH_CONTOUR_SEMI.length];
+    const vowelMicro = (item.vowelStepIdx % 3 === 0) ? 0.8 : -0.4;
+    let endGlideRatio = 1.0;
+
+    if (item.isQuestion) {
+      // Gentle, natural conversational question lift on the final vowel
+      contourSemi += 1.0 + (wordProg * 2.2);
+      if (item.isLastVowelInWord) {
+        endGlideRatio = 1.08;
+      }
+    }
+    if (item.isExclaim) {
+      // Subtle, warm conversational emphasis (never shrill or forced)
+      contourSemi += (item.isFirstVowelInWord ? 1.6 : 0.9);
+    }
+
+    const hz = profile.baseHz * Math.pow(2, (contourSemi + vowelMicro) / 12) * userPitchMult;
+    return { freqs: [hz], endGlideRatio };
+  } else if (activeStyle === 'rap') {
+    const rapIntervals = [0, 0, 3, 0, 5, 3, -2, 0];
+    let semi = rapIntervals[(item.wordIdx + item.vowelStepIdx) % rapIntervals.length];
+    let endGlideRatio = 1.0;
+    if (item.isQuestion && item.isLastVowelInWord) {
+      semi += 2;
+      endGlideRatio = 1.06;
+    } else if (item.isExclaim && item.isFirstVowelInWord) {
+      semi += 2;
+    }
+    const hz = profile.baseHz * Math.pow(2, semi / 12) * userPitchMult;
+    return { freqs: [hz], endGlideRatio };
+  } else {
+    // MELODII FUNK SENTENCE MODE: Stay strictly locked to MELODII_MELODY_HZ scale!
+    // No off-key semitone multipliers on "Hello World!, This is the rhythm of the night!"
+    const melodyHz = MELODII_MELODY_HZ[(item.wordIdx + item.vowelStepIdx) % MELODII_MELODY_HZ.length];
+    const registerRatio = profile.baseHz / 380.0;
+    const hz = melodyHz * registerRatio * userPitchMult;
+    // Only a subtle, musical 4% inflection at the very end of a question phrase
+    const endGlideRatio = (item.isQuestion && item.isLastVowelInWord && item.wordIdx === item.totalWords - 1) ? 1.045 : 1.0;
+    return { freqs: [hz], endGlideRatio };
+  }
+}
+
+// ============================================================================
+// 7. LOOKAHEAD STREAMING SPEECH SCHEDULER (ZERO OVERLOAD ON HUGE PARAGRAPHS)
+// ============================================================================
+function triggerGrooveDrumHit(ctx, graph, pNoise, type, time, gainVal) {
+  if (gainVal <= 0.001) return;
+  if (type === 'kick') {
+    const osc = ctx.createOscillator();
+    const env = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(114, time);
+    osc.frequency.exponentialRampToValueAtTime(45, time + 0.065);
+    osc.frequency.exponentialRampToValueAtTime(35, time + 0.30);
+    env.gain.setValueAtTime(0.0002, time);
+    env.gain.linearRampToValueAtTime(gainVal * 0.24, time + 0.008);
+    env.gain.exponentialRampToValueAtTime(0.0002, time + 0.32);
+    osc.connect(env);
+    env.connect(graph.dryBus);
+    osc.start(time);
+    osc.stop(time + 0.34);
+    osc.onended = () => { osc.disconnect(); env.disconnect(); };
+  } else if (type === 'snare' && pNoise !== null) {
+    const src = ctx.createBufferSource();
+    src.buffer = pNoise;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(1650, time);
+    bp.Q.value = 1.4;
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0.0002, time);
+    env.gain.linearRampToValueAtTime(gainVal * 0.14, time + 0.008);
+    env.gain.exponentialRampToValueAtTime(0.0002, time + 0.15);
+    src.connect(bp);
+    bp.connect(env);
+    env.connect(graph.mixBus);
+    src.start(time);
+    src.stop(time + 0.17);
+    src.onended = () => { src.disconnect(); bp.disconnect(); env.disconnect(); };
+  } else if (type === 'hat' && pNoise !== null) {
+    const src = ctx.createBufferSource();
+    src.buffer = pNoise;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'bandpass';
+    hp.frequency.setValueAtTime(5500, time);
+    hp.Q.value = 2.2;
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0.0002, time);
+    env.gain.linearRampToValueAtTime(gainVal * 0.07, time + 0.005);
+    env.gain.exponentialRampToValueAtTime(0.0002, time + 0.06);
+    src.connect(hp);
+    hp.connect(env);
+    env.connect(graph.mixBus);
+    src.start(time);
+    src.stop(time + 0.07);
+    src.onended = () => { src.disconnect(); hp.disconnect(); env.disconnect(); };
+  }
+}
+
+function scheduleSingleStreamItem(item, time) {
+  const ctx = audioCtx;
+  const graph = vocalGraph;
+  const profile = item.profile;
+  const ph = PHONEMES[item.phCode] || PHONEMES.AH;
+  const dur = item.dur;
+  const isRealSpeech = (engineMode === 'real_speech');
+  // Keep formant tract natural on sentences so "!" never sounds shrill or forced
+  const exclaimBright = item.isExclaim ? (item.totalWords === 1 ? 1.03 : 1.01) : 1.0;
+  const tractScale = profile.tractScale * userTractMult * exclaimBright;
+
+  // In Mode 2 (Real Speech), mute synthetic funk beat so speech is pure and conversational
+  if (item.triggerBeat && !isRealSpeech) {
+    const beatBoost = item.isExclaim ? 1.06 : 1.0;
+    if (item.wordIdx % 2 === 0) triggerGrooveDrumHit(ctx, graph, pinkNoiseBuf, 'kick', time, 0.80 * beatBoost);
+    else triggerGrooveDrumHit(ctx, graph, pinkNoiseBuf, 'snare', time, 0.70 * beatBoost);
+    triggerGrooveDrumHit(ctx, graph, pinkNoiseBuf, 'hat', time + dur * 0.5, 0.65 * beatBoost);
+  }
+
+  // Click-free setTargetAtTime formant transitions (with unstressed vowel schwa centralization in Real Speech mode)
+  const [f1, f2, f3, f4, f5] = graph.formants;
+  const isUnstressedVowel = isRealSpeech && ph.isVowel && item.stress === 0 && item.totalWords > 1;
+  const rawF1 = isUnstressedVowel ? (ph.f1 * 0.82 + 520 * 0.18) : ph.f1;
+  const rawF2 = isUnstressedVowel ? (ph.f2 * 0.82 + 1480 * 0.18) : ph.f2;
+
+  const startF1 = Math.min(3400, rawF1 * tractScale);
+  const startF2 = Math.min(4600, rawF2 * tractScale);
+  const startF3 = Math.min(6200, ph.f3 * tractScale);
+
+  const coartTau = isRealSpeech ? 0.019 : 0.014;
+  f1.frequency.setTargetAtTime(startF1, time, coartTau);
+  f2.frequency.setTargetAtTime(startF2, time, coartTau);
+  f3.frequency.setTargetAtTime(startF3, time, coartTau);
+
+  if (ph.f1End !== undefined) {
+    const endF1 = Math.min(3400, ph.f1End * tractScale);
+    const endF2 = Math.min(4600, ph.f2End * tractScale);
+    const endF3 = Math.min(6200, ph.f3End * tractScale);
+    f1.frequency.setTargetAtTime(endF1, time + dur * 0.42, 0.025);
+    f2.frequency.setTargetAtTime(endF2, time + dur * 0.42, 0.025);
+    f3.frequency.setTargetAtTime(endF3, time + dur * 0.42, 0.025);
+  } else if (isRealSpeech && item.nextPhCode) {
+    // Anticipatory coarticulation toward the next phoneme's locus in Real Speech mode
+    const nextPh = PHONEMES[item.nextPhCode];
+    if (nextPh) {
+      const locusF1 = Math.min(3400, (rawF1 * 0.72 + nextPh.f1 * 0.28) * tractScale);
+      const locusF2 = Math.min(4600, (rawF2 * 0.72 + nextPh.f2 * 0.28) * tractScale);
+      f1.frequency.setTargetAtTime(locusF1, time + dur * 0.68, 0.022);
+      f2.frequency.setTargetAtTime(locusF2, time + dur * 0.68, 0.022);
+    }
+  }
+
+  f4.frequency.setTargetAtTime(Math.min(7200, 3400 * tractScale), time, 0.02);
+  f5.frequency.setTargetAtTime(Math.min(8600, 4400 * tractScale), time, 0.02);
+
+  // Consonant Burst
+  if (ph.noiseF !== undefined && pinkNoiseBuf !== null) {
+    const nSrc = ctx.createBufferSource();
+    nSrc.buffer = pinkNoiseBuf;
+    const nEnv = ctx.createGain();
+    const nDur = ph.plosive ? Math.min(0.026, dur * 0.36) : dur * 0.78;
+    const nPeak = (ph.noiseG || 0.07) * (0.65 + breathMult * 0.35) * (item.isExclaim ? 1.25 : 1.0);
+
+    graph.consBP.frequency.setTargetAtTime(Math.min(7000, ph.noiseF * tractScale), time, 0.008);
+    nEnv.gain.setValueAtTime(0.0002, time);
+    nEnv.gain.linearRampToValueAtTime(Math.max(0.001, nPeak), time + 0.005);
+    nEnv.gain.exponentialRampToValueAtTime(0.0002, time + nDur);
+
+    nSrc.connect(nEnv);
+    nEnv.connect(graph.consBP);
+    nSrc.start(time);
+    nSrc.stop(time + nDur + 0.01);
+    nSrc.onended = () => { nSrc.disconnect(); nEnv.disconnect(); };
+  }
+
+  if (ph.isVowel === false && (ph.voicedCons === true) === false) {
+    return { targetHz: profile.baseHz, f1: Math.round(startF1), f2: Math.round(startF2) };
+  }
+
+  const pitchData = computeTargetFrequencies(item);
+  const targetFreqs = pitchData.freqs;
+  const endGlideRatio = pitchData.endGlideRatio;
+
+  const env = ctx.createGain();
+  const isChord = targetFreqs.length > 1;
+  const exclaimGainBoost = item.isExclaim ? 1.08 : 1.0;
+  const stressGainMod = isRealSpeech
+    ? (item.isFunctionWord && item.totalWords > 1 ? 0.82 : (item.stress === 1 ? 1.14 : (item.stress === 0 ? 0.88 : 1.0)))
+    : 1.0;
+  const isPluckedInst = !isRealSpeech && (profile.sourceType === 'celesta' || profile.sourceType === 'kalimba' || profile.sourceType === 'guitar');
+  const isHeavenlySustained = !isRealSpeech && (profile.sourceType === 'choir' || profile.sourceType === 'seraph' || profile.sourceType === 'rhodes' || profile.sourceType === 'cello' || profile.sourceType === 'ocarina');
+
+  const peakGain = (isChord ? 0.20 : 0.28) * (ph.isVowel ? 1.0 : 0.62) * exclaimGainBoost * stressGainMod;
+  const attackT = isPluckedInst ? 0.005 : (ph.plosive ? 0.006 : Math.min(0.024, dur * 0.24));
+  const releaseDur = dur * (isHeavenlySustained ? 1.38 : (isPluckedInst ? 1.28 : (item.isStretched ? 1.15 : (isRealSpeech ? 1.12 : 1.08))));
+
+  env.gain.setValueAtTime(0.0002, time);
+  env.gain.linearRampToValueAtTime(peakGain, time + attackT);
+  if (isPluckedInst) {
+    // Calm bell/tine/string pluck decay into warm sustain
+    env.gain.exponentialRampToValueAtTime(peakGain * 0.48, time + dur * 0.55);
+  } else {
+    env.gain.setValueAtTime(peakGain * (item.isStretched ? 0.92 : 0.86), time + dur * 0.75);
+  }
+  env.gain.exponentialRampToValueAtTime(0.0002, time + releaseDur);
+
+  env.connect(graph.glottalIn);
+
+  // Direct heavenly clarity bus for acoustic/bell/flute instruments so they sound airy & crystalline
+  const directRatioMap = {
+    whistle: 0.40,
+    ocarina: 0.36,
+    celesta: 0.42,
+    kalimba: 0.38,
+    rhodes:  0.30,
+    guitar:  0.25,
+    cello:   0.18,
+    seraph:  0.26
+  };
+  const directGainVal = directRatioMap[profile.sourceType] || 0;
+  let directNode = null;
+  if (directGainVal > 0) {
+    directNode = ctx.createGain();
+    directNode.gain.value = directGainVal;
+    env.connect(directNode);
+    directNode.connect(graph.mixBus);
+  }
+
+  if (ph.isVowel && pinkNoiseBuf !== null && breathMult > 0.05) {
+    const bSrc = ctx.createBufferSource();
+    bSrc.buffer = pinkNoiseBuf;
+    const bGain = ctx.createGain();
+    bGain.gain.value = profile.breath * breathMult * 0.38;
+    bSrc.connect(bGain);
+    bGain.connect(env);
+    bSrc.start(time);
+    bSrc.stop(time + releaseDur);
+    bSrc.onended = () => { bSrc.disconnect(); bGain.disconnect(); };
+  }
+
+  const vibOsc = ctx.createOscillator();
+  const vibGain = ctx.createGain();
+  vibOsc.frequency.setValueAtTime(profile.vibRate || 5.4, time);
+  vibGain.gain.setValueAtTime(0.1, time);
+  const vibTarget = profile.vibDepth * (item.isStretched ? 1.35 : (item.isExclaim ? 1.12 : 1.0));
+  vibGain.gain.linearRampToValueAtTime(vibTarget, time + releaseDur * 0.45);
+  vibOsc.connect(vibGain);
+  vibOsc.start(time);
+  vibOsc.stop(time + releaseDur + 0.02);
+
+  const oscList = [];
+  const vScale = 1 / Math.sqrt(targetFreqs.length);
+
+  targetFreqs.forEach((hz, idx) => {
+    const safeHz = Math.max(48, Math.min(3400, hz));
+    const osc = ctx.createOscillator();
+    const vg = ctx.createGain();
+
+    if ((isRealSpeech || profile.sourceType === 'glottal' || profile.sourceType === 'cello' || profile.sourceType === 'seraph') && glottalWave !== null) {
+      osc.setPeriodicWave(glottalWave);
+    } else if (profile.sourceType === 'whistle' || profile.sourceType === 'celesta' || profile.sourceType === 'kalimba') {
+      osc.type = 'sine';
+    } else if (profile.sourceType === 'guitar' || profile.sourceType === 'ocarina' || profile.sourceType === 'rhodes') {
+      osc.type = 'triangle';
+    } else {
+      osc.type = 'sawtooth';
+    }
+
+    const effectiveScoop = scoopMult * (isRealSpeech ? 0.32 : (isPluckedInst ? 0.25 : 1.0)) * (item.isExclaim ? 1.08 : 1.0);
+    const scoopRatio = 1.0 - (0.08 * effectiveScoop * (ph.isVowel ? 1.0 : 0.45));
+    const startHz = Math.max(42, safeHz * scoopRatio);
+    const settleTime = time + Math.min(0.04, dur * 0.36);
+
+    osc.frequency.setValueAtTime(startHz, time);
+    osc.frequency.exponentialRampToValueAtTime(safeHz, settleTime);
+
+    if (endGlideRatio !== 1.0) {
+      const endHz = Math.max(48, Math.min(3500, safeHz * endGlideRatio));
+      osc.frequency.setValueAtTime(safeHz, Math.max(settleTime, time + dur * 0.45));
+      osc.frequency.exponentialRampToValueAtTime(endHz, time + dur * 0.94);
+    }
+
+    if (isChord) {
+      osc.detune.setValueAtTime((idx - 1.5) * 5.0, time);
+    }
+    vibGain.connect(osc.detune);
+
+    vg.gain.value = vScale;
+    osc.connect(vg);
+    vg.connect(env);
+
+    osc.start(time);
+    osc.stop(time + releaseDur + 0.02);
+    oscList.push({ osc, vg });
+
+    // Heavenly Harmonic Overtone Layer for Celesta, Kalimba, Rhodes, Ocarina & Seraph
+    if (profile.sourceType === 'celesta' || profile.sourceType === 'kalimba' || profile.sourceType === 'rhodes' || profile.sourceType === 'seraph' || profile.sourceType === 'ocarina') {
+      const overMult = profile.sourceType === 'celesta' ? 3.0
+        : (profile.sourceType === 'kalimba' ? 4.0 : 2.0);
+      const overHz = Math.min(7500, safeHz * overMult);
+      const osc2 = ctx.createOscillator();
+      const vg2 = ctx.createGain();
+      osc2.type = 'sine';
+      osc2.frequency.setValueAtTime(overHz, time);
+      vibGain.connect(osc2.detune);
+
+      const chimePeak = vScale * (profile.sourceType === 'celesta' ? 0.32
+        : (profile.sourceType === 'kalimba' ? 0.28
+        : (profile.sourceType === 'seraph' ? 0.35 : 0.20)));
+      vg2.gain.setValueAtTime(chimePeak, time);
+      if (profile.sourceType === 'celesta' || profile.sourceType === 'kalimba' || profile.sourceType === 'rhodes') {
+        vg2.gain.exponentialRampToValueAtTime(0.001, time + Math.min(releaseDur, dur * 0.72));
+      }
+
+      osc2.connect(vg2);
+      vg2.connect(env);
+      osc2.start(time);
+      osc2.stop(time + releaseDur + 0.02);
+      oscList.push({ osc: osc2, vg: vg2 });
+    }
+  });
+
+  if (oscList.length > 0) {
+    oscList[0].osc.onended = () => {
+      oscList.forEach(o => { o.osc.disconnect(); o.vg.disconnect(); });
+      vibOsc.disconnect();
+      vibGain.disconnect();
+      if (directNode !== null) directNode.disconnect();
+      env.disconnect();
+    };
+  }
+
+  return {
+    targetHz: Math.round(targetFreqs[0] * endGlideRatio),
+    f1: Math.round(startF1),
+    f2: Math.round(startF2)
+  };
+}
+
+function buildStreamQueueFromText(text, voiceKey) {
+  const profile = VOICE_PROFILES[voiceKey] || VOICE_PROFILES.melodii_f;
+  const words = parseSentenceToWords(text);
+  currentWordsList = words;
+  const queue = [];
+  if (words.length === 0) return queue;
+
+  const isRealSpeech = (engineMode === 'real_speech');
+  const baseSylDur = (isRealSpeech ? Math.min(0.112, profile.syllableDur) : profile.syllableDur) / speedMult;
+  let vowelCounter = 0;
+
+  words.forEach((wordObj, wIdx) => {
+    const isLastWord = (wIdx === words.length - 1);
+    const nextWordIsQuestion = (wIdx + 1 < words.length) ? words[wIdx + 1].isQuestion : false;
+
+    const vowelIndices = [];
+    wordObj.phonemes.forEach((code, idx) => {
+      const p = PHONEMES[code] || PHONEMES.AH;
+      if (p.isVowel) vowelIndices.push(idx);
+    });
+    const firstVowelIdx = vowelIndices.length > 0 ? vowelIndices[0] : 0;
+    const lastVowelIdx = vowelIndices.length > 0 ? vowelIndices[vowelIndices.length - 1] : wordObj.phonemes.length - 1;
+
+    let wordVowelIdx = 0;
+
+    wordObj.phonemes.forEach((phCode, pIdx) => {
+      const ph = PHONEMES[phCode] || PHONEMES.AH;
+      const phStress = (wordObj.stresses && wordObj.stresses[pIdx] !== undefined) ? wordObj.stresses[pIdx] : (ph.isVowel ? 1 : 0);
+      const nextPhCode = (pIdx + 1 < wordObj.phonemes.length) ? wordObj.phonemes[pIdx + 1] : null;
+      let dur = Math.max(0.036, baseSylDur * ph.dur);
+
+      // In Mode 2 (Real Speech), apply natural English stress-timed rhythm
+      if (isRealSpeech && words.length > 1) {
+        if (wordObj.isFunctionWord) {
+          dur *= 0.72;
+        } else if (ph.isVowel) {
+          if (phStress === 1) dur *= 1.24;
+          else if (phStress === 0) dur *= 0.74;
+        } else {
+          dur *= 0.88;
+        }
+      }
+
+      // If the user stretched the word (e.g., "Hiiii" or "lets goooo"), smoothly sustain the primary/final vowel!
+      const isStretchedVowel = wordObj.isStretched && ph.isVowel && (pIdx === lastVowelIdx);
+      if (isStretchedVowel) {
+        dur *= wordObj.stretchMult;
+      } else if (wordObj.isStretched && vowelIndices.length === 0 && pIdx === wordObj.phonemes.length - 1) {
+        dur *= wordObj.stretchMult;
+      }
+
+      if (isLastWord && ph.isVowel && pIdx >= wordObj.phonemes.length - 2 && isStretchedVowel === false) {
+        dur *= (isRealSpeech ? 1.32 : 1.75);
+      }
+
+      if (ph.isVowel) {
+        vowelCounter++;
+      }
+
+      const currentWordVowelStep = wordVowelIdx;
+      if (ph.isVowel) {
+        wordVowelIdx++;
+      }
+
+      const overlapRatio = isRealSpeech ? (ph.isVowel ? 0.84 : 0.78) : (ph.isVowel ? 0.88 : 0.80);
+      const stepAdvance = dur * overlapRatio + (pIdx === wordObj.phonemes.length - 1 ? wordObj.pauseAfter / speedMult : 0);
+
+      queue.push({
+        phCode,
+        nextPhCode,
+        stress: phStress,
+        isFunctionWord: wordObj.isFunctionWord,
+        hasComma: wordObj.hasComma,
+        hasPeriod: wordObj.hasPeriod,
+        dur,
+        stepAdvance,
+        profile,
+        wordIdx: wIdx,
+        pIdx,
+        wordPhLen: wordObj.phonemes.length,
+        wordVowelIdx: currentWordVowelStep,
+        wordVowelCount: Math.max(1, vowelIndices.length),
+        isFirstVowelInWord: (pIdx === firstVowelIdx),
+        isLastVowelInWord: (pIdx === lastVowelIdx),
+        isStretched: isStretchedVowel,
+        lexicalSeed: wordObj.lexicalSeed,
+        vowelStepIdx: vowelCounter,
+        totalWords: words.length,
+        isQuestion: wordObj.isQuestion,
+        isExclaim: wordObj.isExclaim,
+        nextWordIsQuestion,
+        triggerBeat: grooveBeatOn && (pIdx === 0)
+      });
+    });
+  });
+
+  return queue;
+}
+
+function stopStreamingSpeech() {
+  isStreaming = false;
+  if (streamTimerID !== null) {
+    clearTimeout(streamTimerID);
+    streamTimerID = null;
+  }
+  streamQueue = [];
+  visualTimeline = [];
+  queueBadge.textContent = 'Idle';
+  renderWindowedTeleprompter(currentWordsList, -1);
+}
+
+function runStreamScheduler() {
+  if (isStreaming === false || audioCtx === null) return;
+
+  while (streamQueueIdx < streamQueue.length && streamCursorTime < audioCtx.currentTime + 0.24) {
+    const item = streamQueue[streamQueueIdx];
+    const ph = PHONEMES[item.phCode] || PHONEMES.AH;
+    const meta = scheduleSingleStreamItem(item, streamCursorTime);
+
+    visualTimeline.push({
+      tStart: streamCursorTime,
+      tEnd: streamCursorTime + item.dur,
+      wordIdx: item.wordIdx,
+      ipa: item.phCode,
+      open: Math.min(1.0, ph.open * (item.isExclaim ? 1.15 : 1.0)),
+      wide: ph.wide,
+      f1: meta.f1,
+      f2: meta.f2,
+      hz: meta.targetHz
+    });
+
+    if (visualTimeline.length > 40) {
+      visualTimeline.shift();
+    }
+
+    streamCursorTime += item.stepAdvance;
+    streamQueueIdx++;
+  }
+
+  queueBadge.textContent = `${streamQueueIdx}/${streamQueue.length} syl`;
+
+  if (streamQueueIdx < streamQueue.length) {
+    streamTimerID = setTimeout(runStreamScheduler, 35);
+  } else {
+    isStreaming = false;
+    queueBadge.textContent = 'Done';
+  }
+}
+
+function startStreamingSpeech(text, voiceKey) {
+  unlockAudioContext();
+  stopStreamingSpeech();
+
+  const profile = VOICE_PROFILES[voiceKey] || VOICE_PROFILES.melodii_f;
+  voiceBadge.textContent = profile.name;
+
+  streamQueue = buildStreamQueueFromText(text, voiceKey);
+  if (streamQueue.length === 0) return;
+
+  streamQueueIdx = 0;
+  streamCursorTime = audioCtx.currentTime + 0.03;
+  isStreaming = true;
+  statusLine.textContent = `Synthesizing ${currentWordsList.length} word(s) with ${profile.name}`;
+  runStreamScheduler();
+}
+
+// Bind 10 Voice Cards (1-Tap Immediate Trigger)
+document.querySelectorAll('.voice-card').forEach(card => {
+  card.addEventListener('click', () => {
+    document.querySelectorAll('.voice-card').forEach(c => c.classList.remove('active'));
+    card.classList.add('active');
+    activeVoice = card.dataset.voice;
+
+    const prof = VOICE_PROFILES[activeVoice];
+    if (prof) {
+      activeStyle = prof.defaultStyle;
+      document.querySelectorAll('.style-chip').forEach(c => {
+        c.classList.toggle('active', c.dataset.style === activeStyle);
+      });
+    }
+    startStreamingSpeech(textInput.value, activeVoice);
+  });
+});
+
+window.MelodiiSynth = {
+  speak: (text, voiceId = 'melodii_f') => {
+    textInput.value = text;
+    updatePhoneticInspector();
+    startStreamingSpeech(text, voiceId);
+  },
+  stop: () => stopStreamingSpeech(),
+  compilePhonetics: (text) => parseSentenceToWords(text)
+};
+
+// ============================================================================
+// 8. PURE FLOAT32 DSP WAV EXPORTER (INCLUDES SINGLE-WORD TUNES & "?" / "!")
+// ============================================================================
+exportWavBtn.addEventListener('click', async () => {
+  exportWavBtn.disabled = true;
+  saveWavLink.style.display = 'none';
+
+  try {
+    const queue = buildStreamQueueFromText(textInput.value, activeVoice);
+    if (queue.length === 0) {
+      exportWavBtn.disabled = false;
+      return;
+    }
+
+    let totalSec = 0.08;
+    const timeline = queue.map(item => {
+      const start = totalSec;
+      const end = start + item.dur;
+      totalSec += item.stepAdvance;
+      return { ...item, start, end };
+    });
+    totalSec = Math.min(180, totalSec + 0.65);
+
+    const sampleRate = 22050;
+    const totalSamples = Math.floor(sampleRate * totalSec);
+    const numChannels = 2;
+    const wavBytes = 44 + totalSamples * numChannels * 2;
+    const buf = new ArrayBuffer(wavBytes);
+    const view = new DataView(buf);
+
+    function wStr(off, str) {
+      for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
+    }
+    wStr(0, 'RIFF');
+    view.setUint32(4, wavBytes - 8, true);
+    wStr(8, 'WAVE');
+    wStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * 2, true);
+    view.setUint16(32, numChannels * 2, true);
+    view.setUint16(34, 16, true);
+    wStr(36, 'data');
+    view.setUint32(40, totalSamples * numChannels * 2, true);
+
+    let bp1_z1 = 0, bp1_z2 = 0;
+    let bp2_z1 = 0, bp2_z2 = 0;
+    let bp3_z1 = 0, bp3_z2 = 0;
+    let curF1 = 600, curF2 = 1500, curF3 = 2500;
+    let glottalPhase = 0;
+
+    const dLenL = Math.floor(sampleRate * 0.14);
+    const dLenR = Math.floor(sampleRate * 0.19);
+    const revL = new Float32Array(dLenL);
+    const revR = new Float32Array(dLenR);
+    let rIdxL = 0, rIdxR = 0;
+
+    const chunkSamples = sampleRate * 8;
+    const twoPi = Math.PI * 2;
+    let tIdx = 0;
+
+    for (let sStart = 0; sStart < totalSamples; sStart += chunkSamples) {
+      const sEnd = Math.min(totalSamples, sStart + chunkSamples);
+      const pct = Math.min(99, Math.round((sStart / totalSamples) * 100));
+      statusLine.textContent = `Rendering clean DSP WAV: ${pct}%...`;
+      await new Promise(r => setTimeout(r, 10));
+
+      for (let i = sStart; i < sEnd; i++) {
+        const t = i / sampleRate;
+        while (tIdx < timeline.length - 1 && t > timeline[tIdx].end) {
+          tIdx++;
+        }
+        const ev = timeline[tIdx];
+        let sig = 0;
+
+        if (ev && t >= ev.start && t <= ev.end) {
+          const ph = PHONEMES[ev.phCode] || PHONEMES.AH;
+          const prof = ev.profile;
+          const exclaimBright = ev.isExclaim ? 1.05 : 1.0;
+          const tractScale = prof.tractScale * userTractMult * exclaimBright;
+          const relPos = (t - ev.start) / ev.dur;
+
+          const f1Target = (ph.f1End !== undefined ? ph.f1 + (ph.f1End - ph.f1) * relPos : ph.f1) * tractScale;
+          const f2Target = (ph.f2End !== undefined ? ph.f2 + (ph.f2End - ph.f2) * relPos : ph.f2) * tractScale;
+          const f3Target = (ph.f3End !== undefined ? ph.f3 + (ph.f3End - ph.f3) * relPos : ph.f3) * tractScale;
+
+          curF1 += (f1Target - curF1) * 0.008;
+          curF2 += (f2Target - curF2) * 0.008;
+          curF3 += (f3Target - curF3) * 0.008;
+
+          const pitchData = computeTargetFrequencies(ev);
+          const baseNoteHz = pitchData.freqs[0];
+          const glideInterp = 1.0 + (pitchData.endGlideRatio - 1.0) * Math.max(0, (relPos - 0.35) / 0.65);
+          const hz = baseNoteHz * glideInterp;
+
+          const effectiveScoop = scoopMult * (ev.isExclaim ? 1.30 : 1.0);
+          const scoop = 1.0 - 0.07 * effectiveScoop * Math.exp(-relPos * 8);
+          const vib = 1.0 + (prof.vibDepth * 0.0008) * Math.sin(twoPi * (prof.vibRate || 5.4) * t);
+          const instHz = Math.max(45, hz * scoop * vib);
+
+          glottalPhase += instHz / sampleRate;
+          if (glottalPhase >= 1.0) glottalPhase -= 1.0;
+
+          let glottal = 0;
+          if (ph.isVowel || ph.voicedCons) {
+            if (prof.sourceType === 'whistle' || prof.sourceType === 'ocarina') {
+              glottal = Math.sin(twoPi * glottalPhase) + 0.22 * Math.sin(twoPi * 2 * glottalPhase);
+            } else if (prof.sourceType === 'celesta' || prof.sourceType === 'kalimba') {
+              const chimeEnv = Math.exp(-relPos * 5.5);
+              const overMult = prof.sourceType === 'celesta' ? 3 : 4;
+              glottal = Math.sin(twoPi * glottalPhase) + 0.38 * chimeEnv * Math.sin(twoPi * overMult * glottalPhase);
+            } else if (prof.sourceType === 'rhodes' || prof.sourceType === 'guitar') {
+              const pluckEnv = Math.exp(-relPos * 3.5);
+              glottal = Math.sin(twoPi * glottalPhase) + 0.45 * pluckEnv * Math.sin(twoPi * 2 * glottalPhase) + 0.20 * pluckEnv * Math.sin(twoPi * 3 * glottalPhase);
+            } else {
+              for (let k = 1; k <= 6; k++) {
+                glottal += Math.sin(twoPi * k * glottalPhase) / Math.pow(k, 1.45);
+              }
+            }
+          }
+
+          const noise = (Math.random() * 2 - 1) * (ph.noiseG || 0.02);
+          const exc = glottal * 0.35 + noise;
+
+          const w1 = twoPi * Math.min(3200, curF1) / sampleRate;
+          const w2 = twoPi * Math.min(4500, curF2) / sampleRate;
+          const w3 = twoPi * Math.min(5800, curF3) / sampleRate;
+
+          bp1_z1 += w1 * (exc - bp1_z1 * 0.18 - bp1_z2);
+          bp1_z2 += w1 * bp1_z1;
+
+          bp2_z1 += w2 * (exc - bp2_z1 * 0.22 - bp2_z2);
+          bp2_z2 += w2 * bp2_z1;
+
+          bp3_z1 += w3 * (exc - bp3_z1 * 0.28 - bp3_z2);
+          bp3_z2 += w3 * bp3_z1;
+
+          const env = Math.sin(Math.min(1, relPos) * Math.PI) * (ev.isExclaim ? 1.18 : 1.0);
+          sig = (bp1_z1 * 0.9 + bp2_z1 * 0.7 + bp3_z1 * 0.35 + glottal * 0.22) * env * 0.45;
+        }
+
+        const dL = revL[rIdxL];
+        const dR = revR[rIdxR];
+        const fb = 0.28 * Math.min(1.3, reverbMult);
+        revL[rIdxL] = sig + dR * fb;
+        revR[rIdxR] = sig + dL * fb;
+        rIdxL = (rIdxL + 1) % dLenL;
+        rIdxR = (rIdxR + 1) % dLenR;
+
+        const outL = Math.tanh((sig + dL * 0.25) * 1.1);
+        const outR = Math.tanh((sig + dR * 0.25) * 1.1);
+
+        const pos = 44 + i * 4;
+        view.setInt16(pos, (outL * 32760) | 0, true);
+        view.setInt16(pos + 2, (outR * 32760) | 0, true);
+      }
+    }
+
+    const blob = new Blob([buf], { type: 'audio/wav' });
+    const url = URL.createObjectURL(blob);
+    const fName = `Melodii_${activeVoice}_${Date.now().toString().slice(-4)}.wav`;
+
+    saveWavLink.href = url;
+    saveWavLink.download = fName;
+    saveWavLink.style.display = 'inline-block';
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fName;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => document.body.removeChild(a), 1000);
+
+    statusLine.textContent = 'WAV Export Ready (Zero crackling)';
+  } catch (err) {
+    statusLine.textContent = 'Export notice: ' + err.message;
+  } finally {
+    exportWavBtn.disabled = false;
+  }
+});
+
+// ============================================================================
+// 9. COLORFUL TOP SYNTHESIZER STAGE & AVATAR MOUTH-SYNC
+// ============================================================================
+const stars = [];
+function resizeCanvas() {
+  const box = document.getElementById('stageBox');
+  const rect = box.getBoundingClientRect();
+  canvas.width = Math.max(280, Math.floor(rect.width));
+  canvas.height = Math.max(135, Math.floor(rect.height));
+  stars.length = 0;
+  for (let i = 0; i < 32; i++) {
+    stars.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      r: 1.1 + Math.random() * 2,
+      vy: -(0.3 + Math.random() * 0.65),
+      a: 0.25 + Math.random() * 0.6
+    });
+  }
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+let animT = 0;
+function drawStageLoop() {
+  requestAnimationFrame(drawStageLoop);
+  animT += 0.04;
+
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx2d.fillStyle = 'rgba(4, 6, 12, 0.34)';
+  ctx2d.fillRect(0, 0, w, h);
+
+  let currentEv = null;
+  if (audioCtx !== null && visualTimeline.length > 0) {
+    const now = audioCtx.currentTime;
+    for (let i = 0; i < visualTimeline.length; i++) {
+      const ev = visualTimeline[i];
+      if (now >= ev.tStart && now <= ev.tEnd) {
+        currentEv = ev;
+        break;
+      }
+    }
+  }
+
+  if (currentEv !== null) {
+    mouthState.open += (currentEv.open - mouthState.open) * 0.38;
+    mouthState.wide += (currentEv.wide - mouthState.wide) * 0.38;
+    mouthState.energy = 1.0;
+    if (mouthState.wordIdx !== currentEv.wordIdx || mouthState.ipa !== currentEv.ipa) {
+      mouthState.wordIdx = currentEv.wordIdx;
+      mouthState.ipa = currentEv.ipa;
+      ipaPill.textContent = '/' + currentEv.ipa + '/';
+      tractHud.textContent = `F1: ${currentEv.f1}Hz • F2: ${currentEv.f2}Hz`;
+      noteHud.textContent = `Pitch: ${currentEv.hz} Hz`;
+      renderWindowedTeleprompter(currentWordsList, currentEv.wordIdx);
+    }
+  } else {
+    mouthState.open += (0.10 - mouthState.open) * 0.2;
+    mouthState.wide += (0.52 - mouthState.wide) * 0.2;
+    mouthState.energy *= 0.92;
+    if (mouthState.wordIdx !== -1 && mouthState.energy < 0.08 && isStreaming === false) {
+      mouthState.wordIdx = -1;
+      ipaPill.textContent = 'READY';
+      renderWindowedTeleprompter(currentWordsList, -1);
+    }
+  }
+
+  stars.forEach(s => {
+    s.y += s.vy * (1 + mouthState.energy * 2.2);
+    if (s.y < -4) {
+      s.y = h + 4;
+      s.x = Math.random() * w;
+    }
+    ctx2d.beginPath();
+    ctx2d.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx2d.fillStyle = `rgba(255, 224, 130, ${s.a})`;
+    ctx2d.fill();
+  });
+
+  if (analyser !== null && mouthState.energy > 0.04) {
+    const bins = analyser.frequencyBinCount;
+    const data = new Uint8Array(bins);
+    analyser.getByteFrequencyData(data);
+    const barW = (w / bins) * 1.8;
+    let x = 0;
+    for (let i = 0; i < bins; i++) {
+      const v = data[i] / 255;
+      const barH = v * (h * 0.65);
+      const grad = ctx2d.createLinearGradient(0, h, 0, h - barH);
+      grad.addColorStop(0, '#5ce1e6');
+      grad.addColorStop(0.5, '#7bf1a8');
+      grad.addColorStop(1, '#ff8fab');
+      ctx2d.fillStyle = grad;
+      ctx2d.fillRect(x, h - barH, barW - 1, barH);
+      x += barW;
+    }
+  }
+
+  const cx = w * 0.5;
+  const cy = h * 0.46;
+  const haloR = 34 + mouthState.energy * 22 + Math.sin(animT) * 3;
+
+  const g = ctx2d.createRadialGradient(cx, cy, 4, cx, cy, haloR);
+  g.addColorStop(0, `rgba(255, 143, 171, ${0.34 + mouthState.energy * 0.35})`);
+  g.addColorStop(0.6, `rgba(92, 225, 230, ${0.16 + mouthState.energy * 0.22})`);
+  g.addColorStop(1, 'rgba(4, 6, 12, 0)');
+  ctx2d.fillStyle = g;
+  ctx2d.beginPath();
+  ctx2d.arc(cx, cy, haloR, 0, Math.PI * 2);
+  ctx2d.fill();
+
+  ctx2d.strokeStyle = '#5ce1e6';
+  ctx2d.lineWidth = 3;
+  ctx2d.beginPath();
+  ctx2d.arc(cx, cy, 26, Math.PI, 0, false);
+  ctx2d.stroke();
+
+  ctx2d.fillStyle = '#ffe082';
+  ctx2d.fillRect(cx - 30, cy - 6, 6, 13);
+  ctx2d.fillRect(cx + 24, cy - 6, 6, 13);
+
+  const eyeY = cy - 6 + Math.sin(animT * 1.3) * 1.5;
+  ctx2d.fillStyle = '#ffffff';
+  ctx2d.beginPath();
+  ctx2d.arc(cx - 12, eyeY, 4, 0, Math.PI * 2);
+  ctx2d.arc(cx + 12, eyeY, 4, 0, Math.PI * 2);
+  ctx2d.fill();
+
+  const mW = 6.5 + mouthState.wide * 15;
+  const mH = 2.5 + mouthState.open * 13;
+  ctx2d.beginPath();
+  ctx2d.ellipse(cx, cy + 8.5, mW, mH, 0, 0, Math.PI * 2);
+  ctx2d.fillStyle = mouthState.energy > 0.12 ? '#ff8fab' : 'rgba(92, 225, 230, 0.65)';
+  ctx2d.fill();
+  ctx2d.lineWidth = 2;
+  ctx2d.strokeStyle = '#ffe082';
+  ctx2d.stroke();
+}
+drawStageLoop();
+</script>
+</body>
+</html>
