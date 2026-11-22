@@ -1,0 +1,14 @@
+# Firebase & Emulator logs
+*-debug.log
+firestore-debug.log
+firebase-debug.log
+
+# Android / Gradle
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+captures/
+.cxx/

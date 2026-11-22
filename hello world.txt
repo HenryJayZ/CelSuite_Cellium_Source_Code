@@ -1,2 +1,0 @@
-# Wrote this with zero chill
-print('HELLO *BIG SISTER ENERGY* HENRY~')

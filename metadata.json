@@ -1,0 +1,8 @@
+{
+  "name": "Cellium",
+  "description": "Cel.Cellium — Local-first universal BYOK & on-device offline AI companion studio with Shizuku RAM guard & Agent Mode, 3,800-expression dot-matrix avatar, branching chat, multi-provider Imagine Studio, Live Voice Mode, and optional Google Cloud Sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

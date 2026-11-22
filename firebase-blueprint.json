@@ -1,0 +1,89 @@
+{
+  "entities": {
+    "ChatSession": {
+      "title": "ChatSession",
+      "description": "A user's persisted Cellium conversation thread with persona, model, and token metadata.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "title": { "type": "string", "description": "Display title of the chat session." },
+        "personaId": { "type": "string", "description": "Selected Cellium persona identifier." },
+        "modelName": { "type": "string", "description": "Gemini model identifier used in this session." },
+        "pinned": { "type": "boolean", "description": "Whether the session is pinned to the top." },
+        "messageCount": { "type": "integer", "description": "Total message count in this session." },
+        "tokenCount": { "type": "integer", "description": "Estimated cumulative tokens in this session." },
+        "lastMessagePreview": { "type": "string", "description": "Short preview snippet of the latest message." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp written via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp written via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "title", "personaId", "modelName", "pinned", "messageCount", "tokenCount", "lastMessagePreview", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "An individual message inside a Cellium chat session.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "sessionId": { "type": "string", "description": "Parent ChatSession document ID." },
+        "role": { "type": "string", "enum": ["user", "assistant"], "description": "Message author role." },
+        "content": { "type": "string", "description": "Markdown message body." },
+        "thought": { "type": "string", "description": "Optional extracted chain-of-thought reasoning." },
+        "mood": { "type": "string", "description": "Detected Cel avatar mood key for this reply." },
+        "modelName": { "type": "string", "description": "Model name that generated the response." },
+        "tokenEstimate": { "type": "integer", "description": "Estimated token count for this message." },
+        "latencyMs": { "type": "integer", "description": "Generation latency in milliseconds." },
+        "hasAttachment": { "type": "boolean", "description": "Whether the message included a visual attachment or generated image." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp written via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "sessionId", "role", "content", "thought", "mood", "modelName", "tokenEstimate", "latencyMs", "hasAttachment", "createdAt"]
+    },
+    "CustomPersona": {
+      "title": "CustomPersona",
+      "description": "A user-authored custom AI persona preset.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "name": { "type": "string", "description": "Persona display name." },
+        "emoji": { "type": "string", "description": "Persona badge emoji." },
+        "tagline": { "type": "string", "description": "Short persona summary." },
+        "systemPrompt": { "type": "string", "description": "System instruction text." },
+        "accentHex": { "type": "string", "description": "Hex accent color string." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp written via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp written via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "name", "emoji", "tagline", "systemPrompt", "accentHex", "createdAt", "updatedAt"]
+    },
+    "MemoryPreset": {
+      "title": "MemoryPreset",
+      "description": "A user-authored persistent memory note injected into system prompts.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "title": { "type": "string", "description": "Memory label." },
+        "content": { "type": "string", "description": "Memory text injected into context." },
+        "enabled": { "type": "boolean", "description": "Whether this memory is active." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp written via FieldValue.serverTimestamp()." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp written via FieldValue.serverTimestamp()." }
+      },
+      "required": ["userId", "title", "content", "enabled", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/ChatSession" },
+      "description": "User-owned Cellium chat sessions."
+    },
+    "/users/{userId}/sessions/{sessionId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages belonging to a user's chat session."
+    },
+    "/users/{userId}/personas/{personaId}": {
+      "schema": { "$ref": "#/entities/CustomPersona" },
+      "description": "User-authored custom personas."
+    },
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": { "$ref": "#/entities/MemoryPreset" },
+      "description": "User-authored persistent memory entries."
+    }
+  }
+}

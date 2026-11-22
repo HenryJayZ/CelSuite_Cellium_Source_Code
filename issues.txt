@@ -1,3 +1,0 @@
-1. Saving an edited Cel message with a <think> does not remove the think dropdown when removed from editing...
-2. this is annoying, when I send a message and click stop, the app just stops receiving, it doesnt pkill or xkill the local model process or the sending to server API Key, which for local model I have to wait for it to finish responding in the shadows before I can send another message, and for API key it's uses my QUOTA!
-

@@ -1,0 +1,109 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 160 && id.matches('^[a-zA-Z0-9_\\.\\-]+$');
+    }
+
+    match /users/{userId} {
+      // Owner-only Account State: stats, preferences, active provider, Imagine & Kaggle credentials
+      match /account/{docId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) &&
+                                 isValidId(docId) &&
+                                 request.resource.data.userId == userId;
+        allow delete: if isOwner(userId) && isValidId(docId);
+      }
+
+      // Owner-only AI Providers & BYOK API Keys
+      match /providers/{providerId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) &&
+                                 isValidId(providerId) &&
+                                 request.resource.data.userId == userId &&
+                                 request.resource.data.name is string &&
+                                 request.resource.data.name.size() >= 1 &&
+                                 request.resource.data.name.size() <= 120;
+        allow delete: if isOwner(userId) && isValidId(providerId);
+      }
+
+      // Owner-only Slash Prompt Templates
+      match /templates/{templateId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) &&
+                                 isValidId(templateId) &&
+                                 request.resource.data.userId == userId &&
+                                 request.resource.data.slashKey is string &&
+                                 request.resource.data.promptBody is string &&
+                                 request.resource.data.promptBody.size() <= 16000;
+        allow delete: if isOwner(userId) && isValidId(templateId);
+      }
+
+      // Owner-only Chat & Arena Sessions
+      match /sessions/{sessionId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) &&
+                                 isValidId(sessionId) &&
+                                 request.resource.data.userId == userId &&
+                                 request.resource.data.title is string &&
+                                 request.resource.data.title.size() >= 1 &&
+                                 request.resource.data.title.size() <= 200;
+        allow delete: if isOwner(userId) && isValidId(sessionId);
+
+        // Messages inside a session
+        match /messages/{messageId} {
+          allow get, list: if isOwner(userId) && isValidId(sessionId);
+          allow create, update: if isOwner(userId) &&
+                                   isValidId(sessionId) &&
+                                   isValidId(messageId) &&
+                                   request.resource.data.userId == userId &&
+                                   request.resource.data.sessionId == sessionId &&
+                                   request.resource.data.content is string &&
+                                   request.resource.data.content.size() <= 120000;
+          allow delete: if isOwner(userId) && isValidId(sessionId) && isValidId(messageId);
+        }
+      }
+
+      // Owner-only Custom Personas
+      match /personas/{personaId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) &&
+                                 isValidId(personaId) &&
+                                 request.resource.data.userId == userId &&
+                                 request.resource.data.name is string &&
+                                 request.resource.data.name.size() >= 1 &&
+                                 request.resource.data.name.size() <= 80 &&
+                                 request.resource.data.systemPrompt is string &&
+                                 request.resource.data.systemPrompt.size() <= 16000;
+        allow delete: if isOwner(userId) && isValidId(personaId);
+      }
+
+      // Owner-only Persistent Memories
+      match /memories/{memoryId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) &&
+                                 isValidId(memoryId) &&
+                                 request.resource.data.userId == userId &&
+                                 request.resource.data.title is string &&
+                                 request.resource.data.title.size() >= 1 &&
+                                 request.resource.data.title.size() <= 120 &&
+                                 request.resource.data.content is string &&
+                                 request.resource.data.content.size() <= 8000;
+        allow delete: if isOwner(userId) && isValidId(memoryId);
+      }
+    }
+  }
+}
