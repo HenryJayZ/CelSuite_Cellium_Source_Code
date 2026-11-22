@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -26,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.CleaningServices
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.FolderOpen
@@ -34,18 +34,24 @@ import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.StarOutline
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -65,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import com.henny.cellium.ai.ProviderCatalog
 import com.henny.cellium.ai.ProviderPresets
 import com.henny.cellium.core.CelliumPreferences
+import com.henny.cellium.core.StarredModelEntry
 import com.henny.cellium.data.local.ProviderProfileEntity
 import com.henny.cellium.ui.chat.CelliumUiState
 import com.henny.cellium.ui.chat.CelliumViewModel
@@ -76,6 +83,7 @@ import com.henny.cellium.ui.theme.CelDangerRed
 import com.henny.cellium.ui.theme.CelEmeraldThought
 import com.henny.cellium.ui.theme.CelLavender
 import com.henny.cellium.ui.theme.CelTerminalBg
+import com.henny.cellium.ui.theme.CelTextMuted
 import com.henny.cellium.ui.theme.CelTextPrimary
 import com.henny.cellium.ui.theme.CelTextSecondary
 import com.henny.cellium.ui.theme.JetBrainsMono
@@ -86,6 +94,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun ProvidersHubCard(
     uiState: CelliumUiState,
+    prefs: CelliumPreferences,
     viewModel: CelliumViewModel,
 ) {
     val visuals = LocalCelliumVisuals.current
@@ -95,12 +104,20 @@ fun ProvidersHubCard(
     var showCatalogSheet by remember { mutableStateOf(false) }
     var filterQuery by remember { mutableStateOf("") }
 
-    val displayedProviders = remember(uiState.providers, filterQuery) {
+    val starredModels = remember(prefs.starredModelsJson) {
+        viewModel.prefsStore.decodeStarredModels(prefs.starredModelsJson)
+    }
+
+    val displayedProviders = remember(uiState.providers, filterQuery, prefs.hiddenProviderIds) {
         val q = filterQuery.trim().lowercase()
-        val list = if (q.isEmpty()) uiState.providers.take(10) else uiState.providers.filter {
-            it.name.lowercase().contains(q) || it.selectedModel.lowercase().contains(q)
+        val sorted = uiState.providers.sortedByDescending { it.usageCount }
+        if (q.isEmpty()) {
+            sorted.filter { it.id !in prefs.hiddenProviderIds || it.id == uiState.activeProvider?.id }.take(14)
+        } else {
+            sorted.filter {
+                it.name.lowercase().contains(q) || it.selectedModel.lowercase().contains(q)
+            }
         }
-        list
     }
 
     GlassCard(highlighted = true, shape = RoundedCornerShape(22.dp)) {
@@ -109,11 +126,21 @@ fun ProvidersHubCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f),
+            ) {
                 Icon(Icons.Rounded.Key, contentDescription = null, tint = visuals.primary)
                 Column {
-                    Text("AI Providers & API Keys (${ProviderCatalog.ALL.size}+)", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
-                    Text("Local Room SQLite · Synced privately to your Google account when signed in", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                    Text("AI Providers & Keys (${ProviderCatalog.ALL.size}+)", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        text = "Sorted by usage · ${starredModels.size} starred · ${prefs.hiddenProviderIds.size} hidden",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CelTextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
             IconButton(
@@ -126,17 +153,15 @@ fun ProvidersHubCard(
 
         Spacer(Modifier.height(10.dp))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = { showCatalogSheet = true },
-                colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.weight(1f).testTag("settings_browse_200_providers"),
-            ) {
-                Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Browse All ${ProviderCatalog.ALL.size}+ Providers")
-            }
+        Button(
+            onClick = { showCatalogSheet = true },
+            colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth().testTag("settings_browse_200_providers"),
+        ) {
+            Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Browse All ${ProviderCatalog.ALL.size}+ Providers", maxLines = 1, softWrap = false)
         }
 
         Spacer(Modifier.height(8.dp))
@@ -144,7 +169,7 @@ fun ProvidersHubCard(
         OutlinedTextField(
             value = filterQuery,
             onValueChange = { filterQuery = it },
-            placeholder = { Text("Filter configured providers...") },
+            placeholder = { Text("Filter configured or hidden providers...") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
@@ -155,6 +180,7 @@ fun ProvidersHubCard(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             displayedProviders.forEach { p ->
                 val isActive = uiState.activeProvider?.id == p.id
+                val isHidden = p.id in prefs.hiddenProviderIds
                 val isConfigured = !p.requiresKey || p.protocol == "on_device" || p.apiKey.isNotBlank() || p.baseUrl.contains("127.0.0.1")
                 Row(
                     modifier = Modifier
@@ -163,7 +189,7 @@ fun ProvidersHubCard(
                         .background(if (isActive) visuals.primary.copy(alpha = 0.20f) else CelTerminalBg.copy(alpha = 0.7f))
                         .border(1.dp, if (isActive) visuals.activeBorder else visuals.subtleBorder, RoundedCornerShape(14.dp))
                         .clickable { editingProvider = p }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = 10.dp, vertical = 9.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     VectorBadgeIcon(
@@ -173,13 +199,13 @@ fun ProvidersHubCard(
                         containerSize = 32.dp,
                         iconSize = 17.dp,
                     )
-                    Spacer(Modifier.width(10.dp))
+                    Spacer(Modifier.width(9.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(
                                 text = p.name,
                                 style = MaterialTheme.typography.titleSmall,
-                                color = CelTextPrimary,
+                                color = if (isHidden) CelTextMuted else CelTextPrimary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false),
@@ -191,20 +217,65 @@ fun ProvidersHubCard(
                                     .background(if (isConfigured) CelEmeraldThought else CelAmber)
                             )
                         }
+                        val detail = buildString {
+                            append(p.selectedModel.ifBlank { "Tap to configure" })
+                            if (p.usageCount > 0) append(" · ${p.usageCount} uses")
+                        }
                         Text(
-                            text = p.selectedModel.ifBlank { "Tap to configure" },
+                            text = detail,
                             style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
                             color = CelTextSecondary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
+                    if (!isActive) {
+                        IconButton(
+                            onClick = { viewModel.toggleHideProvider(p.id) },
+                            modifier = Modifier.size(30.dp),
+                        ) {
+                            Icon(
+                                imageVector = if (isHidden) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff,
+                                contentDescription = if (isHidden) "Unhide" else "Hide",
+                                tint = CelTextMuted,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
                     TextButton(onClick = { viewModel.selectProvider(p.id) }) {
-                        Text(if (isActive) "Active" else "Use", color = if (isActive) CelEmeraldThought else visuals.primary)
+                        Text(
+                            text = if (isActive) "Active" else "Use",
+                            color = if (isActive) CelEmeraldThought else visuals.primary,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
                     }
                 }
             }
         }
+
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider(color = visuals.subtleBorder)
+        Spacer(Modifier.height(10.dp))
+
+        Text(
+            text = "Auto-Retry on Rate Limit / Busy: ${prefs.maxAutoRetries}x",
+            style = MaterialTheme.typography.labelMedium,
+            color = CelTextPrimary,
+        )
+        Text(
+            text = if (prefs.maxAutoRetries == 0) "Disabled — fail immediately on 429/503" else "Automatically retries HTTP 429 / 503 with smart backoff (default 10x)",
+            style = MaterialTheme.typography.labelSmall,
+            color = CelTextSecondary,
+        )
+        Slider(
+            value = prefs.maxAutoRetries.toFloat(),
+            onValueChange = { v ->
+                scope.launch { viewModel.prefsStore.updateMaxAutoRetries(v.toInt()) }
+            },
+            valueRange = 0f..15f,
+            steps = 14,
+        )
     }
 
     if (showCatalogSheet) {
@@ -222,6 +293,11 @@ fun ProvidersHubCard(
             onFetchActiveModels = { viewModel.fetchLiveModels(it) },
             onOpenSettingsProviders = {},
             onDismiss = { showCatalogSheet = false },
+            hiddenProviderIds = prefs.hiddenProviderIds,
+            starredModels = starredModels,
+            onToggleHideProvider = { viewModel.toggleHideProvider(it) },
+            onToggleStarModel = { pid, pname, model -> viewModel.toggleStarModel(pid, pname, model) },
+            onRequestConfigureKey = { prov -> editingProvider = prov },
         )
     }
 
@@ -243,6 +319,8 @@ fun ProvidersHubCard(
                 }
             } else null,
             onFetchModels = { draft -> viewModel.fetchLiveModels(draft) },
+            starredModels = starredModels,
+            onToggleStarModel = { pid, pname, model -> viewModel.toggleStarModel(pid, pname, model) },
         )
     }
 
@@ -259,12 +337,14 @@ fun ProvidersHubCard(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ProviderEditDialog(
+fun ProviderEditDialog(
     provider: ProviderProfileEntity,
     onDismiss: () -> Unit,
     onSave: (ProviderProfileEntity) -> Unit,
     onDelete: (() -> Unit)?,
     onFetchModels: suspend (ProviderProfileEntity) -> Result<List<String>>,
+    starredModels: List<StarredModelEntry> = emptyList(),
+    onToggleStarModel: ((String, String, String) -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     val visuals = LocalCelliumVisuals.current
@@ -277,6 +357,9 @@ private fun ProviderEditDialog(
     var statusText by remember { mutableStateOf<String?>(null) }
     var statusIsError by remember { mutableStateOf(false) }
 
+    val starredKeys = remember(starredModels) {
+        starredModels.map { "${it.providerId}::${it.modelName}" }.toSet()
+    }
     val filteredModels = remember(models, modelSearch) {
         val q = modelSearch.trim().lowercase()
         if (q.isEmpty()) models else models.filter { it.lowercase().contains(q) }
@@ -343,7 +426,7 @@ private fun ProviderEditDialog(
                         if (fetching) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                         else Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Ping Key & Fetch All Models")
+                        Text("Ping Key & Fetch Models", maxLines = 1, softWrap = false)
                     }
                     if (statusText != null) {
                         Text(
@@ -374,6 +457,7 @@ private fun ProviderEditDialog(
                         ) {
                             items(filteredModels, key = { it }) { m ->
                                 val isSel = m == selectedModel
+                                val isStarred = "${provider.id}::$m" in starredKeys
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -381,9 +465,9 @@ private fun ProviderEditDialog(
                                         .background(if (isSel) visuals.primary.copy(alpha = 0.24f) else CelTerminalBg.copy(alpha = 0.72f))
                                         .border(1.dp, if (isSel) visuals.activeBorder else visuals.subtleBorder, RoundedCornerShape(10.dp))
                                         .clickable { selectedModel = m }
-                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                        .padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
                                     Text(
                                         text = m,
@@ -393,6 +477,19 @@ private fun ProviderEditDialog(
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f),
                                     )
+                                    if (onToggleStarModel != null) {
+                                        IconButton(
+                                            onClick = { onToggleStarModel(provider.id, provider.name, m) },
+                                            modifier = Modifier.size(28.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isStarred) Icons.Rounded.Star else Icons.Rounded.StarOutline,
+                                                contentDescription = if (isStarred) "Unstar" else "Star",
+                                                tint = if (isStarred) CelAmber else CelTextMuted,
+                                                modifier = Modifier.size(15.dp),
+                                            )
+                                        }
+                                    }
                                     if (isSel) {
                                         Icon(Icons.Rounded.Check, contentDescription = "Selected", tint = visuals.primary, modifier = Modifier.size(16.dp))
                                     }
@@ -401,14 +498,14 @@ private fun ProviderEditDialog(
                         }
                     } else if (provider.requiresKey) {
                         Text(
-                            text = "Enter your API key and tap 'Ping Key & Fetch All Models' to query every model your key supports.",
+                            text = "Enter your API key and tap 'Ping Key & Fetch Models' to query every model your key supports.",
                             style = MaterialTheme.typography.labelSmall,
                             color = CelTextSecondary,
                         )
                     }
                 } else {
                     Text(
-                        "On-Device Offline AI supports both .gguf (llama.cpp) and .task/.bin (MediaPipe) models completely offline with zero API keys.",
+                        "On-Device Offline AI supports both .gguf (llama.cpp zero-copy mount) and .task/.bin (MediaPipe) models completely offline with zero API keys.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -424,14 +521,14 @@ private fun ProviderEditDialog(
                         cachedModelsJson = ProviderPresets.encodeModels(models),
                     )
                 )
-            }) { Text("Save & Use") }
+            }) { Text("Save & Use", maxLines = 1, softWrap = false) }
         },
         dismissButton = {
             Row {
                 if (onDelete != null) {
-                    TextButton(onClick = onDelete) { Text("Delete", color = CelDangerRed) }
+                    TextButton(onClick = onDelete) { Text("Delete", color = CelDangerRed, maxLines = 1, softWrap = false) }
                 }
-                TextButton(onClick = onDismiss) { Text("Close") }
+                TextButton(onClick = onDismiss) { Text("Close", maxLines = 1, softWrap = false) }
             }
         },
     )
@@ -458,8 +555,8 @@ private fun AddCustomProviderDialog(
                 OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API Key (Optional for local)") }, singleLine = true)
                 OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("Default Model ID") }, singleLine = true)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(selected = protocol == "openai", onClick = { protocol = "openai" }, label = { Text("OpenAI Compat") })
-                    FilterChip(selected = protocol == "anthropic", onClick = { protocol = "anthropic" }, label = { Text("Anthropic") })
+                    FilterChip(selected = protocol == "openai", onClick = { protocol = "openai" }, label = { Text("OpenAI", maxLines = 1, softWrap = false) })
+                    FilterChip(selected = protocol == "anthropic", onClick = { protocol = "anthropic" }, label = { Text("Anthropic", maxLines = 1, softWrap = false) })
                 }
             }
         },
@@ -467,9 +564,9 @@ private fun AddCustomProviderDialog(
             TextButton(
                 onClick = { onCreate(name, baseUrl, apiKey, model, protocol) },
                 enabled = name.isNotBlank() && baseUrl.isNotBlank(),
-            ) { Text("Add") }
+            ) { Text("Add", maxLines = 1, softWrap = false) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", maxLines = 1, softWrap = false) } },
     )
 }
 
@@ -479,11 +576,12 @@ fun OnDeviceModelManagerCard(
     prefs: CelliumPreferences,
     processRamMb: Int,
     viewModel: CelliumViewModel,
+    onJumpToChat: () -> Unit = {},
 ) {
     val visuals = LocalCelliumVisuals.current
     val scope = rememberCoroutineScope()
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri != null) viewModel.importLocalModel(uri)
+        if (uri != null) viewModel.importLocalModel(uri, onLoadedNavigateToChat = onJumpToChat)
     }
 
     GlassCard(shape = RoundedCornerShape(22.dp)) {
@@ -492,16 +590,28 @@ fun OnDeviceModelManagerCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f),
+            ) {
                 Icon(Icons.Rounded.Memory, contentDescription = null, tint = visuals.tertiary)
                 Column {
-                    Text("On-Device Offline AI (.gguf & .task)", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
+                    Text("On-Device Offline AI (.gguf & .task)", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        "llama.cpp GGUF + MediaPipe · Live RAM: $processRamMb MB",
+                        "Zero-Copy SAF Mount · Live RAM: $processRamMb MB",
                         style = MaterialTheme.typography.labelSmall,
                         color = CelTextSecondary,
                     )
                 }
+            }
+            OutlinedButton(
+                onClick = { viewModel.freeAllRam() },
+                shape = RoundedCornerShape(10.dp),
+            ) {
+                Icon(Icons.Rounded.CleaningServices, contentDescription = null, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Free RAM", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
             }
         }
 
@@ -525,7 +635,7 @@ fun OnDeviceModelManagerCard(
                 OutlinedButton(onClick = { viewModel.unloadLocalModel() }, shape = RoundedCornerShape(10.dp)) {
                     Icon(Icons.Rounded.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Unload")
+                    Text("Unload", maxLines = 1, softWrap = false)
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -540,7 +650,8 @@ fun OnDeviceModelManagerCard(
         }
 
         if (st.downloadProgress != null) {
-            Text("Downloading ${st.downloadingName} (${(st.downloadProgress * 100).toInt()}%)", style = MaterialTheme.typography.labelSmall, color = CelLavender)
+            val opLabel = st.operationLabel.ifBlank { "Downloading" }
+            Text("$opLabel ${st.downloadingName} (${(st.downloadProgress * 100).toInt()}%)", style = MaterialTheme.typography.labelSmall, color = CelLavender)
             Spacer(Modifier.height(4.dp))
             LinearProgressIndicator(
                 progress = { st.downloadProgress },
@@ -559,7 +670,7 @@ fun OnDeviceModelManagerCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Prefer GPU Delegate (.task fallback CPU)", style = MaterialTheme.typography.bodySmall, color = CelTextPrimary)
+            Text("Prefer GPU Delegate (.task fallback CPU)", style = MaterialTheme.typography.bodySmall, color = CelTextPrimary, modifier = Modifier.weight(1f))
             Switch(
                 checked = prefs.localUseGpu,
                 onCheckedChange = { gpu ->
@@ -574,44 +685,72 @@ fun OnDeviceModelManagerCard(
 
         Button(
             onClick = { modelPicker.launch(arrayOf("*/*")) },
+            enabled = !st.loading && st.downloadProgress == null,
             colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
             shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth().testTag("import_local_model_button"),
         ) {
             Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
-            Text("Import Local .gguf / .task / .bin Model")
+            Text("Mount / Import .gguf / .task Model", maxLines = 1, softWrap = false)
         }
 
-        if (uiState.installedLocalModels.isNotEmpty()) {
+        if (uiState.registeredLocalModels.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
-            Text("Installed Models on Phone", style = MaterialTheme.typography.labelLarge, color = CelLavender)
+            Text("Registered Models on Phone (${uiState.registeredLocalModels.size})", style = MaterialTheme.typography.labelLarge, color = CelLavender)
             Spacer(Modifier.height(6.dp))
-            uiState.installedLocalModels.forEach { f ->
-                val badge = if (f.name.endsWith(".gguf", true)) "GGUF" else "TASK"
+            uiState.registeredLocalModels.forEach { item ->
+                val formatBadge = if (item.displayName.endsWith(".gguf", true)) "GGUF" else "TASK"
+                val sizeMb = item.sizeBytes / (1024 * 1024)
+                val isCurrentlyLoaded = st.loaded && (st.modelPath == item.uriOrPath || st.modelName == item.displayName)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 4.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(CelTerminalBg)
+                        .background(if (isCurrentlyLoaded) CelEmeraldThought.copy(alpha = 0.14f) else CelTerminalBg)
                         .padding(10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                             Surface(shape = RoundedCornerShape(6.dp), color = visuals.primary.copy(alpha = 0.2f)) {
-                                Text(badge, style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono), color = visuals.primary, modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp))
+                                Text(formatBadge, style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono), color = visuals.primary, modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp))
                             }
-                            Text(f.name, style = MaterialTheme.typography.labelMedium, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (item.isContentUri) CelEmeraldThought.copy(alpha = 0.18f) else visuals.secondary.copy(alpha = 0.18f),
+                            ) {
+                                Text(
+                                    text = if (item.isContentUri) "DIRECT" else "LOCAL",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                                    color = if (item.isContentUri) CelEmeraldThought else visuals.secondary,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                )
+                            }
+                            Text(item.displayName, style = MaterialTheme.typography.labelMedium, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Text("${f.length() / (1024 * 1024)} MB", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                        Text(
+                            text = if (sizeMb > 0) "$sizeMb MB · ${if (item.isContentUri) "Zero-copy mounted" else "Stored in app"}" else if (item.isContentUri) "Zero-copy mounted" else "Stored in app",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CelTextSecondary,
+                        )
                     }
-                    IconButton(onClick = { viewModel.loadLocalModelFile(f) }) {
-                        Icon(Icons.Rounded.PlayArrow, contentDescription = "Load local model", tint = CelEmeraldThought)
+                    IconButton(
+                        onClick = { viewModel.loadLocalModel(item, onLoadedNavigateToChat = onJumpToChat) },
+                        enabled = !st.loading,
+                    ) {
+                        Icon(
+                            Icons.Rounded.PlayArrow,
+                            contentDescription = "Load local model",
+                            tint = if (st.loading) CelTextMuted else CelEmeraldThought,
+                        )
                     }
-                    IconButton(onClick = { viewModel.deleteLocalModel(f) }) {
-                        Icon(Icons.Rounded.Delete, contentDescription = "Delete local model", tint = CelDangerRed)
+                    IconButton(
+                        onClick = { viewModel.deleteLocalModelItem(item) },
+                        enabled = !st.loading,
+                    ) {
+                        Icon(Icons.Rounded.Delete, contentDescription = "Remove local model", tint = CelDangerRed)
                     }
                 }
             }
@@ -648,8 +787,8 @@ fun OnDeviceModelManagerCard(
                     Text("${cm.sizeLabel} · ~${cm.ramNeededMb} MB RAM · ${cm.description}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
                 }
                 IconButton(
-                    onClick = { viewModel.downloadCuratedLocalModel(cm) },
-                    enabled = st.downloadProgress == null,
+                    onClick = { viewModel.downloadCuratedLocalModel(cm, onLoadedNavigateToChat = onJumpToChat) },
+                    enabled = st.downloadProgress == null && !st.loading,
                 ) {
                     Icon(Icons.Rounded.Download, contentDescription = "Download ${cm.name}", tint = visuals.primary)
                 }

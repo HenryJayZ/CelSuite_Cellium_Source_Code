@@ -93,24 +93,19 @@ fun FloatingMiniCelOverlay(
             }
             .testTag("floating_mini_cel"),
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
+        Box(
+            contentAlignment = Alignment.Center,
             modifier = Modifier
-                .shadow(14.dp, RoundedCornerShape(22.dp))
-                .clip(RoundedCornerShape(22.dp))
+                .shadow(14.dp, CircleShape)
+                .clip(CircleShape)
                 .background(visuals.glassSurface.copy(alpha = 0.94f))
-                .border(1.4.dp, visuals.activeBorder, RoundedCornerShape(22.dp))
-                .padding(horizontal = 10.dp, vertical = 8.dp),
+                .border(1.4.dp, visuals.activeBorder, CircleShape)
+                .padding(8.dp),
         ) {
             DotMatrixAvatarCanvas(
                 expression = expr,
                 highFps = highFps,
-                modifier = Modifier.size(72.dp),
-            )
-            Text(
-                text = "Mini-Cel",
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.White.copy(alpha = 0.85f),
+                modifier = Modifier.size(74.dp),
             )
         }
         IconButton(

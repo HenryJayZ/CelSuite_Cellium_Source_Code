@@ -2,6 +2,9 @@ package com.henny.cellium.ai
 
 import android.graphics.Bitmap
 import android.util.Base64
+import com.henny.cellium.avatar.AVATAR_MOODS
+import com.henny.cellium.avatar.MoodDetector
+import com.henny.cellium.core.ContextModifyConfig
 import com.henny.cellium.core.DevLogBuffer
 import com.henny.cellium.data.PersonaSpec
 import com.henny.cellium.data.local.MemoryEntity
@@ -23,11 +26,13 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 
 data class StreamChunk(
@@ -37,12 +42,14 @@ data class StreamChunk(
 
 /**
  * Universal Multi-Provider AI Bridge for Cel.Cellium (200+ providers).
- * Supports keyless free providers (Pollinations AI with automatic mirror fallback),
- * any OpenAI-compatible provider, native Anthropic Messages, raw file attachments, and vision.
+ * Supports keyless free Pollinations AI (text.pollinations.ai/openai with openai-fast),
+ * any OpenAI-compatible provider, native Anthropic Messages, multi-image vision,
+ * immediate request cancellation, inline/background mood control, Illume tool calls, and ReAct Agent Mode.
  */
 class UniversalLlmClient {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     private val mediaTypeJson = "application/json; charset=utf-8".toMediaType()
+    private val activeCalls = CopyOnWriteArrayList<Call>()
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(25, TimeUnit.SECONDS)
@@ -50,34 +57,140 @@ class UniversalLlmClient {
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    fun cancelActiveRequests() {
+        val snapshot = activeCalls.toList()
+        activeCalls.clear()
+        snapshot.forEach { runCatching { it.cancel() } }
+    }
+
     fun buildSystemPrompt(
         persona: PersonaSpec,
         memories: List<MemoryEntity>,
         agentModeEnabled: Boolean,
         shizukuConnected: Boolean,
+        agentWorkspacePath: String = "/sdcard/Documents/CelliumProjects",
+        moodMethod: String = "inline_tag",
+        contextConfig: ContextModifyConfig = ContextModifyConfig(),
         extraInstruction: String = "",
     ): String = buildString {
-        append(persona.systemPrompt.trim())
-        val activeMemories = memories.filter { it.enabled && it.content.isNotBlank() }
-        if (activeMemories.isNotEmpty()) {
-            append("\n\n[Persistent User Memories]\n")
-            activeMemories.forEach { m ->
-                append("- ${m.title}: ${m.content}\n")
+        if (contextConfig.includePersona && persona.systemPrompt.isNotBlank()) {
+            append(persona.systemPrompt.trim())
+        } else {
+            append("You are Cel, a concise, helpful AI assistant.")
+        }
+
+        if (contextConfig.includeMemories) {
+            val activeMemories = memories.filter { it.enabled && it.content.isNotBlank() }
+            if (activeMemories.isNotEmpty()) {
+                append("\n\n[Persistent User Memories]\n")
+                activeMemories.forEach { m ->
+                    append("- ${m.title}: ${m.content}\n")
+                }
             }
         }
-        if (agentModeEnabled) {
+
+        if (contextConfig.includeMoodInstructions && moodMethod == "inline_tag") {
+            val allowed = MoodDetector.PROMPT_MOOD_LIST.joinToString(", ")
+            append("\n\n[Avatar Expression Tag — REQUIRED]\n")
+            append("Start EVERY response on line 1 with EXACTLY: mood: <key>\n")
+            append("Choose ONLY ONE key from this exact list: $allowed\n")
+            append("NEVER invent any other mood word. Put your normal reply on line 2.")
+        }
+
+        if (contextConfig.includeIllumeInstructions) {
+            append("\n\n[Illume Image Generator Tool]\n")
+            append("You CAN generate real images directly inside Cel.Cellium! Whenever the user asks you to draw, generate, create, or make an image/picture/wallpaper/art, include ONE block with a rich visual prompt:\n")
+            append("[ILLUME_GEN]\n<detailed visual prompt describing subject, style, lighting, and colors>\n[/ILLUME_GEN]\n")
+            append("Do NOT pretend you cannot generate images and do NOT fake '[generating...]' text. Cellium will render the real artwork from your [ILLUME_GEN] block automatically.")
+        }
+
+        if (agentModeEnabled && contextConfig.includeAgentInstructions) {
             append("\n\n[Cel.Cellium Android Agent Mode]\n")
+            append("Project Workspace Directory: $agentWorkspacePath\n")
             append(
                 if (shizukuConnected) {
-                    "You have privileged Android Shizuku shell access. When the user asks to inspect the device, run diagnostics, list packages, check RAM/battery, or execute shell commands, emit EXACTLY ONE command wrapped in:\n[SHIZUKU_RUN]\n<command>\n[/SHIZUKU_RUN]\nWait for the tool output before summarizing results. Never suggest destructive commands."
+                    "Shizuku shell IS CONNECTED. When the user asks to inspect the device, run diagnostics, manage files in the project workspace, check storage/RAM/battery, or execute shell commands:\n" +
+                        "1. Output ONLY a single raw tool block and NOTHING ELSE (no intro sentence, no markdown ``` fences, no comments):\n" +
+                        "[SHIZUKU_RUN]\n<single shell command>\n[/SHIZUKU_RUN]\n" +
+                        "2. Cellium executes it immediately and sends stdout back to you so you can then give the final answer.\n" +
+                        "3. For project files, work inside $agentWorkspacePath. Never emit destructive commands."
                 } else {
-                    "Agent Mode is toggled ON, but Shizuku is not currently connected. If the user asks for a device command, explain briefly how to authorize Shizuku in Settings -> System & Shizuku or still provide a [SHIZUKU_RUN] block for them to review."
+                    "Shizuku is NOT connected right now. If the user asks to run a device or shell command, tell them concisely in 1-2 sentences to authorize Shizuku in Settings -> Agent & Shizuku. Do NOT output any [SHIZUKU_RUN] block while Shizuku is disconnected."
                 }
             )
         }
+
         if (extraInstruction.isNotBlank()) {
             append("\n\n").append(extraInstruction.trim())
         }
+    }
+
+    /**
+     * Method 2 Mood Engine: lightweight background classification call strictly returning
+     * one valid mood key from AVATAR_MOODS.
+     */
+    suspend fun classifyMoodFast(
+        provider: ProviderProfileEntity,
+        assistantReply: String,
+    ): String? = withContext(Dispatchers.IO) {
+        if (provider.protocol == "on_device" || assistantReply.isBlank()) return@withContext null
+        val cleanBase = provider.baseUrl.trim().trimEnd('/')
+        if (cleanBase.isBlank()) return@withContext null
+        val allowed = MoodDetector.PROMPT_MOOD_LIST.joinToString(", ")
+        val prompt = "Classify the emotional tone of this message into EXACTLY ONE word from [$allowed]. Output ONLY that single lowercase word, nothing else.\n\nMessage:\n${assistantReply.take(700)}"
+        runCatching {
+            val raw = if (provider.protocol == "anthropic") {
+                val payload = buildJsonObject {
+                    put("model", provider.selectedModel.trim())
+                    put("max_tokens", 12)
+                    put("temperature", 0.0)
+                    put("messages", buildJsonArray {
+                        add(buildJsonObject {
+                            put("role", "user")
+                            put("content", prompt)
+                        })
+                    })
+                }.toString()
+                val req = Request.Builder()
+                    .url("$cleanBase/messages")
+                    .post(payload.toRequestBody(mediaTypeJson))
+                    .header("x-api-key", provider.apiKey.trim())
+                    .header("anthropic-version", "2023-06-01")
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use ""
+                    val root = json.parseToJsonElement(resp.body?.string().orEmpty()).jsonObject
+                    root["content"]?.jsonArray?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull.orEmpty()
+                }
+            } else {
+                val modelName = if (provider.id == ProviderPresets.ID_POLLINATIONS_FREE && provider.selectedModel.isBlank()) {
+                    "openai-fast"
+                } else provider.selectedModel.trim()
+                val payload = buildJsonObject {
+                    put("model", modelName)
+                    put("max_tokens", 12)
+                    put("temperature", 0.0)
+                    put("stream", false)
+                    put("messages", buildJsonArray {
+                        add(buildJsonObject {
+                            put("role", "user")
+                            put("content", prompt)
+                        })
+                    })
+                }.toString()
+                val endpoint = if (cleanBase.endsWith("/chat/completions")) cleanBase else "$cleanBase/chat/completions"
+                val rb = Request.Builder().url(endpoint).post(payload.toRequestBody(mediaTypeJson))
+                applyAuthHeaders(rb, provider)
+                client.newCall(rb.build()).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use ""
+                    val root = json.parseToJsonElement(resp.body?.string().orEmpty()).jsonObject
+                    root["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+                        ?.get("message")?.jsonObject?.get("content")?.jsonPrimitive?.contentOrNull.orEmpty()
+                }
+            }
+            val token = raw.trim().lowercase().replace(Regex("[^a-z]"), "")
+            if (token in AVATAR_MOODS) token else null
+        }.getOrNull()
     }
 
     suspend fun fetchModels(provider: ProviderProfileEntity): Result<List<String>> = withContext(Dispatchers.IO) {
@@ -98,27 +211,23 @@ class UniversalLlmClient {
         val isKeyless = !provider.requiresKey || provider.id == ProviderPresets.ID_POLLINATIONS_FREE
         if (key.isBlank() && !isLocalNetwork && !isKeyless) {
             return@withContext Result.failure(
-                IllegalStateException("Enter your ${provider.name} API key first so Cellium can ping the key and fetch its live models.")
+                IllegalStateException("Enter your ${provider.name} API key first so Cellium can fetch live models.")
             )
         }
 
-        // 1. Google AI Studio / Gemini API: query native paginated /v1beta/models?key=... to get EVERY live model on the key
         if (cleanBase.contains("generativelanguage.googleapis.com", ignoreCase = true)) {
             val googleRes = fetchAllGoogleAiModels(key)
             if (googleRes.isSuccess && googleRes.getOrNull().orEmpty().isNotEmpty()) {
                 return@withContext googleRes
             }
-            // Fallback to OpenAI-compatible /models if native failed
             val openaiRes = fetchModelsFromUrl("$cleanBase/models", provider)
             return@withContext if (openaiRes.isSuccess) openaiRes else googleRes
         }
 
-        // 2. Anthropic native /models with pagination
         if (provider.protocol == "anthropic") {
             return@withContext fetchAllAnthropicModels(cleanBase, provider)
         }
 
-        // 3. Ollama local server (/v1/models OR native /api/tags)
         if (cleanBase.contains(":11434")) {
             val primary = fetchModelsFromUrl("$cleanBase/models", provider)
             if (primary.isSuccess && primary.getOrNull().orEmpty().isNotEmpty()) return@withContext primary
@@ -126,15 +235,46 @@ class UniversalLlmClient {
             return@withContext fetchModelsFromUrl(tagsUrl, provider)
         }
 
-        // 4. Pollinations AI (Keyless Free): ping live /models endpoint directly
         if (provider.id == ProviderPresets.ID_POLLINATIONS_FREE) {
-            val res = fetchModelsFromUrl("$cleanBase/models", provider)
-            if (res.isSuccess && res.getOrNull().orEmpty().isNotEmpty()) return@withContext res
-            return@withContext fetchModelsFromUrl("https://text.pollinations.ai/models", provider)
+            val live = fetchPollinationsTextModels(provider)
+            if (live.isSuccess && live.getOrNull().orEmpty().isNotEmpty()) return@withContext live
+            return@withContext Result.success(listOf("openai-fast"))
         }
 
-        // 5. Standard OpenAI-compatible /models (OpenRouter, OpenAI, Groq, DeepSeek, xAI, Mistral, Together, Fireworks, etc.)
         fetchModelsFromUrl("$cleanBase/models", provider)
+    }
+
+    private fun fetchPollinationsTextModels(provider: ProviderProfileEntity): Result<List<String>> = runCatching {
+        val reqBuilder = Request.Builder()
+            .url("https://text.pollinations.ai/models")
+            .header("User-Agent", "Cel.Cellium-Android/2611.22.0")
+            .get()
+        if (provider.apiKey.isNotBlank()) {
+            reqBuilder.header("Authorization", "Bearer ${provider.apiKey.trim()}")
+        }
+        client.newCall(reqBuilder.build()).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw IllegalStateException("Pollinations HTTP ${resp.code}")
+            val arr = json.parseToJsonElement(bodyStr).jsonArray
+            val models = arr.mapNotNull { el ->
+                when (el) {
+                    is JsonObject -> {
+                        val tier = el["tier"]?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
+                        val name = (el["name"]?.jsonPrimitive?.contentOrNull
+                            ?: el["id"]?.jsonPrimitive?.contentOrNull)?.trim()
+                        // If keyless, prioritize anonymous-tier models first
+                        if (provider.apiKey.isBlank() && tier.isNotBlank() && tier != "anonymous" && tier != "free") {
+                            null
+                        } else {
+                            name
+                        }
+                    }
+                    is JsonPrimitive -> el.contentOrNull?.trim()
+                    else -> null
+                }
+            }.filter { it.isNotBlank() }.distinct()
+            models.ifEmpty { listOf("openai-fast") }
+        }
     }
 
     private fun fetchAllGoogleAiModels(apiKey: String): Result<List<String>> = runCatching {
@@ -151,7 +291,7 @@ class UniversalLlmClient {
             }
             val req = Request.Builder()
                 .url(url)
-                .header("User-Agent", "Cel.Cellium-Android/2611.21.0")
+                .header("User-Agent", "Cel.Cellium-Android/2611.22.0")
                 .get()
                 .build()
             client.newCall(req).execute().use { resp ->
@@ -261,21 +401,33 @@ class UniversalLlmClient {
         history: List<MessageEntity>,
         userPrompt: String,
         imageBitmap: Bitmap? = null,
+        imageBitmaps: List<Bitmap> = emptyList(),
         attachedFileName: String = "",
         attachedFileContent: String = "",
+        historyLimit: Int = 24,
     ): Flow<StreamChunk> = flow {
+        val allImages = buildList {
+            if (imageBitmap != null) add(imageBitmap)
+            addAll(imageBitmaps)
+        }
         val cleanBase = provider.baseUrl.trim().trimEnd('/')
-        require(cleanBase.isNotBlank()) { "Provider Base URL is missing. Configure it in Settings -> Providers." }
-        val model = provider.selectedModel.trim()
-        require(model.isNotBlank()) { "No model selected for ${provider.name}." }
+        require(cleanBase.isNotBlank()) { "Provider Base URL is missing. Configure it in Settings -> AI Providers." }
+        val effectiveModel = if (provider.id == ProviderPresets.ID_POLLINATIONS_FREE && provider.selectedModel.isBlank()) {
+            "openai-fast"
+        } else {
+            provider.selectedModel.trim()
+        }
+        require(effectiveModel.isNotBlank()) { "No model selected for ${provider.name}. Open the provider picker and select a live model." }
+        val resolvedProvider = provider.copy(selectedModel = effectiveModel)
+
         val isLocalNetwork = cleanBase.contains("127.0.0.1") ||
             cleanBase.contains("localhost") ||
             cleanBase.contains("192.168.") ||
             cleanBase.contains("10.")
-        val isKeyless = !provider.requiresKey || provider.id == ProviderPresets.ID_POLLINATIONS_FREE
-        if (provider.apiKey.isBlank() && !isLocalNetwork && !isKeyless) {
+        val isKeyless = !resolvedProvider.requiresKey || resolvedProvider.id == ProviderPresets.ID_POLLINATIONS_FREE
+        if (resolvedProvider.apiKey.isBlank() && !isLocalNetwork && !isKeyless) {
             throw IllegalStateException(
-                "API key is empty for ${provider.name}. Open Settings -> Providers to add your key, or switch to Pollinations AI (Free · No Key)."
+                "API key is empty for ${resolvedProvider.name}. Tap the provider dropdown to add your key, or switch to Pollinations AI (Free)."
             )
         }
 
@@ -288,14 +440,16 @@ class UniversalLlmClient {
             append(userPrompt)
         }.trim()
 
-        if (provider.protocol == "anthropic") {
-            streamAnthropic(cleanBase, provider, systemPrompt, history, enrichedPrompt, imageBitmap)
+        val limitedHistory = history.takeLast(historyLimit.coerceIn(2, 48))
+
+        if (resolvedProvider.protocol == "anthropic") {
+            streamAnthropic(cleanBase, resolvedProvider, systemPrompt, limitedHistory, enrichedPrompt, allImages)
                 .collect { emit(it) }
-        } else if (provider.id == ProviderPresets.ID_POLLINATIONS_FREE) {
-            streamPollinationsWithFallback(cleanBase, provider, systemPrompt, history, enrichedPrompt, imageBitmap)
+        } else if (resolvedProvider.id == ProviderPresets.ID_POLLINATIONS_FREE) {
+            streamPollinationsWithFallback(cleanBase, resolvedProvider, systemPrompt, limitedHistory, enrichedPrompt, allImages)
                 .collect { emit(it) }
         } else {
-            streamOpenAiCompat(cleanBase, provider, systemPrompt, history, enrichedPrompt, imageBitmap)
+            streamOpenAiCompat(cleanBase, resolvedProvider, systemPrompt, limitedHistory, enrichedPrompt, allImages)
                 .collect { emit(it) }
         }
     }.flowOn(Dispatchers.IO)
@@ -306,26 +460,37 @@ class UniversalLlmClient {
         systemPrompt: String,
         history: List<MessageEntity>,
         userPrompt: String,
-        imageBitmap: Bitmap?,
+        images: List<Bitmap>,
     ): Flow<StreamChunk> = flow {
+        val normalizedPrimary = if (primaryBase.contains("gen.pollinations.ai") && provider.apiKey.isBlank()) {
+            "https://text.pollinations.ai/openai"
+        } else {
+            primaryBase
+        }
         val candidates = listOf(
-            primaryBase,
-            "https://text.pollinations.ai/openai",
+            normalizedPrimary to provider.selectedModel.ifBlank { "openai-fast" },
+            "https://text.pollinations.ai/openai" to "openai-fast",
         ).distinct()
         var lastError: Throwable? = null
-        for (base in candidates) {
+        for ((base, modelName) in candidates) {
             var emittedAny = false
             try {
-                streamOpenAiCompat(base, provider, systemPrompt, history, userPrompt, imageBitmap)
-                    .collect { chunk ->
-                        emittedAny = true
-                        emit(chunk)
-                    }
+                streamOpenAiCompat(
+                    base,
+                    provider.copy(selectedModel = modelName),
+                    systemPrompt,
+                    history,
+                    userPrompt,
+                    images,
+                ).collect { chunk ->
+                    emittedAny = true
+                    emit(chunk)
+                }
                 if (emittedAny) return@flow
             } catch (err: Throwable) {
                 lastError = err
                 if (emittedAny) throw err
-                DevLogBuffer.add("WARN", "Pollinations", "Mirror $base failed (${err.localizedMessage}), trying fallback...")
+                DevLogBuffer.add("WARN", "Pollinations", "Attempt $base ($modelName) failed (${err.localizedMessage}), trying fallback...")
             }
         }
         throw lastError ?: IllegalStateException("Pollinations Free endpoint did not respond. Please retry or pick another provider.")
@@ -337,7 +502,7 @@ class UniversalLlmClient {
         systemPrompt: String,
         history: List<MessageEntity>,
         userPrompt: String,
-        imageBitmap: Bitmap?,
+        images: List<Bitmap>,
     ): Flow<StreamChunk> = flow {
         val messagesJson = buildJsonArray {
             if (systemPrompt.isNotBlank()) {
@@ -346,7 +511,7 @@ class UniversalLlmClient {
                     put("content", systemPrompt)
                 })
             }
-            history.takeLast(24).forEach { msg ->
+            history.forEach { msg ->
                 val role = if (msg.role == "assistant") "assistant" else "user"
                 val text = buildString {
                     if (msg.attachmentFileName.isNotBlank() && msg.attachmentFileContent.isNotBlank()) {
@@ -364,21 +529,23 @@ class UniversalLlmClient {
                     })
                 }
             }
-            if (imageBitmap != null) {
-                val b64 = bitmapToBase64Jpeg(imageBitmap)
+            if (images.isNotEmpty()) {
                 add(buildJsonObject {
                     put("role", "user")
                     put("content", buildJsonArray {
                         add(buildJsonObject {
                             put("type", "text")
-                            put("text", userPrompt.ifBlank { "Describe this image in detail." })
+                            put("text", userPrompt.ifBlank { "Describe these images in detail." })
                         })
-                        add(buildJsonObject {
-                            put("type", "image_url")
-                            put("image_url", buildJsonObject {
-                                put("url", "data:image/jpeg;base64,$b64")
+                        images.forEach { bmp ->
+                            val b64 = bitmapToBase64Jpeg(bmp)
+                            add(buildJsonObject {
+                                put("type", "image_url")
+                                put("image_url", buildJsonObject {
+                                    put("url", "data:image/jpeg;base64,$b64")
+                                })
                             })
-                        })
+                        }
                     })
                 })
             } else {
@@ -406,41 +573,48 @@ class UniversalLlmClient {
         reqBuilder.header("Accept", "text/event-stream")
 
         DevLogBuffer.add("INFO", "LlmBridge", "POST ${provider.name} -> ${provider.selectedModel}")
-        client.newCall(reqBuilder.build()).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                val errBody = resp.body?.string().orEmpty()
-                throw IllegalStateException("${provider.name} HTTP ${resp.code}: ${extractApiError(errBody)}")
-            }
-            val contentType = resp.header("Content-Type").orEmpty()
-            if (contentType.contains("application/json", ignoreCase = true)) {
-                val bodyStr = resp.body?.string().orEmpty()
-                val parsed = runCatching { json.parseToJsonElement(bodyStr).jsonObject }.getOrNull()
-                val msgObj = parsed?.get("choices")?.jsonArray?.firstOrNull()?.jsonObject?.get("message")?.jsonObject
-                val content = msgObj?.get("content")?.jsonPrimitive?.contentOrNull.orEmpty()
-                if (content.isNotEmpty()) {
-                    emit(StreamChunk(contentDelta = content))
+        val call = client.newCall(reqBuilder.build())
+        activeCalls.add(call)
+        try {
+            call.execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val errBody = resp.body?.string().orEmpty()
+                    throw IllegalStateException("${provider.name} HTTP ${resp.code}: ${extractApiError(errBody)}")
                 }
-                return@use
-            }
-            val source = resp.body?.source() ?: throw IllegalStateException("Empty response body.")
-            while (!source.exhausted()) {
-                val line = source.readUtf8Line() ?: break
-                val trimmed = line.trim()
-                if (!trimmed.startsWith("data:")) continue
-                val data = trimmed.removePrefix("data:").trim()
-                if (data == "[DONE]" || data.isEmpty()) break
-                val parsed = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
-                val choices = parsed["choices"]?.jsonArray ?: continue
-                val first = choices.firstOrNull()?.jsonObject ?: continue
-                val delta = first["delta"]?.jsonObject ?: first["message"]?.jsonObject ?: continue
-                val contentDelta = delta["content"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                val reasonDelta = delta["reasoning_content"]?.jsonPrimitive?.contentOrNull
-                    ?: delta["reasoning"]?.jsonPrimitive?.contentOrNull
-                    ?: ""
-                if (contentDelta.isNotEmpty() || reasonDelta.isNotEmpty()) {
-                    emit(StreamChunk(contentDelta = contentDelta, thoughtDelta = reasonDelta))
+                val contentType = resp.header("Content-Type").orEmpty()
+                if (contentType.contains("application/json", ignoreCase = true)) {
+                    val bodyStr = resp.body?.string().orEmpty()
+                    val parsed = runCatching { json.parseToJsonElement(bodyStr).jsonObject }.getOrNull()
+                    val msgObj = parsed?.get("choices")?.jsonArray?.firstOrNull()?.jsonObject?.get("message")?.jsonObject
+                    val content = msgObj?.get("content")?.jsonPrimitive?.contentOrNull.orEmpty()
+                    if (content.isNotEmpty()) {
+                        emit(StreamChunk(contentDelta = content))
+                    }
+                    return@use
+                }
+                val source = resp.body?.source() ?: throw IllegalStateException("Empty response body.")
+                while (!source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    val trimmed = line.trim()
+                    if (!trimmed.startsWith("data:")) continue
+                    val data = trimmed.removePrefix("data:").trim()
+                    if (data == "[DONE]" || data.isEmpty()) break
+                    val parsed = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
+                    val choices = parsed["choices"]?.jsonArray ?: continue
+                    val first = choices.firstOrNull()?.jsonObject ?: continue
+                    val delta = first["delta"]?.jsonObject ?: first["message"]?.jsonObject ?: continue
+                    val contentDelta = delta["content"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val reasonDelta = delta["reasoning_content"]?.jsonPrimitive?.contentOrNull
+                        ?: delta["reasoning"]?.jsonPrimitive?.contentOrNull
+                        ?: delta["thought"]?.jsonPrimitive?.contentOrNull
+                        ?: ""
+                    if (contentDelta.isNotEmpty() || reasonDelta.isNotEmpty()) {
+                        emit(StreamChunk(contentDelta = contentDelta, thoughtDelta = reasonDelta))
+                    }
                 }
             }
+        } finally {
+            activeCalls.remove(call)
         }
     }
 
@@ -450,10 +624,10 @@ class UniversalLlmClient {
         systemPrompt: String,
         history: List<MessageEntity>,
         userPrompt: String,
-        imageBitmap: Bitmap?,
+        images: List<Bitmap>,
     ): Flow<StreamChunk> = flow {
         val messagesJson = buildJsonArray {
-            history.takeLast(24).forEach { msg ->
+            history.forEach { msg ->
                 val role = if (msg.role == "assistant") "assistant" else "user"
                 val text = msg.content.trim()
                 if (text.isNotEmpty()) {
@@ -463,22 +637,24 @@ class UniversalLlmClient {
                     })
                 }
             }
-            if (imageBitmap != null) {
-                val b64 = bitmapToBase64Jpeg(imageBitmap)
+            if (images.isNotEmpty()) {
                 add(buildJsonObject {
                     put("role", "user")
                     put("content", buildJsonArray {
-                        add(buildJsonObject {
-                            put("type", "image")
-                            put("source", buildJsonObject {
-                                put("type", "base64")
-                                put("media_type", "image/jpeg")
-                                put("data", b64)
+                        images.forEach { bmp ->
+                            val b64 = bitmapToBase64Jpeg(bmp)
+                            add(buildJsonObject {
+                                put("type", "image")
+                                put("source", buildJsonObject {
+                                    put("type", "base64")
+                                    put("media_type", "image/jpeg")
+                                    put("data", b64)
+                                })
                             })
-                        })
+                        }
                         add(buildJsonObject {
                             put("type", "text")
-                            put("text", userPrompt.ifBlank { "Describe this image." })
+                            put("text", userPrompt.ifBlank { "Describe these images." })
                         })
                     })
                 })
@@ -508,37 +684,43 @@ class UniversalLlmClient {
             .build()
 
         DevLogBuffer.add("INFO", "LlmBridge", "POST Anthropic -> ${provider.selectedModel}")
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                val errBody = resp.body?.string().orEmpty()
-                throw IllegalStateException("Anthropic HTTP ${resp.code}: ${extractApiError(errBody)}")
-            }
-            val source = resp.body?.source() ?: throw IllegalStateException("Empty Anthropic stream.")
-            while (!source.exhausted()) {
-                val line = source.readUtf8Line() ?: break
-                val trimmed = line.trim()
-                if (!trimmed.startsWith("data:")) continue
-                val data = trimmed.removePrefix("data:").trim()
-                if (data.isEmpty()) continue
-                val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
-                if (obj["type"]?.jsonPrimitive?.contentOrNull == "content_block_delta") {
-                    val delta = obj["delta"]?.jsonObject ?: continue
-                    val deltaType = delta["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                    if (deltaType == "thinking_delta") {
-                        val t = delta["thinking"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                        if (t.isNotEmpty()) emit(StreamChunk(thoughtDelta = t))
-                    } else {
-                        val txt = delta["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                        if (txt.isNotEmpty()) emit(StreamChunk(contentDelta = txt))
+        val call = client.newCall(req)
+        activeCalls.add(call)
+        try {
+            call.execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val errBody = resp.body?.string().orEmpty()
+                    throw IllegalStateException("Anthropic HTTP ${resp.code}: ${extractApiError(errBody)}")
+                }
+                val source = resp.body?.source() ?: throw IllegalStateException("Empty Anthropic stream.")
+                while (!source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    val trimmed = line.trim()
+                    if (!trimmed.startsWith("data:")) continue
+                    val data = trimmed.removePrefix("data:").trim()
+                    if (data.isEmpty()) continue
+                    val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
+                    if (obj["type"]?.jsonPrimitive?.contentOrNull == "content_block_delta") {
+                        val delta = obj["delta"]?.jsonObject ?: continue
+                        val deltaType = delta["type"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                        if (deltaType == "thinking_delta") {
+                            val t = delta["thinking"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                            if (t.isNotEmpty()) emit(StreamChunk(thoughtDelta = t))
+                        } else {
+                            val txt = delta["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                            if (txt.isNotEmpty()) emit(StreamChunk(contentDelta = txt))
+                        }
                     }
                 }
             }
+        } finally {
+            activeCalls.remove(call)
         }
     }
 
     private fun applyAuthHeaders(builder: Request.Builder, provider: ProviderProfileEntity) {
         val key = provider.apiKey.trim()
-        builder.header("User-Agent", "Cel.Cellium-Android/2611.21.0")
+        builder.header("User-Agent", "Cel.Cellium-Android/2611.22.0")
         if (provider.protocol == "anthropic") {
             if (key.isNotEmpty()) builder.header("x-api-key", key)
             builder.header("anthropic-version", "2023-06-01")
@@ -574,5 +756,36 @@ class UniversalLlmClient {
         val out = ByteArrayOutputStream()
         target.compress(Bitmap.CompressFormat.JPEG, 84, out)
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+    }
+
+    companion object {
+        private val ILLUME_BLOCK_REGEX = Regex(
+            """\[ILLUME_GEN]([\s\S]*?)\[/ILLUME_GEN]""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        fun extractIllumePrompt(assistantBodyOnly: String): Pair<String?, String> {
+            val match = ILLUME_BLOCK_REGEX.find(assistantBodyOnly) ?: return null to assistantBodyOnly
+            val prompt = match.groupValues[1].trim()
+            val cleaned = assistantBodyOnly.replace(ILLUME_BLOCK_REGEX, "").trim()
+            return (prompt.ifBlank { null }) to cleaned
+        }
+
+        fun isRetryableError(err: Throwable): Boolean {
+            val msg = err.localizedMessage.orEmpty().lowercase()
+            return msg.contains("http 429") ||
+                msg.contains("rate limit") ||
+                msg.contains("too many requests") ||
+                msg.contains("http 500") ||
+                msg.contains("http 502") ||
+                msg.contains("http 503") ||
+                msg.contains("http 504") ||
+                msg.contains("http 529") ||
+                msg.contains("overloaded") ||
+                msg.contains("timeout") ||
+                msg.contains("timed out") ||
+                msg.contains("connection reset") ||
+                msg.contains("unable to resolve host")
+        }
     }
 }

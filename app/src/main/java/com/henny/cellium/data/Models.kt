@@ -144,7 +144,6 @@ object BuiltInPersonas {
     )
 
     fun resolve(personaId: String, customPersonas: List<CustomPersona>): PersonaSpec {
-        ALL.firstOrNull { it.id == personaId }?.let { return it }
         customPersonas.firstOrNull { it.id == personaId }?.let { c ->
             return PersonaSpec(
                 id = c.id,
@@ -152,11 +151,23 @@ object BuiltInPersonas {
                 iconKey = c.emoji.ifBlank { "sparkle" },
                 tagline = c.tagline,
                 systemPrompt = c.systemPrompt,
-                accentHex = c.accentHex,
+                accentHex = c.accentHex.ifBlank { "#A855F7" },
                 custom = true,
             )
         }
-        return ALL.first()
+        if (customPersonas.isNotEmpty()) {
+            val first = customPersonas.first()
+            return PersonaSpec(
+                id = first.id,
+                name = first.name,
+                iconKey = first.emoji.ifBlank { "sparkle" },
+                tagline = first.tagline,
+                systemPrompt = first.systemPrompt,
+                accentHex = first.accentHex.ifBlank { "#A855F7" },
+                custom = true,
+            )
+        }
+        return ALL.firstOrNull { it.id == personaId } ?: ALL.first()
     }
 }
 

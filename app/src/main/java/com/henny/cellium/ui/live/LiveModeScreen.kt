@@ -3,7 +3,9 @@ package com.henny.cellium.ui.live
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -15,18 +17,19 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -34,6 +37,7 @@ import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Loop
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -54,13 +58,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.henny.cellium.assistant.FloatingCelOverlayService
 import com.henny.cellium.avatar.AvatarLibrary
 import com.henny.cellium.avatar.DotMatrixAvatarCanvas
 import com.henny.cellium.avatar.MoodDetector
 import com.henny.cellium.ui.chat.CelliumViewModel
+import com.henny.cellium.ui.chat.PersonaPickerSheet
+import com.henny.cellium.ui.components.CelliumIcons
 import com.henny.cellium.ui.components.GlassCard
 import com.henny.cellium.ui.components.GlassPill
 import com.henny.cellium.ui.theme.CelDangerRed
@@ -96,6 +104,7 @@ fun LiveModeScreen(
     var celReply by remember { mutableStateOf("") }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var mouthOpenness by remember { mutableFloatStateOf(0.05f) }
+    var showPersonaPicker by remember { mutableStateOf(false) }
 
     LaunchedEffect(context) {
         avatarLibrary = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { AvatarLibrary.load(context) }
@@ -114,7 +123,7 @@ fun LiveModeScreen(
         errorMsg = null
         tts?.stop()
         phase = LivePhase.LISTENING
-        mood = "excited"
+        mood = "listening"
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
@@ -146,7 +155,7 @@ fun LiveModeScreen(
     val audioPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         hasAudioPerm = granted
         if (granted) startListening()
-        else errorMsg = "Microphone permission is required for CelAS Live Mode."
+        else errorMsg = "Microphone permission is required for Live Mode."
     }
 
     DisposableEffect(context) {
@@ -154,6 +163,9 @@ fun LiveModeScreen(
         localTts = TextToSpeech(context) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 localTts?.language = Locale.US
+                if (prefs.ttsVoiceName.isNotBlank()) {
+                    localTts?.voices?.firstOrNull { it.name == prefs.ttsVoiceName }?.let { localTts?.voice = it }
+                }
                 localTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {}
                     override fun onDone(utteranceId: String?) {
@@ -209,9 +221,9 @@ fun LiveModeScreen(
                         viewModel.streamLiveReply(
                             transcript = spoken,
                             onDelta = { partial -> celReply = partial },
+                            onMoodChanged = { detected -> mood = detected },
                             onComplete = { finalReply ->
                                 celReply = finalReply
-                                mood = MoodDetector.detectMood(finalReply)
                                 speakReply(finalReply)
                             },
                             onError = { err ->
@@ -233,7 +245,6 @@ fun LiveModeScreen(
         }
     }
 
-    // Animate mouth while speaking
     LaunchedEffect(phase) {
         if (phase != LivePhase.SPEAKING) {
             mouthOpenness = 0.05f
@@ -249,21 +260,24 @@ fun LiveModeScreen(
 
     val provName = uiState.activeProvider?.name ?: "Pollinations Free"
     val provIconKey = uiState.activeProvider?.badge ?: "sparkle"
+    val persona = uiState.resolvedPersona
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Column(
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
-            // Top Status Bar
+            // Top Status Bar (Provider, Persona Switcher, Float Over Apps, Auto Loop)
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 GlassPill(onClick = {}) {
@@ -281,16 +295,56 @@ fun LiveModeScreen(
                             )
                     )
                     Icon(
-                        imageVector = com.henny.cellium.ui.components.CelliumIcons.resolve(provIconKey),
+                        imageVector = CelliumIcons.resolve(provIconKey),
                         contentDescription = null,
                         tint = visuals.primary,
                         modifier = Modifier.size(14.dp),
                     )
                     Text(
-                        text = "Live · ${provName.take(18)}",
+                        text = provName.take(14),
                         style = MaterialTheme.typography.labelMedium,
                         color = CelTextPrimary,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                }
+
+                GlassPill(onClick = { showPersonaPicker = true }) {
+                    Icon(
+                        imageVector = CelliumIcons.resolve(persona.iconKey),
+                        contentDescription = "Persona",
+                        tint = CelLavender,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(
+                        text = persona.name,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = CelTextPrimary,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
+
+                GlassPill(
+                    onClick = {
+                        if (Settings.canDrawOverlays(context)) {
+                            scope.launch { viewModel.prefsStore.updateFloatingMiniCel(true) }
+                            FloatingCelOverlayService.start(context, autoListen = true)
+                            viewModel.showBanner("Floating Cel launched over all apps.")
+                        } else {
+                            runCatching {
+                                val intent = Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:${context.packageName}"),
+                                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                context.startActivity(intent)
+                            }
+                        }
+                    },
+                ) {
+                    Icon(Icons.Rounded.PictureInPictureAlt, contentDescription = "Float over apps", modifier = Modifier.size(15.dp), tint = CelLavender)
+                    Text("Float", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary, maxLines = 1, softWrap = false)
                 }
 
                 GlassPill(
@@ -309,17 +363,25 @@ fun LiveModeScreen(
                     modifier = Modifier.testTag("live_handsfree_toggle"),
                 ) {
                     Icon(Icons.Rounded.Loop, contentDescription = "Hands-free loop", modifier = Modifier.size(15.dp), tint = CelTextPrimary)
-                    Text(if (prefs.liveHandsFreeLoop) "Auto" else "Manual", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary)
+                    Text(
+                        text = if (prefs.liveHandsFreeLoop) "Auto" else "Manual",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CelTextPrimary,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                 }
             }
 
-            // Center Interactive Dot-Matrix Avatar (Tap to barge-in / headpat)
+            // Large Centered Dot-Matrix Avatar filling ~80% of available center space (#4)
             val liveExpr = remember(avatarLibrary, prefs.avatarGender, mood) {
-                avatarLibrary?.get(prefs.avatarGender, MoodDetector.moodToExpressionName(mood), "Base")
+                avatarLibrary?.getForMood(prefs.avatarGender, mood)
+                    ?: avatarLibrary?.get(prefs.avatarGender, MoodDetector.moodToExpressionName(mood), "Base")
             }
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
-                    .size(260.dp)
+                    .weight(1f)
+                    .fillMaxWidth()
                     .clickable {
                         if (phase == LivePhase.SPEAKING) {
                             tts?.stop()
@@ -331,15 +393,17 @@ fun LiveModeScreen(
                     },
                 contentAlignment = Alignment.Center,
             ) {
+                val faceSize = (minOf(maxWidth, maxHeight) * 0.82f).coerceIn(220.dp, 420.dp)
                 DotMatrixAvatarCanvas(
                     expression = liveExpr,
+                    scale = 1.15f,
                     mouthOpenness = mouthOpenness,
                     highFps = prefs.highFpsMode,
                     onPetted = {
                         viewModel.soundEngine.playAnimalesePurr()
                         mood = "love"
                     },
-                    modifier = Modifier.size(230.dp),
+                    modifier = Modifier.size(faceSize),
                 )
             }
 
@@ -347,7 +411,7 @@ fun LiveModeScreen(
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 GlassCard(
                     modifier = Modifier.fillMaxWidth(),
@@ -358,7 +422,7 @@ fun LiveModeScreen(
                         text = when {
                             userTranscript.isNotBlank() -> "“$userTranscript”"
                             phase == LivePhase.LISTENING -> "Listening…"
-                            else -> "Tap mic to talk to ${uiState.resolvedPersona.name}"
+                            else -> "Tap mic to talk to ${persona.name}"
                         },
                         style = MaterialTheme.typography.titleSmall,
                         color = CelTextPrimary,
@@ -439,5 +503,14 @@ fun LiveModeScreen(
                 }
             }
         }
+    }
+
+    if (showPersonaPicker) {
+        PersonaPickerSheet(
+            activePersonaId = uiState.activePersonaId,
+            customPersonas = uiState.customPersonas,
+            onSelect = { viewModel.selectPersona(it) },
+            onDismiss = { showPersonaPicker = false },
+        )
     }
 }

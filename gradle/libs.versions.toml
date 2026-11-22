@@ -20,6 +20,7 @@ okhttp = "4.12.0"
 shizuku = "13.1.5"
 mediapipeGenAi = "0.10.29"
 llamatik = "0.17.0"
+litert = "1.4.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -49,6 +50,7 @@ shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuk
 shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 mediapipe-tasks-genai = { group = "com.google.mediapipe", name = "tasks-genai", version.ref = "mediapipeGenAi" }
 llamatik-core = { group = "com.llamatik", name = "library-android", version.ref = "llamatik" }
+litert = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
 
 # Optional Google Sign-In & Cloud Firestore Sync (NO Firebase AI Logic / App Check)
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }

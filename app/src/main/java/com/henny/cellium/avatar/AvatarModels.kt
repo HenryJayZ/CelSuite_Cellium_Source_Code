@@ -103,6 +103,40 @@ val PET_PAT_GREETINGS = listOf(
 )
 
 object MoodDetector {
+    val PROMPT_MOOD_LIST: List<String> = listOf(
+        "happy", "excited", "thinking", "love", "playful", "sad",
+        "worried", "tired", "sleepy", "confused", "sassy", "shocked",
+        "gremlin", "deadpan", "warm", "surprised", "angry", "blush",
+        "pleading", "proud",
+    )
+
+    private val INLINE_MOOD_REGEX = Regex(
+        """^\s*(?:\*{0,2})mood\s*:\s*\[?([a-zA-Z_ ]{2,24})]?(?:\*{0,2})\s*(?:\r?\n|$)""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /**
+     * Parses a leading `mood: <key>` tag emitted by Method 1 Mood Engine.
+     * Strictly validates against AVATAR_MOODS keys so invalid words (e.g. "OMG") are stripped
+     * cleanly without corrupting Cel's animation state.
+     */
+    fun extractInlineMoodTag(raw: String): Pair<String?, String> {
+        val match = INLINE_MOOD_REGEX.find(raw) ?: return null to raw
+        val rawKey = match.groupValues[1].trim().lowercase().replace(" ", "_")
+        val validMood = when {
+            rawKey in AVATAR_MOODS -> rawKey
+            rawKey == "blushing" || rawKey == "shy" || rawKey == "flustered" -> "blush"
+            rawKey == "amused" || rawKey == "teasing" || rawKey == "funny" -> "playful"
+            rawKey == "smug" || rawKey == "tsundere" -> "sassy"
+            rawKey == "annoyed" || rawKey == "mad" || rawKey == "rage" -> "angry"
+            rawKey == "calm" || rawKey == "friendly" || rawKey == "cheerful" -> "warm"
+            rawKey == "curious" || rawKey == "focused" -> "thinking"
+            else -> null
+        }
+        val stripped = raw.removeRange(match.range).trimStart('\r', '\n', ' ')
+        return validMood to stripped
+    }
+
     fun detectMood(text: String): String {
         val t = text.lowercase()
         return when {

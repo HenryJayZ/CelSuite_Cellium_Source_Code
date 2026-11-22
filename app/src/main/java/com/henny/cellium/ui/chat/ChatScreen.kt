@@ -26,7 +26,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -37,12 +36,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -66,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.henny.cellium.avatar.AvatarLibrary
 import com.henny.cellium.avatar.DotMatrixAvatarCanvas
+import com.henny.cellium.data.local.ProviderProfileEntity
 import com.henny.cellium.ui.components.CelliumIcons
 import com.henny.cellium.ui.components.GlassCard
 import com.henny.cellium.ui.components.GlassPill
@@ -73,6 +81,8 @@ import com.henny.cellium.ui.components.MarkdownMessageContent
 import com.henny.cellium.ui.components.ThoughtAccordion
 import com.henny.cellium.ui.components.VectorBadgeIcon
 import com.henny.cellium.ui.components.copyTextToClipboard
+import com.henny.cellium.ui.settings.ProviderEditDialog
+import com.henny.cellium.ui.theme.CelAmber
 import com.henny.cellium.ui.theme.CelEmeraldThought
 import com.henny.cellium.ui.theme.CelLavender
 import com.henny.cellium.ui.theme.CelRedError
@@ -98,14 +108,20 @@ fun ChatScreen(
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
     val prefs by viewModel.preferences.collectAsStateWithLifecycle()
 
-    var pendingImage by remember { mutableStateOf<Bitmap?>(null) }
+    var pendingImages by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
     var pendingFile by remember { mutableStateOf<AttachedTextFile?>(null) }
     var injectedComposerText by remember { mutableStateOf<String?>(null) }
     var showSessionsSheet by remember { mutableStateOf(false) }
     var showProviderSheet by remember { mutableStateOf(false) }
     var showPersonaSheet by remember { mutableStateOf(false) }
+    var showModifySheet by remember { mutableStateOf(false) }
+    var showWorkspacePrompt by remember { mutableStateOf(false) }
+    var configuringProvider by remember { mutableStateOf<ProviderProfileEntity?>(null) }
 
     val listState = rememberLazyListState()
+    val starredModels = remember(prefs.starredModelsJson) {
+        viewModel.prefsStore.decodeStarredModels(prefs.starredModelsJson)
+    }
 
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     DisposableEffect(context) {
@@ -122,15 +138,24 @@ fun ChatScreen(
         }
     }
 
-    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
-            runCatching {
-                pendingImage = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri))
-                } else {
-                    @Suppress("DEPRECATION")
-                    MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
-                }
+    val multiPhotoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(maxItems = 5)
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            val decoded = uris.mapNotNull { uri ->
+                runCatching {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, _, _ ->
+                            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                        }
+                    } else {
+                        @Suppress("DEPRECATION")
+                        MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+                    }
+                }.getOrNull()
+            }
+            if (decoded.isNotEmpty()) {
+                pendingImages = (pendingImages + decoded).take(5)
             }
         }
     }
@@ -152,21 +177,22 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(ui.activeMessages.size, ui.isStreaming) {
-        val count = ui.activeMessages.size + if (ui.isStreaming) 1 else 0
+    LaunchedEffect(ui.activeMessages.size, ui.isStreaming, ui.isGeneratingImage) {
+        val count = ui.activeMessages.size + (if (ui.isStreaming) 1 else 0) + (if (ui.isGeneratingImage) 1 else 0)
         if (count > 0) listState.animateScrollToItem(count - 1)
     }
 
     val persona = ui.resolvedPersona
     val activeProv = ui.activeProvider
+    val isOfflineProvider = activeProv?.protocol == "on_device"
 
+    // No redundant .statusBarsPadding() here — CelliumApp Scaffold handles safeDrawing + consumeWindowInsets
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding()
             .imePadding(),
     ) {
-        // Zero-Emoji Liquid Glass Top Bar (Sessions, Searchable 200+ Provider Dropdown, Persona, Arena, Agent, New)
+        // Liquid Glass Top Bar (Sessions, Modify [offline], Searchable 200+ Provider Dropdown, Persona, Arena, Agent, New)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -187,7 +213,22 @@ fun ChatScreen(
                     text = "${ui.sessions.count { !it.archived }}",
                     style = MaterialTheme.typography.labelMedium,
                     color = CelTextPrimary,
+                    maxLines = 1,
+                    softWrap = false,
                 )
+            }
+
+            if (isOfflineProvider) {
+                GlassPill(
+                    onClick = {
+                        viewModel.soundEngine.playClick()
+                        showModifySheet = true
+                    },
+                    modifier = Modifier.testTag("offline_modify_pill"),
+                ) {
+                    Icon(Icons.Rounded.Tune, contentDescription = "Modify GGUF & Context", tint = visuals.primary, modifier = Modifier.size(15.dp))
+                    Text("Modify", style = MaterialTheme.typography.labelMedium, color = CelTextPrimary, maxLines = 1, softWrap = false)
+                }
             }
 
             GlassPill(
@@ -228,7 +269,7 @@ fun ChatScreen(
                     tint = CelLavender,
                     modifier = Modifier.size(15.dp),
                 )
-                Text(persona.name, style = MaterialTheme.typography.labelMedium, color = CelTextPrimary)
+                Text(persona.name, style = MaterialTheme.typography.labelMedium, color = CelTextPrimary, maxLines = 1, softWrap = false)
             }
 
             GlassPill(
@@ -239,14 +280,18 @@ fun ChatScreen(
                 modifier = Modifier.testTag("chat_top_arena_button"),
             ) {
                 Icon(Icons.Rounded.Forum, contentDescription = "Arena 2-AI Group Chat", tint = Color(0xFF38BDF8), modifier = Modifier.size(16.dp))
-                Text("Arena", style = MaterialTheme.typography.labelMedium, color = CelTextPrimary)
+                Text("Arena", style = MaterialTheme.typography.labelMedium, color = CelTextPrimary, maxLines = 1, softWrap = false)
             }
 
             GlassPill(
                 onClick = {
                     viewModel.soundEngine.playClick()
+                    val enabling = !prefs.agentModeEnabled
                     scope.launch {
-                        viewModel.prefsStore.updateAgentMode(!prefs.agentModeEnabled)
+                        viewModel.prefsStore.updateAgentMode(enabling)
+                    }
+                    if (enabling && !prefs.agentWorkspacePrompted) {
+                        showWorkspacePrompt = true
                     }
                 },
                 selected = prefs.agentModeEnabled,
@@ -262,6 +307,8 @@ fun ChatScreen(
                     text = if (prefs.agentModeEnabled) "Agent ON" else "Agent",
                     style = MaterialTheme.typography.labelMedium,
                     color = if (prefs.agentModeEnabled) CelEmeraldThought else CelTextSecondary,
+                    maxLines = 1,
+                    softWrap = false,
                 )
             }
 
@@ -289,7 +336,7 @@ fun ChatScreen(
                     TextButton(onClick = {
                         viewModel.clearError()
                         viewModel.retryLastUserTurn()
-                    }) { Text("Retry", color = CelTextPrimary) }
+                    }) { Text("Retry", color = CelTextPrimary, maxLines = 1, softWrap = false) }
                     IconButton(onClick = { viewModel.clearError() }, modifier = Modifier.size(28.dp)) {
                         Icon(Icons.Rounded.Close, contentDescription = "Dismiss", tint = CelRedError, modifier = Modifier.size(16.dp))
                     }
@@ -318,7 +365,7 @@ fun ChatScreen(
 
         // Chat Timeline or Welcome Hero
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            if (ui.activeMessages.isEmpty() && !ui.isStreaming) {
+            if (ui.activeMessages.isEmpty() && !ui.isStreaming && !ui.isGeneratingImage) {
                 EmptyChatHero(
                     personaName = persona.name,
                     personaIconKey = persona.iconKey,
@@ -342,15 +389,21 @@ fun ChatScreen(
                             message = msg,
                             personaName = persona.name,
                             branchInfo = ui.branchInfoById[msg.id],
+                            codeWordWrap = prefs.codeWordWrap,
                             onSwitchBranch = { viewModel.switchBranch(it) },
                             onEditInPlace = { m, edited, regen -> viewModel.editMessageInPlace(m, edited, regen) },
                             onEditAsBranch = { m, edited, regen -> viewModel.editMessageAsBranch(m, edited, regen) },
                             onRegenerate = { viewModel.regenerateAssistantMessage(it) },
                             onForkSession = { viewModel.forkSessionFromMessage(it) },
                             onSpeak = { text ->
-                                tts?.setSpeechRate(prefs.ttsSpeechRate)
-                                tts?.setPitch(prefs.ttsPitch)
-                                tts?.speak(text.take(3500), TextToSpeech.QUEUE_FLUSH, null, "cel_msg")
+                                tts?.let { engine ->
+                                    if (prefs.ttsVoiceName.isNotBlank()) {
+                                        engine.voices?.firstOrNull { it.name == prefs.ttsVoiceName }?.let { engine.voice = it }
+                                    }
+                                    engine.setSpeechRate(prefs.ttsSpeechRate)
+                                    engine.setPitch(prefs.ttsPitch)
+                                    engine.speak(text.take(3500), TextToSpeech.QUEUE_FLUSH, null, "cel_msg")
+                                }
                             },
                             onDelete = { viewModel.deleteMessage(it) },
                         )
@@ -362,7 +415,30 @@ fun ChatScreen(
                                 providerName = activeProv?.name.orEmpty(),
                                 thought = ui.streamingThought,
                                 content = ui.streamingContent,
+                                retryStatusText = ui.retryStatusText,
+                                codeWordWrap = prefs.codeWordWrap,
                             )
+                        }
+                    }
+                    if (ui.isGeneratingImage) {
+                        item(key = "illume_generating_card") {
+                            GlassCard(highlighted = true, contentPadding = 12.dp, modifier = Modifier.fillMaxWidth()) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = visuals.primary)
+                                    Icon(Icons.Rounded.Palette, contentDescription = null, tint = CelLavender, modifier = Modifier.size(18.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Illume Generating Artwork...", style = MaterialTheme.typography.labelMedium, color = CelTextPrimary)
+                                        Text(
+                                            text = ui.imagineStatusText.ifBlank { "Rendering image via ${prefs.imagineProvider} (${prefs.imagineModel})..." },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = CelTextSecondary,
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -374,18 +450,20 @@ fun ChatScreen(
             personaName = persona.name,
             isStreaming = ui.isStreaming,
             promptTemplates = ui.promptTemplates,
-            pendingImage = pendingImage,
+            pendingImages = pendingImages,
             pendingFile = pendingFile,
             injectedText = injectedComposerText,
             onClearInjectedText = { injectedComposerText = null },
             onPastedBitmap = { bmp ->
                 viewModel.soundEngine.playPop()
-                pendingImage = bmp
+                pendingImages = (pendingImages + bmp).take(5)
             },
-            onClearImage = { pendingImage = null },
+            onRemoveImageAt = { idx ->
+                pendingImages = pendingImages.filterIndexed { i, _ -> i != idx }
+            },
             onClearFile = { pendingFile = null },
             onPickImage = {
-                photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                multiPhotoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             },
             onPickFile = {
                 filePicker.launch(arrayOf("*/*"))
@@ -400,11 +478,11 @@ fun ChatScreen(
             onOpenArena = onOpenArena,
             onStopStreaming = { viewModel.stopStreaming() },
             onSend = { text ->
-                val img = pendingImage
+                val imgs = pendingImages
                 val file = pendingFile
-                pendingImage = null
+                pendingImages = emptyList()
                 pendingFile = null
-                viewModel.sendMessage(text, img, file)
+                viewModel.sendMessage(text, imgs, file)
             },
         )
     }
@@ -426,6 +504,99 @@ fun ChatScreen(
             onFetchActiveModels = { viewModel.fetchLiveModels(it) },
             onOpenSettingsProviders = onOpenSettingsProviders,
             onDismiss = { showProviderSheet = false },
+            hiddenProviderIds = prefs.hiddenProviderIds,
+            starredModels = starredModels,
+            onToggleHideProvider = { viewModel.toggleHideProvider(it) },
+            onToggleStarModel = { pid, pname, model -> viewModel.toggleStarModel(pid, pname, model) },
+            onRequestConfigureKey = { prov -> configuringProvider = prov },
+        )
+    }
+
+    configuringProvider?.let { prov ->
+        ProviderEditDialog(
+            provider = prov,
+            onDismiss = { configuringProvider = null },
+            onSave = { updated ->
+                scope.launch {
+                    viewModel.saveProviderProfile(updated)
+                    viewModel.selectProvider(updated.id, updated.selectedModel)
+                }
+                configuringProvider = null
+            },
+            onDelete = if (prov.isCustom) {
+                {
+                    viewModel.deleteCustomProvider(prov.id)
+                    configuringProvider = null
+                }
+            } else null,
+            onFetchModels = { draft -> viewModel.fetchLiveModels(draft) },
+            starredModels = starredModels,
+            onToggleStarModel = { pid, pname, model -> viewModel.toggleStarModel(pid, pname, model) },
+        )
+    }
+
+    if (showModifySheet) {
+        ContextModifySheet(
+            config = prefs.contextModify,
+            isOfflineProvider = isOfflineProvider,
+            onSave = { cfg ->
+                scope.launch {
+                    viewModel.prefsStore.updateContextModify(cfg)
+                    viewModel.showBanner("Context & Engine parameters updated.")
+                }
+            },
+            onDismiss = { showModifySheet = false },
+        )
+    }
+
+    if (showWorkspacePrompt) {
+        var draftDir by remember(prefs.agentWorkspacePath) { mutableStateOf(prefs.agentWorkspacePath) }
+        AlertDialog(
+            onDismissRequest = {
+                showWorkspacePrompt = false
+                scope.launch { viewModel.prefsStore.updateAgentWorkspace(draftDir, prompted = true) }
+            },
+            containerColor = Color(0xFF140D26),
+            icon = { Icon(Icons.Rounded.Folder, contentDescription = null, tint = CelEmeraldThought) },
+            title = { Text("Agent Project Workspace", color = CelTextPrimary) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Choose where Cel's Shizuku Agent should create files and run project tasks. You can change this anytime in Settings -> Agent & Shizuku.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CelTextSecondary,
+                    )
+                    OutlinedTextField(
+                        value = draftDir,
+                        onValueChange = { draftDir = it },
+                        label = { Text("Workspace Directory") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showWorkspacePrompt = false
+                        scope.launch {
+                            viewModel.prefsStore.updateAgentWorkspace(draftDir, prompted = true)
+                            viewModel.showBanner("Agent workspace set to ${draftDir.trim()}")
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
+                ) {
+                    Text("Save Workspace", maxLines = 1, softWrap = false)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showWorkspacePrompt = false
+                    scope.launch { viewModel.prefsStore.updateAgentWorkspace(prefs.agentWorkspacePath, prompted = true) }
+                }) {
+                    Text("Keep Default", maxLines = 1, softWrap = false)
+                }
+            },
         )
     }
 
@@ -473,6 +644,8 @@ private fun StreamingAssistantBubble(
     providerName: String,
     thought: String,
     content: String,
+    retryStatusText: String = "",
+    codeWordWrap: Boolean = true,
 ) {
     val visuals = LocalCelliumVisuals.current
     Column(
@@ -491,10 +664,23 @@ private fun StreamingAssistantBubble(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        if (retryStatusText.isNotBlank()) {
+            Surface(
+                color = CelAmber.copy(alpha = 0.16f),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Text(
+                    text = retryStatusText,
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                    color = CelAmber,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+            }
+        }
         if (thought.isNotBlank()) ThoughtAccordion(thought = thought)
         if (content.isNotBlank()) {
-            MarkdownMessageContent(text = content)
-        } else {
+            MarkdownMessageContent(text = content, defaultWordWrap = codeWordWrap)
+        } else if (retryStatusText.isBlank()) {
             Text("Thinking...", style = MaterialTheme.typography.bodySmall, color = CelTextSecondary)
         }
     }
@@ -576,17 +762,17 @@ private fun EmptyChatHero(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     GlassPill(onClick = { onQuickPrompt("Hey Cel! Give me a quick rundown of what we can build today.") }) {
-                        Text("Say hi to Cel", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary)
+                        Text("Say hi to Cel", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary, maxLines = 1, softWrap = false)
                     }
                     GlassPill(onClick = { onQuickPrompt("/web latest Android AI news") }) {
-                        Text("/web search", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary)
+                        Text("/web search", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary, maxLines = 1, softWrap = false)
                     }
                     GlassPill(onClick = onOpenArena) {
                         Icon(Icons.Rounded.Forum, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(14.dp))
-                        Text("2-AI Arena", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary)
+                        Text("2-AI Arena", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary, maxLines = 1, softWrap = false)
                     }
-                    GlassPill(onClick = { onQuickPrompt("/imagine neon obsidian cyberpunk library, liquid glass aesthetic") }) {
-                        Text("/imagine art", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary)
+                    GlassPill(onClick = { onQuickPrompt("/illume neon obsidian cyberpunk library, liquid glass aesthetic") }) {
+                        Text("/illume art", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary, maxLines = 1, softWrap = false)
                     }
                 }
             }

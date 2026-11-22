@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface CelliumDao {
     // ── Providers ────────────────────────────────────────────────────────
-    @Query("SELECT * FROM providers ORDER BY requiresKey ASC, isCustom ASC, name ASC")
+    @Query("SELECT * FROM providers ORDER BY usageCount DESC, requiresKey ASC, isCustom ASC, name ASC")
     fun observeProviders(): Flow<List<ProviderProfileEntity>>
 
     @Query("SELECT * FROM providers")
@@ -23,6 +23,9 @@ interface CelliumDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertProvidersIfMissing(providers: List<ProviderProfileEntity>)
+
+    @Query("UPDATE providers SET usageCount = usageCount + 1, updatedAtMs = :nowMs WHERE id = :id")
+    suspend fun incrementProviderUsage(id: String, nowMs: Long = System.currentTimeMillis())
 
     @Query("DELETE FROM providers WHERE id = :id")
     suspend fun deleteProvider(id: String)
@@ -42,6 +45,9 @@ interface CelliumDao {
 
     @Query("DELETE FROM sessions WHERE id = :id")
     suspend fun deleteSession(id: String)
+
+    @Query("DELETE FROM sessions")
+    suspend fun deleteAllSessions()
 
     // ── Tree Messages ────────────────────────────────────────────────────
     @Query("SELECT * FROM messages WHERE sessionId = :sessionId ORDER BY createdAtMs ASC")
@@ -68,18 +74,27 @@ interface CelliumDao {
     @Query("DELETE FROM messages WHERE sessionId = :sessionId")
     suspend fun deleteMessagesForSession(sessionId: String)
 
-    // ── Custom Personas ──────────────────────────────────────────────────
-    @Query("SELECT * FROM custom_personas ORDER BY createdAtMs DESC")
+    @Query("DELETE FROM messages")
+    suspend fun deleteAllMessages()
+
+    // ── Personas (unified built-in + custom, all editable & deletable) ──
+    @Query("SELECT * FROM custom_personas ORDER BY createdAtMs ASC")
     fun observePersonas(): Flow<List<CustomPersonaEntity>>
 
-    @Query("SELECT * FROM custom_personas")
+    @Query("SELECT * FROM custom_personas ORDER BY createdAtMs ASC")
     suspend fun getAllPersonasOnce(): List<CustomPersonaEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertPersona(persona: CustomPersonaEntity)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertPersonasIfMissing(personas: List<CustomPersonaEntity>)
+
     @Query("DELETE FROM custom_personas WHERE id = :id")
     suspend fun deletePersona(id: String)
+
+    @Query("DELETE FROM custom_personas")
+    suspend fun deleteAllPersonas()
 
     // ── Persistent Memories ──────────────────────────────────────────────
     @Query("SELECT * FROM memories ORDER BY createdAtMs DESC")
@@ -93,6 +108,9 @@ interface CelliumDao {
 
     @Query("DELETE FROM memories WHERE id = :id")
     suspend fun deleteMemory(id: String)
+
+    @Query("DELETE FROM memories")
+    suspend fun deleteAllMemories()
 
     // ── Prompt Templates ─────────────────────────────────────────────────
     @Query("SELECT * FROM prompt_templates ORDER BY slashKey ASC")
@@ -110,7 +128,10 @@ interface CelliumDao {
     @Query("DELETE FROM prompt_templates WHERE id = :id")
     suspend fun deletePromptTemplate(id: String)
 
-    // ── Imagine Artworks ─────────────────────────────────────────────────
+    @Query("DELETE FROM prompt_templates")
+    suspend fun deleteAllPromptTemplates()
+
+    // ── Illume Artworks ──────────────────────────────────────────────────
     @Query("SELECT * FROM artworks ORDER BY createdAtMs DESC")
     fun observeArtworks(): Flow<List<ArtworkEntity>>
 

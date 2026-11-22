@@ -181,7 +181,8 @@ fun CelliumBackground(
             .build()
     }
 
-    Box(modifier = modifier.fillMaxSize().background(visuals.voidBg)) {
+    val neutralScrim = Color(0xFF06060A)
+    Box(modifier = modifier.fillMaxSize().background(neutralScrim)) {
         AsyncImage(
             model = wallpaperRequest,
             contentDescription = null,
@@ -194,9 +195,9 @@ fun CelliumBackground(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            visuals.voidBg.copy(alpha = (effectiveDim + 0.16f).coerceIn(0.20f, 0.94f)),
-                            visuals.voidBg.copy(alpha = effectiveDim.coerceIn(0.12f, 0.88f)),
-                            visuals.voidBg.copy(alpha = (effectiveDim + 0.24f).coerceIn(0.30f, 0.96f)),
+                            neutralScrim.copy(alpha = (effectiveDim + 0.14f).coerceIn(0.18f, 0.92f)),
+                            neutralScrim.copy(alpha = effectiveDim.coerceIn(0.10f, 0.86f)),
+                            neutralScrim.copy(alpha = (effectiveDim + 0.20f).coerceIn(0.24f, 0.94f)),
                         )
                     )
                 )
@@ -452,6 +453,7 @@ private fun formatInlineMarkdown(text: String): AnnotatedString = buildAnnotated
 @Composable
 fun MarkdownMessageContent(
     text: String,
+    defaultWordWrap: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val blocks = remember(text) { parseMarkdownBlocks(text) }
@@ -494,7 +496,11 @@ fun MarkdownMessageContent(
                         color = CelTextPrimary,
                     )
                 }
-                is MdBlock.Code -> CodeCard(language = block.language, code = block.code)
+                is MdBlock.Code -> CodeCard(
+                    language = block.language,
+                    code = block.code,
+                    defaultWordWrap = defaultWordWrap,
+                )
             }
         }
     }
@@ -504,11 +510,13 @@ fun MarkdownMessageContent(
 fun CodeCard(
     language: String,
     code: String,
+    defaultWordWrap: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var copied by remember { mutableStateOf(false) }
+    var wrapEnabled by remember(defaultWordWrap) { mutableStateOf(defaultWordWrap) }
 
     Column(
         modifier = modifier
@@ -529,33 +537,53 @@ fun CodeCard(
                 text = language.uppercase(),
                 style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
                 color = CelLavender,
+                maxLines = 1,
+                softWrap = false,
             )
             Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable {
-                        copyTextToClipboard(context, code)
-                        copied = true
-                        scope.launch {
-                            delay(1500)
-                            copied = false
-                        }
-                    }
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(
-                    imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
-                    contentDescription = "Copy code",
-                    tint = if (copied) CelEmeraldThought else CelTextSecondary,
-                    modifier = Modifier.size(14.dp),
-                )
                 Text(
-                    text = if (copied) "Copied" else "Copy",
+                    text = if (wrapEnabled) "Wrap" else "Scroll",
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (copied) CelEmeraldThought else CelTextSecondary,
+                    color = if (wrapEnabled) CelLavender else CelTextSecondary,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { wrapEnabled = !wrapEnabled }
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
                 )
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            copyTextToClipboard(context, code)
+                            copied = true
+                            scope.launch {
+                                delay(1500)
+                                copied = false
+                            }
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                        contentDescription = "Copy code",
+                        tint = if (copied) CelEmeraldThought else CelTextSecondary,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(
+                        text = if (copied) "Copied" else "Copy",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (copied) CelEmeraldThought else CelTextSecondary,
+                        maxLines = 1,
+                        softWrap = false,
+                    )
+                }
             }
         }
         Text(
@@ -565,10 +593,12 @@ fun CodeCard(
                 lineHeight = 18.sp,
             ),
             color = CelTextPrimary,
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(12.dp),
+            softWrap = wrapEnabled,
+            modifier = if (wrapEnabled) {
+                Modifier.fillMaxWidth().padding(12.dp)
+            } else {
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(12.dp)
+            },
         )
     }
 }

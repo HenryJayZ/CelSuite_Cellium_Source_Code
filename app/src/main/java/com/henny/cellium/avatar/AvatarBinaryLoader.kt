@@ -58,6 +58,12 @@ class AvatarLibrary private constructor(
             }
         }
 
+        fun clearCache() {
+            synchronized(this) {
+                cached = null
+            }
+        }
+
         private fun readBinary(context: Context): AvatarLibrary {
             val result = mutableMapOf<String, MutableMap<String, AvatarExpression>>()
             try {

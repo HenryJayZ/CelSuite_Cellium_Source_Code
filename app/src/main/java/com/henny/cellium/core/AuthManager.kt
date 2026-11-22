@@ -193,7 +193,12 @@ class AuthManager {
         } catch (e: CancellationException) {
             throw e
         } catch (e: GetCredentialCancellationException) {
-            Result.failure(IllegalStateException("Sign-In cancelled."))
+            DevLogBuffer.add("WARN", "Auth", "Google Sign-In cancelled: ${e.message}")
+            Result.failure(
+                IllegalStateException(
+                    "Google Sign-In cancelled. If you didn't close the sheet, add this APK's SHA-1 fingerprint (8E:18:75:8C:E3:ED:AA:8A:00:CB:DF:D5:E6:D3:4E:57:8C:7C:E6:D1) to Firebase Console -> Project Settings -> Android App."
+                )
+            )
         } catch (e: Exception) {
             DevLogBuffer.add("ERROR", "Auth", e.localizedMessage ?: "Google Sign-In failed")
             Result.failure(e)

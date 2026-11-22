@@ -84,11 +84,29 @@ class MultiImagineClient(private val context: Context) {
         KaggleCredentials(user, key)
     }
 
+    suspend fun fetchPollinationsImageModels(): Result<List<String>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder()
+                .url("https://image.pollinations.ai/models")
+                .header("User-Agent", "Cel.Cellium-Android/2611.22.0")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+                val body = resp.body?.string().orEmpty()
+                val arr = json.parseToJsonElement(body).jsonArray
+                arr.mapNotNull { el ->
+                    el.jsonPrimitive.contentOrNull?.trim()
+                }.filter { it.isNotBlank() }.ifEmpty { listOf("sana") }
+            }
+        }
+    }
+
     suspend fun generateImage(
         prompt: String,
         negativePrompt: String = "",
         provider: String = "pollinations",
-        model: String = "flux",
+        model: String = "sana",
         aspectRatio: String = "1:1",
         apiKey: String = "",
         customUrl: String = "",
@@ -109,15 +127,22 @@ class MultiImagineClient(private val context: Context) {
         } else cleanPrompt
 
         runCatching {
+            val resolvedModel = when (provider) {
+                "pollinations" -> {
+                    val m = model.trim()
+                    if (m.isBlank() || (apiKey.isBlank() && m.equals("flux", ignoreCase = true))) "sana" else m
+                }
+                else -> model.trim()
+            }
             val bytes: ByteArray = when (provider) {
                 "pollinations" -> {
-                    onStatusUpdate?.invoke("Generating via Pollinations ($model)...")
-                    fetchPollinations(fullPrompt, model.ifBlank { "flux" }, width, height, seed)
+                    onStatusUpdate?.invoke("Generating via Pollinations ($resolvedModel)...")
+                    fetchPollinations(fullPrompt, resolvedModel, width, height, seed, apiKey)
                 }
                 "kaggle" -> fetchKaggleGpu(
                     prompt = cleanPrompt,
                     negativePrompt = negativePrompt,
-                    modelId = model.ifBlank { "stabilityai/sdxl-turbo" },
+                    modelId = resolvedModel.ifBlank { "stabilityai/sdxl-turbo" },
                     width = width,
                     height = height,
                     seed = seed,
@@ -128,14 +153,14 @@ class MultiImagineClient(private val context: Context) {
                 )
                 "huggingface" -> {
                     onStatusUpdate?.invoke("Calling HuggingFace Router...")
-                    fetchHuggingFace(fullPrompt, model.ifBlank { "black-forest-labs/FLUX.1-schnell" }, apiKey)
+                    fetchHuggingFace(fullPrompt, resolvedModel.ifBlank { "black-forest-labs/FLUX.1-schnell" }, apiKey)
                 }
                 "openai" -> {
                     onStatusUpdate?.invoke("Calling OpenAI Images...")
                     fetchOpenAiImages(
                         url = "https://api.openai.com/v1/images/generations",
                         prompt = fullPrompt,
-                        model = model.ifBlank { "dall-e-3" },
+                        model = resolvedModel.ifBlank { "gpt-image-1" },
                         aspectRatio = aspectRatio,
                         apiKey = apiKey,
                     )
@@ -145,26 +170,26 @@ class MultiImagineClient(private val context: Context) {
                     val base = customUrl.trim().trimEnd('/')
                     require(base.isNotBlank()) { "Set your Custom Image Endpoint URL first." }
                     val url = if (base.endsWith("/images/generations")) base else "$base/images/generations"
-                    fetchOpenAiImages(url, fullPrompt, model.ifBlank { "flux" }, aspectRatio, apiKey)
+                    fetchOpenAiImages(url, fullPrompt, resolvedModel.ifBlank { "sana" }, aspectRatio, apiKey)
                 }
-                else -> fetchPollinations(fullPrompt, "flux", width, height, seed)
+                else -> fetchPollinations(fullPrompt, "sana", width, height, seed, apiKey)
             }
             val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 ?: throw IllegalStateException("Provider returned a non-image payload.")
-            val outFile = File(galleryDir(), "cel_art_${System.currentTimeMillis()}_$seed.png")
+            val outFile = File(galleryDir(), "cel_illume_${System.currentTimeMillis()}_$seed.png")
             FileOutputStream(outFile).use { fos ->
                 bmp.compress(Bitmap.CompressFormat.PNG, 96, fos)
             }
-            DevLogBuffer.add("INFO", "Imagine", "Generated ${width}x$height via $provider ($model)")
+            DevLogBuffer.add("INFO", "Illume", "Generated ${width}x$height via $provider ($resolvedModel)")
             GeneratedImageResult(
                 localFile = outFile,
                 bitmap = bmp,
                 seed = seed,
                 provider = provider,
-                model = model,
+                model = resolvedModel,
             )
         }.onFailure { err ->
-            DevLogBuffer.add("ERROR", "Imagine", "Generation failed ($provider): ${err.localizedMessage}")
+            DevLogBuffer.add("ERROR", "Illume", "Generation failed ($provider): ${err.localizedMessage}")
         }
     }
 
@@ -302,24 +327,46 @@ print("CELLIUM_DONE")
         width: Int,
         height: Int,
         seed: Long,
+        apiKey: String = "",
     ): ByteArray {
         val encoded = URLEncoder.encode(prompt, "UTF-8").replace("+", "%20")
-        val url = "https://image.pollinations.ai/prompt/$encoded?model=$model&width=$width&height=$height&seed=$seed&nologo=true"
-        val req = Request.Builder()
-            .url(url)
-            .header("User-Agent", "Cel.Cellium-Android/2611.21.0")
-            .get()
-            .build()
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
+        val cleanKey = apiKey.trim()
+        val tryModels = if (cleanKey.isBlank() && !model.equals("sana", ignoreCase = true)) {
+            listOf(model, "sana")
+        } else {
+            listOf(model)
+        }
+        var lastCode = 0
+        for (candidateModel in tryModels) {
+            val baseHost = if (cleanKey.isNotBlank()) "https://gen.pollinations.ai/image" else "https://image.pollinations.ai/prompt"
+            val url = "$baseHost/$encoded?model=$candidateModel&width=$width&height=$height&seed=$seed&nologo=true"
+            val rb = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Cel.Cellium-Android/2611.22.0")
+                .get()
+            if (cleanKey.isNotBlank()) {
+                rb.header("Authorization", "Bearer $cleanKey")
+            }
+            client.newCall(rb.build()).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    return resp.body?.bytes() ?: throw IllegalStateException("Empty image stream from Pollinations.")
+                }
+                lastCode = resp.code
+                if (resp.code == 402 && candidateModel != "sana") {
+                    DevLogBuffer.add("WARN", "Illume", "Pollinations '$candidateModel' returned 402 without key; retrying with open-access 'sana'.")
+                    return@use
+                }
+                if (resp.code == 402) {
+                    throw IllegalStateException("Pollinations HTTP 402: '$candidateModel' requires a Pollinations API key. Use open-access model 'sana' or add a Pollinations key in Illume Config.")
+                }
                 throw IllegalStateException("Pollinations HTTP ${resp.code}. Try again or switch provider.")
             }
-            return resp.body?.bytes() ?: throw IllegalStateException("Empty image stream from Pollinations.")
         }
+        throw IllegalStateException("Pollinations HTTP $lastCode. Try open-access model 'sana' or add an API key.")
     }
 
     private fun fetchHuggingFace(prompt: String, model: String, apiKey: String): ByteArray {
-        require(apiKey.isNotBlank()) { "HuggingFace requires your HF API token (Settings or Imagine config)." }
+        require(apiKey.isNotBlank()) { "HuggingFace requires your HF API token (Settings or Illume config)." }
         val payload = buildJsonObject { put("inputs", prompt) }.toString()
         val req = Request.Builder()
             .url("https://router.huggingface.co/hf-inference/models/${model.trim()}")
@@ -410,9 +457,9 @@ print("CELLIUM_DONE")
         val PROVIDERS = listOf(
             ImagineProviderOption(
                 id = "pollinations",
-                label = "Pollinations (Free)",
+                label = "Pollinations (Free · Keyless)",
                 requiresKey = false,
-                defaultModels = listOf("flux", "turbo", "flux-realism", "flux-anime", "flux-3d"),
+                defaultModels = listOf("sana"),
             ),
             ImagineProviderOption(
                 id = "kaggle",
@@ -437,13 +484,13 @@ print("CELLIUM_DONE")
                 id = "openai",
                 label = "OpenAI Images (BYOK)",
                 requiresKey = true,
-                defaultModels = listOf("dall-e-3", "gpt-image-1"),
+                defaultModels = listOf("gpt-image-1", "dall-e-3"),
             ),
             ImagineProviderOption(
                 id = "custom",
                 label = "Custom Endpoint",
                 requiresKey = false,
-                defaultModels = listOf("flux", "sdxl"),
+                defaultModels = listOf("sana"),
             ),
         )
     }

@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Science
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material3.Button
@@ -85,13 +86,15 @@ fun ImagineStudioScreen(
     var prompt by remember { mutableStateOf("") }
     var negativePrompt by remember { mutableStateOf("") }
     var selectedProvider by remember(prefs.imagineProvider) { mutableStateOf(prefs.imagineProvider) }
-    var selectedModel by remember(prefs.imagineModel) { mutableStateOf(prefs.imagineModel) }
+    var selectedModel by remember(prefs.imagineModel) { mutableStateOf(prefs.imagineModel.ifBlank { "sana" }) }
     var aspectRatio by remember { mutableStateOf("1:1") }
     var apiKey by remember(prefs.imagineApiKey) { mutableStateOf(prefs.imagineApiKey) }
     var customUrl by remember(prefs.imagineCustomUrl) { mutableStateOf(prefs.imagineCustomUrl) }
     var kaggleSlug by remember(prefs.kaggleKernelSlug) { mutableStateOf(prefs.kaggleKernelSlug) }
     var showKeyPanel by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
+    var livePollinationsModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var refreshingModels by remember { mutableStateOf(false) }
 
     val kaggleJsonPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
@@ -102,6 +105,13 @@ fun ImagineStudioScreen(
 
     val activeOption = MultiImagineClient.PROVIDERS.firstOrNull { it.id == selectedProvider }
         ?: MultiImagineClient.PROVIDERS.first()
+    val modelChoices = remember(selectedProvider, livePollinationsModels) {
+        if (selectedProvider == "pollinations" && livePollinationsModels.isNotEmpty()) {
+            livePollinationsModels
+        } else {
+            activeOption.defaultModels
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -116,15 +126,15 @@ fun ImagineStudioScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Imagine Studio", style = MaterialTheme.typography.titleLarge, color = CelTextPrimary)
+                        Text("Illume Studio", style = MaterialTheme.typography.titleLarge, color = CelTextPrimary)
                         Text(
-                            "Pollinations Free · Kaggle GPU (kaggle.json) · HuggingFace · OpenAI",
+                            "Pollinations (Free Sana / Live) · Kaggle GPU · HuggingFace · OpenAI",
                             style = MaterialTheme.typography.labelSmall,
                             color = CelTextSecondary,
                         )
                     }
                     IconButton(onClick = { showKeyPanel = !showKeyPanel }) {
-                        Icon(Icons.Rounded.Key, contentDescription = "Imagine API key settings", tint = visuals.primary)
+                        Icon(Icons.Rounded.Key, contentDescription = "Illume API key settings", tint = visuals.primary)
                     }
                 }
 
@@ -145,7 +155,7 @@ fun ImagineStudioScreen(
                                     viewModel.prefsStore.updateImagineConfig(selectedProvider, selectedModel, apiKey, customUrl)
                                 }
                             },
-                            label = { Text(opt.label) },
+                            label = { Text(opt.label, maxLines = 1, softWrap = false) },
                             modifier = Modifier.testTag("imagine_provider_${opt.id}"),
                         )
                     }
@@ -153,11 +163,52 @@ fun ImagineStudioScreen(
 
                 Spacer(Modifier.height(8.dp))
 
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Models", style = MaterialTheme.typography.labelSmall, color = CelLavender)
+                    if (selectedProvider == "pollinations") {
+                        OutlinedButton(
+                            onClick = {
+                                refreshingModels = true
+                                scope.launch {
+                                    val res = viewModel.imagineClient.fetchPollinationsImageModels()
+                                    refreshingModels = false
+                                    res.onSuccess { list ->
+                                        livePollinationsModels = list
+                                        if (list.isNotEmpty() && selectedModel !in list) {
+                                            selectedModel = list.first()
+                                            viewModel.prefsStore.updateImagineConfig(selectedProvider, selectedModel, apiKey, customUrl)
+                                        }
+                                        viewModel.showBanner("Fetched ${list.size} live Pollinations image models.")
+                                    }.onFailure { err ->
+                                        localError = err.localizedMessage
+                                    }
+                                }
+                            },
+                            enabled = !refreshingModels,
+                            shape = RoundedCornerShape(10.dp),
+                        ) {
+                            if (refreshingModels) {
+                                CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            Text("Fetch Live", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    activeOption.defaultModels.forEach { m ->
+                    modelChoices.forEach { m ->
                         FilterChip(
                             selected = m == selectedModel,
                             onClick = {
@@ -169,12 +220,11 @@ fun ImagineStudioScreen(
                                     viewModel.prefsStore.updateImagineConfig(selectedProvider, selectedModel, apiKey, customUrl)
                                 }
                             },
-                            label = { Text(m.substringAfterLast('/')) },
+                            label = { Text(m.substringAfterLast('/'), maxLines = 1, softWrap = false) },
                         )
                     }
                 }
 
-                // Kaggle GPU .json panel
                 if (selectedProvider == "kaggle") {
                     Spacer(Modifier.height(10.dp))
                     Column(
@@ -219,7 +269,11 @@ fun ImagineStudioScreen(
                         ) {
                             Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text(if (prefs.kaggleUsername.isNotBlank()) "Replace kaggle.json" else "Import kaggle.json")
+                            Text(
+                                text = if (prefs.kaggleUsername.isNotBlank()) "Replace kaggle.json" else "Import kaggle.json",
+                                maxLines = 1,
+                                softWrap = false,
+                            )
                         }
                         OutlinedTextField(
                             value = kaggleSlug,
@@ -237,19 +291,22 @@ fun ImagineStudioScreen(
                     }
                 } else if (showKeyPanel || activeOption.requiresKey || selectedProvider == "custom") {
                     Spacer(Modifier.height(8.dp))
-                    if (activeOption.requiresKey || selectedProvider == "custom") {
-                        OutlinedTextField(
-                            value = apiKey,
-                            onValueChange = {
-                                apiKey = it
-                                scope.launch { viewModel.prefsStore.updateImagineConfig(selectedProvider, selectedModel, it, customUrl) }
-                            },
-                            label = { Text("${activeOption.label} API Key") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp),
-                        )
-                    }
+                    OutlinedTextField(
+                        value = apiKey,
+                        onValueChange = {
+                            apiKey = it
+                            scope.launch { viewModel.prefsStore.updateImagineConfig(selectedProvider, selectedModel, it, customUrl) }
+                        },
+                        label = {
+                            Text(
+                                if (selectedProvider == "pollinations") "Pollinations API Key (Optional for Flux/Pro)"
+                                else "${activeOption.label} API Key"
+                            )
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                    )
                     if (selectedProvider == "custom") {
                         Spacer(Modifier.height(6.dp))
                         OutlinedTextField(
@@ -289,12 +346,15 @@ fun ImagineStudioScreen(
                 )
 
                 Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
                     listOf("1:1", "16:9", "9:16", "4:3", "3:4").forEach { ar ->
                         FilterChip(
                             selected = aspectRatio == ar,
                             onClick = { aspectRatio = ar },
-                            label = { Text(ar) },
+                            label = { Text(ar, maxLines = 1, softWrap = false) },
                         )
                     }
                 }
@@ -333,11 +393,15 @@ fun ImagineStudioScreen(
                     if (uiState.isGeneratingImage) {
                         CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = visuals.voidBg)
                         Spacer(Modifier.width(8.dp))
-                        Text(uiState.imagineStatusText.ifBlank { "Generating via ${activeOption.label}..." })
+                        Text(
+                            text = uiState.imagineStatusText.ifBlank { "Generating via ${activeOption.label}..." },
+                            maxLines = 1,
+                            softWrap = false,
+                        )
                     } else {
                         Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Generate Artwork")
+                        Text("Generate with Illume", maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -355,7 +419,7 @@ fun ImagineStudioScreen(
             item {
                 GlassCard(shape = RoundedCornerShape(18.dp)) {
                     Text(
-                        text = "Your generated art is saved locally on your device. Try Pollinations (Free) immediately or import kaggle.json for GPU Diffusers!",
+                        text = "Your generated art is saved locally on your device. Try Pollinations (Free Sana) immediately or tap Fetch Live for all models!",
                         style = MaterialTheme.typography.bodySmall,
                         color = CelTextSecondary,
                     )
@@ -414,12 +478,12 @@ private fun ArtworkGalleryCard(
             OutlinedButton(onClick = onSavePhotos, shape = RoundedCornerShape(12.dp), modifier = Modifier.weight(1f)) {
                 Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("Photos")
+                Text("Photos", maxLines = 1, softWrap = false)
             }
             OutlinedButton(onClick = onSendToChat, shape = RoundedCornerShape(12.dp), modifier = Modifier.weight(1f)) {
                 Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("To Chat")
+                Text("To Chat", maxLines = 1, softWrap = false)
             }
             IconButton(onClick = onDelete) {
                 Icon(Icons.Rounded.Delete, contentDescription = "Delete artwork", tint = CelDangerRed)

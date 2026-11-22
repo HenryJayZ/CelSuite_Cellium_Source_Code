@@ -13,9 +13,9 @@ data class CommandAssessment(
 )
 
 /**
- * Port of Cellium PC's command_guard.py adapted for Android Shizuku shell execution.
  * Classifies AI Agent shell commands into SAFE (read-only), CAUTION (requires confirmation),
- * or BLOCKED (destructive / bricking patterns).
+ * or BLOCKED (destructive / bricking patterns), and extracts clean executable commands
+ * strictly from assistant response body text (never from reasoning/thought blocks).
  */
 object CommandGuard {
     private val BLOCKED_PATTERNS = listOf(
@@ -33,7 +33,7 @@ object CommandGuard {
         "ls", "stat", "cat /proc/", "cat /sys/", "dumpsys battery", "dumpsys meminfo",
         "dumpsys power", "dumpsys activity", "dumpsys window", "dumpsys connectivity",
         "pm list packages", "pm path", "settings list", "settings get", "wm size", "wm density",
-        "ip addr", "ip route", "ps ", "echo ",
+        "ip addr", "ip route", "ps ", "echo ", "du ", "find ",
     )
 
     private val SHELL_BLOCK_REGEX = Regex(
@@ -41,8 +41,13 @@ object CommandGuard {
         RegexOption.IGNORE_CASE,
     )
 
+    private val THOUGHT_STRIP_REGEX = Regex(
+        """<(think|thought|thinking|reasoning)\b[^>]*>[\s\S]*?</\1>""",
+        RegexOption.IGNORE_CASE,
+    )
+
     fun assess(rawCommand: String): CommandAssessment {
-        val cmd = rawCommand.trim()
+        val cmd = sanitizeCommand(rawCommand)
         if (cmd.isEmpty()) {
             return CommandAssessment(cmd, CommandSafetyTier.BLOCKED, "Empty command.")
         }
@@ -71,9 +76,29 @@ object CommandGuard {
         )
     }
 
-    fun extractAgentCommand(assistantText: String): String? {
-        val match = SHELL_BLOCK_REGEX.find(assistantText) ?: return null
-        val captured = match.groupValues[1].ifBlank { match.groupValues[2] }.trim()
-        return captured.ifEmpty { null }
+    /**
+     * Extracts ONLY the first clean shell command from assistant body text (stripping any
+     * stray reasoning blocks, markdown fences, or leading shell comments).
+     */
+    fun extractAgentCommand(assistantBodyOnly: String): String? {
+        val bodyWithoutThoughts = assistantBodyOnly.replace(THOUGHT_STRIP_REGEX, "")
+        val match = SHELL_BLOCK_REGEX.find(bodyWithoutThoughts) ?: return null
+        val raw = match.groupValues[1].ifBlank { match.groupValues[2] }
+        val cleaned = sanitizeCommand(raw)
+        return cleaned.ifEmpty { null }
+    }
+
+    private fun sanitizeCommand(raw: String): String {
+        val lines = raw.replace("\r\n", "\n")
+            .lines()
+            .map { it.trim() }
+            .filter { line ->
+                line.isNotEmpty() &&
+                    !line.startsWith("```") &&
+                    !line.startsWith("#") &&
+                    !line.equals("[SHIZUKU_RUN]", ignoreCase = true) &&
+                    !line.equals("[/SHIZUKU_RUN]", ignoreCase = true)
+            }
+        return lines.joinToString(" && ").trim()
     }
 }

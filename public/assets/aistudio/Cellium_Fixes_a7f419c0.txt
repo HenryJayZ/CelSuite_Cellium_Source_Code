@@ -1,0 +1,191 @@
+1. The app is currently perfect but we can fix a few stuff, like in this screenshot, for some reason editing or doing any action on my messages trigger a double send, and when I edit and send a message, Cel's bubble doesn't disappear until the second bubble finishes typing 🥺 
+2. in this second screenshot, Why is it saying the free models don't work, did we not do it right? 👀 (also your presets were as expected, not found, never put model presets cuz your training data stopped a long time ago!)
+
+3. in this third screenshot, when my keyboard comes up, the app doesn't calculate the keyboard height perfectly for any keyboard type and the text bar is now way higher than it should, there should be a genius fix for this, search the web
+
+4. in this fourth screenshot, Live mode, The face is too far away, is there not a way to dynamically calculate te phone screen so it always fits in the center with just 20% space between the face and edge, cuz right now that is 90% space
+
+5. 🤔 Also I noticed the voice is just the default and I can't change the voice, infact I noticed I can't set the Cel as my replacement for the Gemini app to see things on my screen live... AND EVEN YET, PERSONA DOES NOT REFLECT ON IT, and it seems it does random faces instead of doing the face the AI told it to do... got a fix for all these? (btw make it have two methods, the first being the AI sends a "mood: [mood]" e.g "mood: angry" at the beginning of the bubble so the face changes immediately, And it can only pick the moods that exist so it doesn't type a mood we don't have an animation for e.g "mood: OMG", or the second method is when the AI replies, the message is sent to another background AI that their only job is to type the mood... Both changeable in settings, first one as default)
+
+6. I tried signing into google but it kept saying sign in canceled, Maybe cuz I built the apk with another key 😔 
+
+7. I noticed the apk is 170MB+, without removing any feature, do you know what is bloating it? any quick wins?
+
+8. I also can't change the voice for the normal chat, Settings?
+
+9. Speaking of settings, the settings menu is such a mess, it's so untidy and not user friendly, and the swiping to just go somewhere gets tiring, How do we make it less scary
+
+10. I noticed the battery optimization Stuff takes me to the settings, But I saw how other apps just bring up a system popup with "allow" there, Like how do they do it cuz a popup is way better than me clicking around battery optimization settings to find the app and remove it...
+
+11. Changing the color of the app also changes the color of the wallpaper 
+
+12. Floating Cel is so unfinished, It doesn't still show when I go to home screen, and remove the "Mini cel" text there, and it's supposed to have access to my screen just like live mode, and it only listens/stops listening when I tap on her face... it's basically supposed to be the full live mode but I can leave the app so she can guide me....
+
+13. in settings, I somehow can't edit the presets for Cel, I want to be able to edit/delete the inbuilt presets
+14. Add compact as a default unremovable"/" command (can be edited tho) so if the chat gets too long, when you run it and the AI "successfully" types out the summary, the chat would start from there with a huge cool purple line indicating compacted area...
+
+15. This may sound confusing, but make it so the default model providers that show on the top, it's possible to click a slash eye "👁️/" icon to hide them, cuz I will never use LM studio or Claude, they won't appear in scrolling list, but when searching they will appear 
+
+16. in the "browse all providers", at the top, the "keys" button is word wrapping appearing as:
+"""
+k
+e
+y
+s
+"""
+Any fix?
+
+17. Speaking of word wrapping, I noticed some buttons don't keep their size cuz of being squished or text too long, Any very common fix for all buttons in the app so they all look gorgeous while displaying the text perfectly? (search the web if you want to)
+
+18. I noticed when I pick a model provider (not from settings, settings work) from the main screen or drop-down, it never brings up the screen to put my API key
+
+19. minor check: make sure if the user has been on guest mode and they suddenly sign in, their current data and online data would conflict so the user has three options, merge both as best as possible 🔥, or, replace the one in the cloud or replace the one locally.
+
+20. In this another screenshot, The AI can't trigger image generations to my liking 🥺 
+
+21. When the user selects an offline model, Context window matters a lot , each token matters due to limited RAM, So when they pick an offline model, a new butto at the top beside history called "Modify" would be there so you can toggle on/off everything that would be sent to the AI e.g Image instructions, Shizuku instructions, Persona, memory, JUST EVERYTHING!, and all the adjustable stuff like context output and all that idk search the web for all .gguf settings to modify and put them there as a cute and user friendly menu . (Also this modify should be in settings incase the user wants to control what gets sent to an api key AI instead)
+
+22. Make Icon a .png so that when building the app, it sees the transparent part and doesn't try to make it a black background on the circle icon.webp
+
+23. below the RAM monitor thingy, add "free RAM" so we can free useless RAM using Shizuku from Both the phone itself (yes make it to be the best! 🔥) and the RAM the app itself is taking e.g locally cache models sitting in RAM...
+
+24. When a model is loaded, I noticed I can spam the play button for the model... also make it so clicking the play button takes me to the chat that is already highlighted (or new chat if already selected) so the user is not confused how to use the model immediately 
+
+25. another screenshot, in here you can see the app forgets I have a model after I closed and reopened the app (cuz for some reason the app crashed, Shizuku error? or search the way to do it on every android), it's like the App forgot I already uploaded a model so I have to find it again?
+
+26. when Cel is typing, the audio is trash, make it a perfect replica of scratching melodii and animal crossing (user can pick between the two)
+
+27. when I click stop, two things, One is that Cel's text disappears unfortunately, secondly is the app was still laggy which made me believe the model didn't stop responding and needed to be killed forcefully...
+
+28. When I click retry on those red errors, the error is supposed to disappear 👀 
+
+29. when it is typing a code block, let the code word wrap on default, can be turned off
+
+30. When Agent mode is turned on for the first time, prompt the user to create a project folder (can be changed each agent mode new chat similar to how Google Antigravity does it), Maybe prompt them to their phone's "/Documents/Projects" folder i don't know.... Cuz this is what the AI keeps checking 👇 
+"""
+[SHIZUKU_RUN] ls -l /sdcard/Android/data/app/com.cellium.app/com.cellium.app/src/main/res/values/styles.xml [/SHIZUKU_RUN]
+"""
+
+
+31. Omg Huge issue, so when I switched to the local model to try it out, I wanted to switch back to my normal API model, but there is no model screen so I can star ⭐ favourite models so they will always be immediately reactivated or selected everywhere.... now I'm forced to go to my API provider and scroll the list 😭 
+
+32. Make sure these are all savable on the Google Cloud, and you can view how much storage your Google cloud is taking and max storage they have and a list delete menu so they can delete Anything they want... Calculate my free storage and give every user only 0.01% of my free storage 🥺 cuz I feel since we are on a free plan of google firebase, our storage will fill up quickly, or how much storage do we have in total so we know the perfect amount to give people 😭
+
+
+33. lol forgot to say the user's most visited-and-used (must be used) API provider should appear on top 
+
+34. when sending images (especially from clipboard)... I noticed I can only upload one at a  time and if I try to upload more than 1... it will just replace the first image... Fix!
+
+35. I just uploaded a "okay cel" .tflite file... I don't know what to say other than the fact that it's supposed to be some kind of replacement for "ok Google" voice activation... so since we're going to make cellium the default assistant app (search the web for the proper API way to do it) it should be able to use some kind of weird file like what I uploaded to check for the user assistant trigger... because I heard that instead of always keeping the microphone on to share the command you can just use this file and it would use a dedicated microphone to use Zero battery, like how Google does it... or was I supposed to upload the .onyx or something file? from open word 😭... sorry my memory is very foggy... you have web access anyways 🙄😏 
+
+36. Our prompt confused the AI, I told it to check my storage size but this is what happened 👇 
+"""
+😏 Storage detective mode... except my little Shizuku bridge is currently unplugged.
+
+**To hook me up:** Settings → System & Shizuku → authorize Cellium. Then I can run device commands directly instead of handing you blocks to paste.
+
+Here's the block for a quick storage readout — review it and run it if you'd rather not wait:
+
+```
+[SHIZUKU_RUN]
+df -h /data
+```
+
+That gives you total/used/available on your main partition. If you want the *culprit* breakdown instead:
+
+```
+[SHIZUKU_RUN]
+du -sh /storage/emulated/0/* 2>/dev/null | sort -rh | head -20
+```
+
+That one's a bit slower but it'll tell you exactly which folder is hoarding your gigabytes. 👀
+
+Want me to go deeper — cache sizes, biggest individual files, or a per-app breakdown?
+"""
+
+
+In short it failed to check, search the web for the best way to make an AI do agentic stuff instead of dropping a whole reply 😭 
+
+36b. all right two issues while using Gemma 26B Google model, it's thinking block is different so we have to make our app know when a thinking blocks start and stop even for Gemma models... because also look at the screenshot you can see that the block is not hiding at the thought block... now secondly you can see that the app doesn't know when g e m m a stops thinking and starts replying... apart from that our app could not figure out how to run Gemma command
+Log:
+"""
+<thought>
+*   User input: "🤭 check my storage size"
+*   Persona: Cel (warm, witty, sharp, slightly sassy, helpful).
+*   Context: Agent Mode is ON, but Shizuku is NOT connected.
+*   Goal: Attempt to check storage size, but since Shizuku isn't connected, explain how to authorize it or provide the command block.
+
+    *   Check storage size is a system-level command.
+    *   Requires Shizuku for direct device interaction via Agent Mode.
+    *   Current status: Shizuku is NOT connected.
+
+    *   *Attempting to be sassy/witty:* "Oh, looking for a little more room to breathe? Let me see... wait, I'm hitting a digital wall."
+    *   *Technical explanation:* I can't reach the hardware directly without Shizuku being active.
+    *   *Instruction:* Go to Settings -> System & Shizuku to authorize.
+    *   *Action:* Provide the `[SHIZUKU_RUN]` block for the command.
+
+    *   *Command:* `df -h /data` or `du -sh /data` (though `df -h` is better for overall size). Let's go with `df -h`.
+
+    *   *Opening:* "Checking the digital closet, are we? 🤭"
+    *   *The "But":* "I'd love to peek under the hood, but I'm currently locked out because Shizuku isn't connected yet."
+    *   *The Fix:* "To let me in, head over to **Settings -> System & Shizuku** and make sure everything is authorized."
+    *   *The Block:*
+        ```bash
+        [SHIZUKU_RUN]
+        df -h /data
+        [/SHIZUKU_RUN]
+        ```
+    *   *Closing:* "Once you've toggled that on, give me another nudge!"
+
+    *   Name: Cel.
+    *   Tone: Warm, witty, sharp, sassy.
+    *   Markdown: Clean.
+    *   Shizuku instruction included.</thought>Checking the digital closet, are we? 🤭 
+
+I'd love to peek under the hood and see how much room you've got left, but I'm currently hitting a bit of a "keep out" sign. Since **Shizuku isn't connected** right now, I don't have the permissions to scan your system storage directly.
+
+To let me in, just head over to **Settings -> System & Shizuku** and make sure the service is running and authorized for me to use.
+
+Once you've toggled that on, you can try again, or just hit this block if you've already got it running:
+
+```bash
+[SHIZUKU_RUN]
+# Checking disk space usage for the data partition
+df -h /data
+[/SHIZUKU_RUN]
+```
+
+Give me a nudge once you've granted me access! ✨
+"""
+
+
+37. Allow us to copy the output of terminal, and copy specific text of bubbles seamlessly if "select text" is picked when holding a bubble 
+
+38. if a message failed due to an error and I click retry I noticed that it will branch it to a new branch, so don't allow this only for error retries 
+
+39. rename "imagine" to "illume"
+
+40. I think it's time for me to explain how the live mode works. In order for you to understand, you need to understand how Gemini works, Google's Gemini. What I've noticed about it is that when I hold the home button of my phone or call out the Hey or okay Google, it will bring up the mini Gemini. It won't bring up the main app, it will just bring up the mini Gemini that would show you the screenshot, then you'll see the pill at the bottom, the pill chat, then you see it automatically listening to you. That is actually good. So that's what I was thinking about Cel. It will be the exact same, but Cel's face will be floating on the screen. And yes, you can upload the screenshot to the stuff. And in that same sales screen, you can still enable live mode so that it always looks at your screen when you send a message. So I think that is all. Yeah, I think it's that simple. And yes, this time sales face will be movable and when it's talking, there'll be a floating bubble beside it and you can hide the bubble if you tap on it. I'm not sure how it will look like in the end, but let's just do this for now.
+
+41. Even in arena mode In this screenshot, the message is showing twice, also I'm already in arena mode why am I getting notifications, It should only show when I leave...
+
+42. the "/imagine" floating help button in new chat does nothing 
+
+43. in the new chat, her floating face, maybe make it so when she blinks, her blush moves accordingly.... 
+
+44. Weird bug, pollinations only worked twice out of 20+ tries, kept seeing error 402, Here was what Gemini told me;
+"""
+Pollinations.ai returns a 402 error when you request a restricted or premium model that requires an authenticated API key or paid tier. Switch your endpoint to one of their standard open-access models or register for a free developer token on Pollinations.
+"""
+
+
+45. So you know how some Samsung phones, when you take a screenshot, you'll see a bar at the bottom. Then on that bar, you can see something to make the screenshot longer by making it scroll the page. Yeah, so that thing is kind of useful to take long screenshots all at once. But it seems like in my app it doesn't work. Do you know how to fix this?
+
+46. Settings feels too cluttered and disorganized, very confusing and so much text to read
+
+47. This was the annoying part about the arena mode. When I entered the arena, I noticed that there were preset models when I clicked on Cel A so that I can pick the model API. But when I clicked on Groq, it didn't even allow me to pick the model I wanted in Groq. It just automatically picked the model that was selected, which was Llama, and it didn't even work. When I picked the Grok, it should show that menu where I can select the model under the API key, and also it shouldn't automatically select models for me because obviously if it tries to do that, those models will not be available because everyday AIs update and AIs go out of order. The second thing I didn't like was in the arena mode. I think I've already told you I couldn't edit the presets of the persona. I think I've already told you that. Anyways, I also wanted To have a retry mode, maybe it will just retry 10 times before finally disconnecting, because I hate it when it gets interrupted by rate limit. Just keep retrying, of course. I don't really care about rate limit. In fact, this even goes to the same in the real app where it will just stop instead of retrying. Just keep retrying until like 10 times, or the user can pick how many times in settings.
+
+48. When I'm importing my offline model, why do I see "Downloading Importing"? 😭 
+48b. and also why is it trying to copy it somewhere?, can't it use the file where it is?, just like how Laptops put it straight into the RAM?, search the web
+48c. I noticed the app still shows an old .gguf model as the name even when I deleted the model from the app and put a new one, the name still labels it the old one in the dropdown menu
+49. I noticed the app still crashes when I'm importing a 1.8GB model, Please search the deep web for sneaky workarounds so we can have the app still running the AI since the phone is a 4GB RAM phone, it should be able to take it, try every method possible please 🙏 

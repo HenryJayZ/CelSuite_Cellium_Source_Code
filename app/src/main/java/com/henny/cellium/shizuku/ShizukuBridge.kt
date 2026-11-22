@@ -218,6 +218,31 @@ class ShizukuBridge(private val context: Context) {
         return res
     }
 
+    /**
+     * Aggressively frees unused device RAM via Shizuku privileged shell without touching Cel.Cellium:
+     * kills cached background processes, trims app caches, and sends RUNNING_CRITICAL trim signals
+     * to other background apps to maximize contiguous memory for 4GB RAM devices.
+     */
+    suspend fun freeSystemRam(): Result<String> {
+        val pkg = appContext.packageName
+        val script = buildString {
+            append("am kill-all 2>&1; ")
+            append("pm trim-caches 999999999999 2>/dev/null; ")
+            append("for p in \$(pm list packages -3 | cut -d: -f2); do ")
+            append("if [ \"\$p\" != \"$pkg\" ] && [ \"\$p\" != \"moe.shizuku.privileged.api\" ]; then ")
+            append("cmd activity send-trim-memory \"\$p\" COMPLETE 2>/dev/null; ")
+            append("fi; done; ")
+            append("cat /proc/meminfo | head -n 3")
+        }
+        val res = runCommand(script, timeoutSec = 15)
+        res.onSuccess { out ->
+            DevLogBuffer.add("INFO", "RAMGuard", "Shizuku Free RAM completed: ${out.take(180)}")
+        }.onFailure { err ->
+            DevLogBuffer.add("WARN", "RAMGuard", "Shizuku Free RAM skipped: ${err.localizedMessage}")
+        }
+        return res
+    }
+
     fun release() {
         unregisterListeners()
         runCatching {

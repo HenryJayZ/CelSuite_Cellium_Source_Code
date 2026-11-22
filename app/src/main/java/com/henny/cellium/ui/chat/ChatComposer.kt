@@ -17,6 +17,7 @@ import androidx.compose.foundation.content.TransferableContent
 import androidx.compose.foundation.content.consume
 import androidx.compose.foundation.content.contentReceiver
 import androidx.compose.foundation.content.hasMediaType
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,9 +28,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Image
@@ -100,8 +102,9 @@ private data class SlashOption(
 /**
  * Isolated zero-lag Chat Composer with:
  * - BasicTextField(TextFieldState) + contentReceiver for GBoard clipboard image/GIF paste
- * - '+' button opening Upload Image / Upload File / Prompt Templates sheet
- * - Inline '/' Slash Command & Prompt Template autocomplete menu
+ * - Multi-image attachment strip (up to 5 images per turn) + text file attachment chip
+ * - '+' button opening Upload Images / Upload File / Prompt Templates sheet
+ * - Inline '/' Slash Command & Prompt Template autocomplete menu (/compact, /illume, /web, /url, /agent, /arena, /clear)
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -109,12 +112,12 @@ fun ChatComposerBar(
     personaName: String,
     isStreaming: Boolean,
     promptTemplates: List<PromptTemplateEntity>,
-    pendingImage: Bitmap?,
+    pendingImages: List<Bitmap>,
     pendingFile: AttachedTextFile?,
     injectedText: String?,
     onClearInjectedText: () -> Unit,
     onPastedBitmap: (Bitmap) -> Unit,
-    onClearImage: () -> Unit,
+    onRemoveImageAt: (Int) -> Unit,
     onClearFile: () -> Unit,
     onPickImage: () -> Unit,
     onPickFile: () -> Unit,
@@ -142,9 +145,10 @@ fun ChatComposerBar(
 
     val builtInSlashOptions = remember {
         listOf(
+            SlashOption("/compact", "Compact Context", "Summarize history into a clean fresh boundary", Icons.Rounded.Compress, "/compact"),
+            SlashOption("/illume ", "Illume Art", "Generate artwork directly into Chat", Icons.Rounded.Palette, "/illume "),
             SlashOption("/web ", "Web Search", "Search live web & attach citations", Icons.Rounded.Language, "/web "),
             SlashOption("/url ", "Read Webpage", "Extract article text from any URL", Icons.Rounded.Link, "/url https://"),
-            SlashOption("/imagine ", "Imagine Art", "Generate image directly into Chat", Icons.Rounded.Palette, "/imagine "),
             SlashOption("/agent ", "Shizuku Shell", "Run guarded Android command", Icons.Rounded.Terminal, "/agent "),
             SlashOption("/arena", "Open Arena Mode", "Launch 2-AI group chat", Icons.Rounded.Forum, "/arena", isArenaShortcut = true),
             SlashOption("/clear", "New Chat", "Start a fresh conversation", Icons.Rounded.AutoAwesome, "/clear"),
@@ -158,18 +162,20 @@ fun ChatComposerBar(
                 emptyList()
             } else {
                 val query = t.lowercase()
-                val custom = promptTemplates.map { tpl ->
-                    SlashOption(
-                        trigger = tpl.slashKey.let { if (it.startsWith("/")) it else "/$it" },
-                        title = tpl.title,
-                        subtitle = tpl.promptBody.replace("\n", " ").take(64),
-                        icon = Icons.Rounded.AutoAwesome,
-                        insertText = tpl.promptBody,
-                    )
-                }
+                val custom = promptTemplates
+                    .filterNot { it.slashKey.trim().lowercase().removePrefix("/") == "compact" }
+                    .map { tpl ->
+                        SlashOption(
+                            trigger = tpl.slashKey.let { if (it.startsWith("/")) it else "/$it" },
+                            title = tpl.title,
+                            subtitle = tpl.promptBody.replace("\n", " ").take(64),
+                            icon = Icons.Rounded.AutoAwesome,
+                            insertText = tpl.promptBody,
+                        )
+                    }
                 (builtInSlashOptions + custom).filter {
                     it.trigger.lowercase().startsWith(query) || it.title.lowercase().contains(query.removePrefix("/"))
-                }.take(6)
+                }.take(7)
             }
         }
     }
@@ -199,7 +205,6 @@ fun ChatComposerBar(
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // Inline Slash Command Popup
         AnimatedVisibility(visible = matchingSlashOptions.isNotEmpty()) {
             Column(
                 modifier = Modifier
@@ -240,11 +245,15 @@ fun ChatComposerBar(
                                         fontWeight = FontWeight.Bold,
                                     ),
                                     color = visuals.primary,
+                                    maxLines = 1,
+                                    softWrap = false,
                                 )
                                 Text(
                                     text = opt.title,
                                     style = MaterialTheme.typography.labelMedium,
                                     color = CelTextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                             Text(
@@ -260,32 +269,40 @@ fun ChatComposerBar(
             }
         }
 
-        // Pending Image or File Attachment Chips
-        if (pendingImage != null || pendingFile != null) {
+        // Pending Multi-Image & File Attachment Strip
+        if (pendingImages.isNotEmpty() || pendingFile != null) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (pendingImage != null) {
+                pendingImages.forEachIndexed { idx, bmp ->
                     Surface(
                         shape = RoundedCornerShape(12.dp),
                         color = visuals.glassSurface,
                         border = androidx.compose.foundation.BorderStroke(1.dp, visuals.activeBorder),
                     ) {
                         Row(
-                            modifier = Modifier.padding(6.dp),
+                            modifier = Modifier.padding(5.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
                         ) {
                             Image(
-                                bitmap = pendingImage.asImageBitmap(),
-                                contentDescription = "Pending image",
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = "Pending image ${idx + 1}",
                                 contentScale = ContentScale.Crop,
-                                modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)),
+                                modifier = Modifier.size(38.dp).clip(RoundedCornerShape(8.dp)),
                             )
-                            Text("Image ready", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary)
-                            IconButton(onClick = onClearImage, modifier = Modifier.size(24.dp)) {
+                            Text(
+                                text = "#${idx + 1}",
+                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                                color = CelTextPrimary,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                            IconButton(onClick = { onRemoveImageAt(idx) }, modifier = Modifier.size(22.dp)) {
                                 Icon(Icons.Rounded.Close, contentDescription = "Remove image", tint = CelTextMuted, modifier = Modifier.size(14.dp))
                             }
                         }
@@ -309,9 +326,8 @@ fun ChatComposerBar(
                                 color = CelTextPrimary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false),
                             )
-                            IconButton(onClick = onClearFile, modifier = Modifier.size(24.dp)) {
+                            IconButton(onClick = onClearFile, modifier = Modifier.size(22.dp)) {
                                 Icon(Icons.Rounded.Close, contentDescription = "Remove file", tint = CelTextMuted, modifier = Modifier.size(14.dp))
                             }
                         }
@@ -334,7 +350,7 @@ fun ChatComposerBar(
                 onClick = { showAttachSheet = true },
                 modifier = Modifier.size(44.dp).testTag("composer_plus_button"),
             ) {
-                Icon(Icons.Rounded.Add, contentDescription = "Attach image, file, or template", tint = CelLavender)
+                Icon(Icons.Rounded.Add, contentDescription = "Attach images, file, or template", tint = CelLavender)
             }
             IconButton(
                 onClick = onStartVoiceInput,
@@ -382,7 +398,7 @@ fun ChatComposerBar(
                     Icon(Icons.Rounded.Stop, contentDescription = "Stop generating", tint = Color.White)
                 }
             } else {
-                val canSend = currentText.isNotBlank() || pendingImage != null || pendingFile != null
+                val canSend = currentText.isNotBlank() || pendingImages.isNotEmpty() || pendingFile != null
                 IconButton(
                     onClick = {
                         val toSend = textState.text.toString()
@@ -418,8 +434,8 @@ fun ChatComposerBar(
                 ) {
                     AttachActionCard(
                         icon = Icons.Rounded.Image,
-                        title = "Upload Image",
-                        subtitle = "Photo / Vision",
+                        title = "Upload Images",
+                        subtitle = "Up to 5 photos",
                         accent = visuals.primary,
                         modifier = Modifier.weight(1f).testTag("attach_image_option"),
                         onClick = {
@@ -446,6 +462,7 @@ fun ChatComposerBar(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     items(promptTemplates, key = { it.id }) { tpl ->
+                        val isCompact = tpl.slashKey.trim().lowercase().removePrefix("/") == "compact"
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -454,13 +471,18 @@ fun ChatComposerBar(
                                 .border(1.dp, visuals.subtleBorder, RoundedCornerShape(12.dp))
                                 .clickable {
                                     showAttachSheet = false
-                                    textState.setTextAndPlaceCursorAtEnd(tpl.promptBody)
+                                    textState.setTextAndPlaceCursorAtEnd(if (isCompact) "/compact" else tpl.promptBody)
                                 }
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = visuals.primary, modifier = Modifier.size(18.dp))
+                            Icon(
+                                imageVector = if (isCompact) Icons.Rounded.Compress else Icons.Rounded.AutoAwesome,
+                                contentDescription = null,
+                                tint = visuals.primary,
+                                modifier = Modifier.size(18.dp),
+                            )
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(tpl.title, style = MaterialTheme.typography.labelMedium, color = CelTextPrimary)
                                 Text(
@@ -473,7 +495,7 @@ fun ChatComposerBar(
                     }
                 }
                 Text(
-                    text = "Tip: You can also paste images or GIFs directly from GBoard clipboard into the input box.",
+                    text = "Tip: Paste images/GIFs directly from GBoard clipboard, or pick multiple images at once.",
                     style = MaterialTheme.typography.labelSmall,
                     color = CelTextMuted,
                 )
@@ -502,8 +524,8 @@ private fun AttachActionCard(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Icon(icon, contentDescription = title, tint = accent, modifier = Modifier.size(24.dp))
-        Text(title, style = MaterialTheme.typography.titleSmall, color = CelTextPrimary)
-        Text(subtitle, style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+        Text(title, style = MaterialTheme.typography.titleSmall, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(subtitle, style = MaterialTheme.typography.labelSmall, color = CelTextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -45,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,12 +57,15 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.henny.cellium.ai.ProviderCatalog
 import com.henny.cellium.data.BuiltInPersonas
+import com.henny.cellium.data.local.ProviderProfileEntity
 import com.henny.cellium.ui.chat.CelliumViewModel
 import com.henny.cellium.ui.chat.PersonaPickerSheet
 import com.henny.cellium.ui.chat.ProviderSearchDropdownSheet
 import com.henny.cellium.ui.components.GlassCard
 import com.henny.cellium.ui.components.MarkdownMessageContent
 import com.henny.cellium.ui.components.VectorBadgeIcon
+import com.henny.cellium.ui.settings.ProviderEditDialog
+import com.henny.cellium.ui.theme.CelAmber
 import com.henny.cellium.ui.theme.CelEmeraldThought
 import com.henny.cellium.ui.theme.CelLavender
 import com.henny.cellium.ui.theme.CelRedError
@@ -71,6 +74,7 @@ import com.henny.cellium.ui.theme.CelTextPrimary
 import com.henny.cellium.ui.theme.CelTextSecondary
 import com.henny.cellium.ui.theme.JetBrainsMono
 import com.henny.cellium.ui.theme.LocalCelliumVisuals
+import kotlinx.coroutines.launch
 
 @Composable
 fun ArenaScreen(
@@ -85,13 +89,20 @@ fun ArenaScreen(
     }
 
     val visuals = LocalCelliumVisuals.current
+    val scope = rememberCoroutineScope()
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
+    val prefs by viewModel.preferences.collectAsStateWithLifecycle()
     val arena by viewModel.arenaController.state.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
 
     var input by remember { mutableStateOf("") }
     var pickingProviderForSlot by remember { mutableStateOf<String?>(null) }
     var pickingPersonaForSlot by remember { mutableStateOf<String?>(null) }
+    var configuringProviderForSlot by remember { mutableStateOf<Pair<String, ProviderProfileEntity>?>(null) }
+
+    val starredModels = remember(prefs.starredModelsJson) {
+        viewModel.prefsStore.decodeStarredModels(prefs.starredModelsJson)
+    }
 
     LaunchedEffect(initialSessionId) {
         viewModel.arenaController.ensureArenaSession(initialSessionId)
@@ -106,13 +117,18 @@ fun ArenaScreen(
         ?: ProviderCatalog.byId(arena.providerAId)?.name ?: "Provider A"
     val provBName = ui.providers.firstOrNull { it.id == arena.providerBId }?.name
         ?: ProviderCatalog.byId(arena.providerBId)?.name ?: "Provider B"
-    val personaA = BuiltInPersonas.ALL.firstOrNull { it.id == arena.personaAId } ?: BuiltInPersonas.ALL.first()
-    val personaB = BuiltInPersonas.ALL.firstOrNull { it.id == arena.personaBId } ?: BuiltInPersonas.ALL[1]
+
+    val allPersonas = ui.allPersonaSpecs
+    val personaA = allPersonas.firstOrNull { it.id == arena.personaAId }
+        ?: allPersonas.firstOrNull()
+        ?: BuiltInPersonas.ALL.first()
+    val personaB = allPersonas.firstOrNull { it.id == arena.personaBId }
+        ?: allPersonas.getOrNull(1)
+        ?: BuiltInPersonas.ALL.first()
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding()
             .imePadding(),
     ) {
         // Header
@@ -121,13 +137,17 @@ fun ArenaScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f),
+            ) {
                 IconButton(onClick = { viewModel.arenaController.pause(); onBack() }) {
                     Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back", tint = CelTextPrimary)
                 }
                 VectorBadgeIcon(iconKey = "forum", contentDescription = null, tint = Color(0xFF38BDF8), containerSize = 32.dp, iconSize = 18.dp)
-                Column {
-                    Text("Arena Mode · 2-AI Group Chat", style = MaterialTheme.typography.titleSmall, color = CelTextPrimary)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Arena Mode · 2-AI Group Chat", style = MaterialTheme.typography.titleSmall, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
                         text = when {
                             arena.isRunning && arena.isPaused -> "Paused · Tap Resume or send a message"
@@ -136,6 +156,8 @@ fun ArenaScreen(
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = CelLavender,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -178,7 +200,7 @@ fun ArenaScreen(
             )
         }
 
-        // Playback Controls Bar (Pause / Resume / Step / Stop)
+        // Playback Controls Bar (Single-line buttons)
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -192,7 +214,7 @@ fun ArenaScreen(
                 ) {
                     Icon(Icons.Rounded.Pause, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.size(4.dp))
-                    Text("Pause")
+                    Text("Pause", maxLines = 1, softWrap = false)
                 }
             } else {
                 Button(
@@ -203,7 +225,7 @@ fun ArenaScreen(
                 ) {
                     Icon(Icons.Rounded.PlayArrow, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.size(4.dp))
-                    Text(if (arena.isPaused) "Resume" else "Auto Talk", color = Color.Black)
+                    Text(if (arena.isPaused) "Resume" else "Auto Talk", color = Color.Black, maxLines = 1, softWrap = false)
                 }
             }
             OutlinedButton(
@@ -212,7 +234,7 @@ fun ArenaScreen(
                 modifier = Modifier.testTag("arena_step_button"),
             ) {
                 Icon(Icons.Rounded.SkipNext, contentDescription = null, modifier = Modifier.size(16.dp))
-                Text("Step")
+                Text("Step", maxLines = 1, softWrap = false)
             }
             if (arena.isRunning) {
                 OutlinedButton(
@@ -220,7 +242,7 @@ fun ArenaScreen(
                     modifier = Modifier.testTag("arena_stop_button"),
                 ) {
                     Icon(Icons.Rounded.Stop, contentDescription = null, tint = CelRedError, modifier = Modifier.size(16.dp))
-                    Text("Stop", color = CelRedError)
+                    Text("Stop", color = CelRedError, maxLines = 1, softWrap = false)
                 }
             }
         }
@@ -302,7 +324,10 @@ fun ArenaScreen(
                                     )
                                 }
                             }
-                            MarkdownMessageContent(text = msg.content)
+                            MarkdownMessageContent(
+                                text = msg.content,
+                                defaultWordWrap = prefs.codeWordWrap,
+                            )
                         }
                     }
 
@@ -315,8 +340,19 @@ fun ArenaScreen(
                                     style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
                                     color = accent,
                                 )
+                                if (arena.retryStatusText.isNotBlank()) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        text = arena.retryStatusText,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                                        color = CelAmber,
+                                    )
+                                }
                                 Spacer(Modifier.height(4.dp))
-                                MarkdownMessageContent(text = arena.streamingContent.ifBlank { "..." })
+                                MarkdownMessageContent(
+                                    text = arena.streamingContent.ifBlank { "..." },
+                                    defaultWordWrap = prefs.codeWordWrap,
+                                )
                             }
                         }
                     }
@@ -324,7 +360,7 @@ fun ArenaScreen(
             }
         }
 
-        // User Injection Bar (always enabled — chime in anytime!)
+        // User Injection Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -365,10 +401,14 @@ fun ArenaScreen(
             activeProviderId = if (slot == "A") arena.providerAId else arena.providerBId,
             onSelectCatalogProvider = { entry ->
                 viewModel.activateCatalogProvider(entry)
+                val saved = ui.providers.firstOrNull { it.id == entry.id }
+                val resolvedModel = saved?.selectedModel?.takeIf { it.isNotBlank() }
+                    ?: entry.defaultModel.takeIf { it.isNotBlank() }
+                    ?: ""
                 if (slot == "A") {
-                    viewModel.arenaController.updateSlotA(entry.id, entry.defaultModel, arena.personaAId)
+                    viewModel.arenaController.updateSlotA(entry.id, resolvedModel, arena.personaAId)
                 } else {
-                    viewModel.arenaController.updateSlotB(entry.id, entry.defaultModel, arena.personaBId)
+                    viewModel.arenaController.updateSlotB(entry.id, resolvedModel, arena.personaBId)
                 }
             },
             onSelectSavedProviderModel = { pid, model ->
@@ -381,6 +421,39 @@ fun ArenaScreen(
             onFetchActiveModels = { viewModel.fetchLiveModels(it) },
             onOpenSettingsProviders = onOpenSettingsProviders,
             onDismiss = { pickingProviderForSlot = null },
+            hiddenProviderIds = prefs.hiddenProviderIds,
+            starredModels = starredModels,
+            onToggleHideProvider = { viewModel.toggleHideProvider(it) },
+            onToggleStarModel = { pid, pname, model -> viewModel.toggleStarModel(pid, pname, model) },
+            onRequestConfigureKey = { prov -> configuringProviderForSlot = slot to prov },
+            dismissOnProviderPick = false,
+        )
+    }
+
+    configuringProviderForSlot?.let { (slot, prov) ->
+        ProviderEditDialog(
+            provider = prov,
+            onDismiss = { configuringProviderForSlot = null },
+            onSave = { updated ->
+                scope.launch {
+                    viewModel.saveProviderProfile(updated)
+                    if (slot == "A") {
+                        viewModel.arenaController.updateSlotA(updated.id, updated.selectedModel, arena.personaAId)
+                    } else {
+                        viewModel.arenaController.updateSlotB(updated.id, updated.selectedModel, arena.personaBId)
+                    }
+                }
+                configuringProviderForSlot = null
+            },
+            onDelete = if (prov.isCustom) {
+                {
+                    viewModel.deleteCustomProvider(prov.id)
+                    configuringProviderForSlot = null
+                }
+            } else null,
+            onFetchModels = { draft -> viewModel.fetchLiveModels(draft) },
+            starredModels = starredModels,
+            onToggleStarModel = { pid, pname, model -> viewModel.toggleStarModel(pid, pname, model) },
         )
     }
 
@@ -442,7 +515,7 @@ private fun ArenaSlotCard(
             color = accent.copy(alpha = 0.14f),
         ) {
             Text(
-                text = "${providerName.take(14)} · ${modelName.take(14)}",
+                text = "${providerName.take(14)} · ${modelName.ifBlank { "select model" }.take(14)}",
                 style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
                 color = CelLavender,
                 maxLines = 1,

@@ -14,8 +14,12 @@ android {
         applicationId = "CelSuite.HenryJayz.Cellium"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "v2611.21.0"
+        versionCode = 4
+        versionName = "v2611.22.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
@@ -53,7 +57,15 @@ android {
         aidl = true
     }
 
+    androidResources {
+        noCompress += listOf("tflite", "bin")
+    }
+
     packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            pickFirsts += listOf("lib/arm64-v8a/libc++_shared.so")
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
@@ -88,13 +100,14 @@ dependencies {
     implementation(libs.kotlinx.coroutines.play.services)
     implementation(libs.coil.compose)
 
-    // Shizuku Privilege & Dual On-Device Local LLM Inference (MediaPipe .task + Llamatik .gguf)
+    // Shizuku Privilege, Dual On-Device Local LLM & openWakeWord LiteRT
     implementation(libs.shizuku.api)
     implementation(libs.shizuku.provider)
     implementation(libs.mediapipe.tasks.genai)
     implementation(libs.llamatik.core)
+    implementation(libs.litert)
 
-    // Optional Google Sign-In & Cloud Firestore Backup Sync
+    // Optional Google Sign-In & Cloud Firestore Sync
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.firestore)
     implementation(libs.firebase.auth)

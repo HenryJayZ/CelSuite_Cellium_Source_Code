@@ -8,12 +8,50 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 private val Context.celliumDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "cellium_prefs_v2"
+)
+
+@Serializable
+data class RegisteredLocalModel(
+    val uriOrPath: String,
+    val displayName: String,
+    val sizeBytes: Long = 0L,
+    val isContentUri: Boolean = false,
+)
+
+@Serializable
+data class StarredModelEntry(
+    val providerId: String,
+    val providerName: String,
+    val modelName: String,
+)
+
+data class ContextModifyConfig(
+    val includePersona: Boolean = true,
+    val includeMemories: Boolean = true,
+    val includeIllumeInstructions: Boolean = true,
+    val includeAgentInstructions: Boolean = true,
+    val includeMoodInstructions: Boolean = true,
+    val historyLimit: Int = 12,
+    val ggufContextLength: Int = 1024,
+    val ggufMaxTokens: Int = 512,
+    val ggufTemperature: Float = 0.7f,
+    val ggufTopP: Float = 0.90f,
+    val ggufTopK: Int = 40,
+    val ggufRepeatPenalty: Float = 1.12f,
+    val ggufThreads: Int = 4,
+    val ggufUseMmap: Boolean = true,
+    val ggufFlashAttention: Boolean = false,
+    val ggufGpuLayers: Int = 0,
 )
 
 data class CelliumPreferences(
@@ -21,8 +59,9 @@ data class CelliumPreferences(
     val termsAccepted: Boolean = false,
     val guestMode: Boolean = true,
     val onboardingCompleted: Boolean = false,
+    val personasSeeded: Boolean = false,
 
-    // Defaults (Pollinations keyless free provider by default so instant testing works!)
+    // Defaults (Pollinations keyless free provider by default so instant testing works)
     val avatarGender: String = "Female",
     val defaultPersonaId: String = "default",
     val activeProviderId: String = "preset_pollinations_free",
@@ -39,18 +78,28 @@ data class CelliumPreferences(
     val highFpsMode: Boolean = true,
     val fontScale: Float = 1.0f,
     val floatingMiniCel: Boolean = false,
+    val codeWordWrap: Boolean = true,
 
     // Shizuku, Agent & Tools
     val shizukuAutoGuard: Boolean = true,
     val ramGuardThresholdMb: Int = 1536,
     val agentModeEnabled: Boolean = false,
     val agentAutoApproveSafe: Boolean = false,
+    val agentWorkspacePath: String = "/sdcard/Documents/CelliumProjects",
+    val agentWorkspacePrompted: Boolean = false,
     val webSearchAutoEnabled: Boolean = false,
     val notificationsEnabled: Boolean = true,
 
-    // Voice, TTS, SFX & Haptics
+    // Mood Engine, Retry & Providers UX
+    val moodMethod: String = "inline_tag", // "inline_tag" (Method 1 default) or "background_ai" (Method 2)
+    val maxAutoRetries: Int = 10,
+    val hiddenProviderIds: Set<String> = emptySet(),
+    val starredModelsJson: String = "[]",
+
+    // Voice, TTS, SFX, Haptics & Wake Word
     val soundsEnabled: Boolean = true,
     val animaleseEnabled: Boolean = true,
+    val typingSoundStyle: String = "animal_crossing", // "animal_crossing" or "scratchin_melodii"
     val hapticsEnabled: Boolean = true,
     val sfxVolume: Float = 0.80f,
     val ttsVoiceName: String = "",
@@ -58,10 +107,13 @@ data class CelliumPreferences(
     val ttsSpeechRate: Float = 1.04f,
     val autoReadReplies: Boolean = false,
     val liveHandsFreeLoop: Boolean = true,
+    val wakeWordEnabled: Boolean = false,
+    val wakeWordCustomPath: String = "",
+    val wakeWordSensitivity: Float = 0.55f,
 
-    // Multi-Provider Image Studio + Kaggle GPU Notebook (.json)
+    // Multi-Provider Illume Image Studio + Kaggle GPU Notebook (.json)
     val imagineProvider: String = "pollinations",
-    val imagineModel: String = "flux",
+    val imagineModel: String = "sana",
     val imagineApiKey: String = "",
     val imagineCustomUrl: String = "",
     val kaggleUsername: String = "",
@@ -69,22 +121,23 @@ data class CelliumPreferences(
     val kaggleKernelSlug: String = "cellium-gpu-imagine",
     val kaggleModelId: String = "stabilityai/sdxl-turbo",
 
-    // On-Device Local Model Path (.gguf / .task / .bin)
+    // On-Device Local Model Path & Zero-Copy Mounted Registry
     val localModelPath: String = "",
     val localModelName: String = "",
-    val localMaxTokens: Int = 1024,
+    val localMaxTokens: Int = 512,
     val localUseGpu: Boolean = true,
+    val registeredLocalModelsJson: String = "[]",
+
+    // Context & GGUF Modify Menu
+    val contextModify: ContextModifyConfig = ContextModifyConfig(),
 )
 
 class PreferencesStore(context: Context) {
     private val appContext = context.applicationContext
     private val dataStore = appContext.celliumDataStore
     private val bootCache = appContext.getSharedPreferences("cellium_boot_cache", Context.MODE_PRIVATE)
+    private val json = Json { ignoreUnknownKeys = true }
 
-    /**
-     * Synchronous fast-path read used for initial StateFlow seed so returning users
-     * NEVER experience a split-second Onboarding/Welcome screen flash on cold start.
-     */
     fun readCachedInitialPreferences(): CelliumPreferences = CelliumPreferences(
         termsAccepted = bootCache.getBoolean("terms_accepted", false),
         guestMode = bootCache.getBoolean("guest_mode", true),
@@ -97,6 +150,7 @@ class PreferencesStore(context: Context) {
         val TERMS_ACCEPTED = booleanPreferencesKey("terms_accepted")
         val GUEST_MODE = booleanPreferencesKey("guest_mode")
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
+        val PERSONAS_SEEDED = booleanPreferencesKey("personas_seeded")
         val AVATAR_GENDER = stringPreferencesKey("avatar_gender")
         val DEFAULT_PERSONA = stringPreferencesKey("default_persona")
         val ACTIVE_PROVIDER_ID = stringPreferencesKey("active_provider_id")
@@ -111,14 +165,22 @@ class PreferencesStore(context: Context) {
         val HIGH_FPS = booleanPreferencesKey("high_fps")
         val FONT_SCALE = floatPreferencesKey("font_scale")
         val FLOATING_MINI_CEL = booleanPreferencesKey("floating_mini_cel")
+        val CODE_WORD_WRAP = booleanPreferencesKey("code_word_wrap")
         val SHIZUKU_AUTO_GUARD = booleanPreferencesKey("shizuku_auto_guard")
         val RAM_GUARD_THRESHOLD_MB = intPreferencesKey("ram_guard_threshold_mb")
         val AGENT_MODE = booleanPreferencesKey("agent_mode")
         val AGENT_AUTO_APPROVE_SAFE = booleanPreferencesKey("agent_auto_approve_safe")
+        val AGENT_WORKSPACE_PATH = stringPreferencesKey("agent_workspace_path")
+        val AGENT_WORKSPACE_PROMPTED = booleanPreferencesKey("agent_workspace_prompted")
         val WEB_SEARCH_AUTO = booleanPreferencesKey("web_search_auto")
         val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
+        val MOOD_METHOD = stringPreferencesKey("mood_method")
+        val MAX_AUTO_RETRIES = intPreferencesKey("max_auto_retries")
+        val HIDDEN_PROVIDER_IDS = stringSetPreferencesKey("hidden_provider_ids")
+        val STARRED_MODELS_JSON = stringPreferencesKey("starred_models_json")
         val SOUNDS_ENABLED = booleanPreferencesKey("sounds_enabled")
         val ANIMALESE_ENABLED = booleanPreferencesKey("animalese_enabled")
+        val TYPING_SOUND_STYLE = stringPreferencesKey("typing_sound_style")
         val HAPTICS_ENABLED = booleanPreferencesKey("haptics_enabled")
         val SFX_VOLUME = floatPreferencesKey("sfx_volume")
         val TTS_VOICE = stringPreferencesKey("tts_voice")
@@ -126,6 +188,9 @@ class PreferencesStore(context: Context) {
         val TTS_RATE = floatPreferencesKey("tts_rate")
         val AUTO_READ = booleanPreferencesKey("auto_read")
         val LIVE_HANDS_FREE = booleanPreferencesKey("live_hands_free")
+        val WAKE_WORD_ENABLED = booleanPreferencesKey("wake_word_enabled")
+        val WAKE_WORD_CUSTOM_PATH = stringPreferencesKey("wake_word_custom_path")
+        val WAKE_WORD_SENSITIVITY = floatPreferencesKey("wake_word_sensitivity")
         val IMAGINE_PROVIDER = stringPreferencesKey("imagine_provider")
         val IMAGINE_MODEL = stringPreferencesKey("imagine_model")
         val IMAGINE_API_KEY = stringPreferencesKey("imagine_api_key")
@@ -138,13 +203,39 @@ class PreferencesStore(context: Context) {
         val LOCAL_MODEL_NAME = stringPreferencesKey("local_model_name")
         val LOCAL_MAX_TOKENS = intPreferencesKey("local_max_tokens")
         val LOCAL_USE_GPU = booleanPreferencesKey("local_use_gpu")
+        val REGISTERED_LOCAL_MODELS = stringPreferencesKey("registered_local_models_json")
+
+        // Context Modify & GGUF Params
+        val CTX_PERSONA = booleanPreferencesKey("ctx_persona")
+        val CTX_MEMORIES = booleanPreferencesKey("ctx_memories")
+        val CTX_ILLUME = booleanPreferencesKey("ctx_illume")
+        val CTX_AGENT = booleanPreferencesKey("ctx_agent")
+        val CTX_MOOD = booleanPreferencesKey("ctx_mood")
+        val CTX_HISTORY_LIMIT = intPreferencesKey("ctx_history_limit")
+        val GGUF_CTX_LEN = intPreferencesKey("gguf_ctx_len")
+        val GGUF_MAX_TOKENS = intPreferencesKey("gguf_max_tokens")
+        val GGUF_TEMP = floatPreferencesKey("gguf_temp")
+        val GGUF_TOP_P = floatPreferencesKey("gguf_top_p")
+        val GGUF_TOP_K = intPreferencesKey("gguf_top_k")
+        val GGUF_REPEAT_PENALTY = floatPreferencesKey("gguf_repeat_penalty")
+        val GGUF_THREADS = intPreferencesKey("gguf_threads")
+        val GGUF_USE_MMAP = booleanPreferencesKey("gguf_use_mmap")
+        val GGUF_FLASH_ATTN = booleanPreferencesKey("gguf_flash_attn")
+        val GGUF_GPU_LAYERS = intPreferencesKey("gguf_gpu_layers")
     }
 
     val preferencesFlow: Flow<CelliumPreferences> = dataStore.data.map { p ->
+        val rawImagineModel = p[Keys.IMAGINE_MODEL]
+        val safeImagineModel = if (rawImagineModel.isNullOrBlank() || (rawImagineModel == "flux" && (p[Keys.IMAGINE_PROVIDER] ?: "pollinations") == "pollinations" && p[Keys.IMAGINE_API_KEY].isNullOrBlank())) {
+            "sana"
+        } else {
+            rawImagineModel
+        }
         CelliumPreferences(
             termsAccepted = p[Keys.TERMS_ACCEPTED] ?: false,
             guestMode = p[Keys.GUEST_MODE] ?: true,
             onboardingCompleted = p[Keys.ONBOARDING_COMPLETED] ?: false,
+            personasSeeded = p[Keys.PERSONAS_SEEDED] ?: false,
             avatarGender = p[Keys.AVATAR_GENDER] ?: "Female",
             defaultPersonaId = p[Keys.DEFAULT_PERSONA] ?: "default",
             activeProviderId = p[Keys.ACTIVE_PROVIDER_ID] ?: "preset_pollinations_free",
@@ -159,14 +250,22 @@ class PreferencesStore(context: Context) {
             highFpsMode = p[Keys.HIGH_FPS] ?: true,
             fontScale = p[Keys.FONT_SCALE] ?: 1.0f,
             floatingMiniCel = p[Keys.FLOATING_MINI_CEL] ?: false,
+            codeWordWrap = p[Keys.CODE_WORD_WRAP] ?: true,
             shizukuAutoGuard = p[Keys.SHIZUKU_AUTO_GUARD] ?: true,
             ramGuardThresholdMb = p[Keys.RAM_GUARD_THRESHOLD_MB] ?: 1536,
             agentModeEnabled = p[Keys.AGENT_MODE] ?: false,
             agentAutoApproveSafe = p[Keys.AGENT_AUTO_APPROVE_SAFE] ?: false,
+            agentWorkspacePath = p[Keys.AGENT_WORKSPACE_PATH] ?: "/sdcard/Documents/CelliumProjects",
+            agentWorkspacePrompted = p[Keys.AGENT_WORKSPACE_PROMPTED] ?: false,
             webSearchAutoEnabled = p[Keys.WEB_SEARCH_AUTO] ?: false,
             notificationsEnabled = p[Keys.NOTIFICATIONS_ENABLED] ?: true,
+            moodMethod = p[Keys.MOOD_METHOD] ?: "inline_tag",
+            maxAutoRetries = (p[Keys.MAX_AUTO_RETRIES] ?: 10).coerceIn(0, 15),
+            hiddenProviderIds = p[Keys.HIDDEN_PROVIDER_IDS] ?: emptySet(),
+            starredModelsJson = p[Keys.STARRED_MODELS_JSON] ?: "[]",
             soundsEnabled = p[Keys.SOUNDS_ENABLED] ?: true,
             animaleseEnabled = p[Keys.ANIMALESE_ENABLED] ?: true,
+            typingSoundStyle = p[Keys.TYPING_SOUND_STYLE] ?: "animal_crossing",
             hapticsEnabled = p[Keys.HAPTICS_ENABLED] ?: true,
             sfxVolume = p[Keys.SFX_VOLUME] ?: 0.80f,
             ttsVoiceName = p[Keys.TTS_VOICE] ?: "",
@@ -174,8 +273,11 @@ class PreferencesStore(context: Context) {
             ttsSpeechRate = p[Keys.TTS_RATE] ?: 1.04f,
             autoReadReplies = p[Keys.AUTO_READ] ?: false,
             liveHandsFreeLoop = p[Keys.LIVE_HANDS_FREE] ?: true,
+            wakeWordEnabled = p[Keys.WAKE_WORD_ENABLED] ?: false,
+            wakeWordCustomPath = p[Keys.WAKE_WORD_CUSTOM_PATH] ?: "",
+            wakeWordSensitivity = p[Keys.WAKE_WORD_SENSITIVITY] ?: 0.55f,
             imagineProvider = p[Keys.IMAGINE_PROVIDER] ?: "pollinations",
-            imagineModel = p[Keys.IMAGINE_MODEL] ?: "flux",
+            imagineModel = safeImagineModel,
             imagineApiKey = p[Keys.IMAGINE_API_KEY] ?: "",
             imagineCustomUrl = p[Keys.IMAGINE_CUSTOM_URL] ?: "",
             kaggleUsername = p[Keys.KAGGLE_USERNAME] ?: "",
@@ -184,10 +286,41 @@ class PreferencesStore(context: Context) {
             kaggleModelId = p[Keys.KAGGLE_MODEL] ?: "stabilityai/sdxl-turbo",
             localModelPath = p[Keys.LOCAL_MODEL_PATH] ?: "",
             localModelName = p[Keys.LOCAL_MODEL_NAME] ?: "",
-            localMaxTokens = p[Keys.LOCAL_MAX_TOKENS] ?: 1024,
+            localMaxTokens = p[Keys.LOCAL_MAX_TOKENS] ?: 512,
             localUseGpu = p[Keys.LOCAL_USE_GPU] ?: true,
+            registeredLocalModelsJson = p[Keys.REGISTERED_LOCAL_MODELS] ?: "[]",
+            contextModify = ContextModifyConfig(
+                includePersona = p[Keys.CTX_PERSONA] ?: true,
+                includeMemories = p[Keys.CTX_MEMORIES] ?: true,
+                includeIllumeInstructions = p[Keys.CTX_ILLUME] ?: true,
+                includeAgentInstructions = p[Keys.CTX_AGENT] ?: true,
+                includeMoodInstructions = p[Keys.CTX_MOOD] ?: true,
+                historyLimit = (p[Keys.CTX_HISTORY_LIMIT] ?: 12).coerceIn(2, 48),
+                ggufContextLength = (p[Keys.GGUF_CTX_LEN] ?: 1024).coerceIn(256, 8192),
+                ggufMaxTokens = (p[Keys.GGUF_MAX_TOKENS] ?: 512).coerceIn(64, 4096),
+                ggufTemperature = (p[Keys.GGUF_TEMP] ?: 0.7f).coerceIn(0f, 2f),
+                ggufTopP = (p[Keys.GGUF_TOP_P] ?: 0.90f).coerceIn(0.1f, 1f),
+                ggufTopK = (p[Keys.GGUF_TOP_K] ?: 40).coerceIn(1, 128),
+                ggufRepeatPenalty = (p[Keys.GGUF_REPEAT_PENALTY] ?: 1.12f).coerceIn(1.0f, 1.5f),
+                ggufThreads = (p[Keys.GGUF_THREADS] ?: 4).coerceIn(1, 8),
+                ggufUseMmap = p[Keys.GGUF_USE_MMAP] ?: true,
+                ggufFlashAttention = p[Keys.GGUF_FLASH_ATTN] ?: false,
+                ggufGpuLayers = (p[Keys.GGUF_GPU_LAYERS] ?: 0).coerceIn(0, 32),
+            ),
         )
     }
+
+    fun decodeStarredModels(raw: String): List<StarredModelEntry> =
+        runCatching { json.decodeFromString<List<StarredModelEntry>>(raw) }.getOrDefault(emptyList())
+
+    fun encodeStarredModels(list: List<StarredModelEntry>): String =
+        runCatching { json.encodeToString(list) }.getOrDefault("[]")
+
+    fun decodeRegisteredLocalModels(raw: String): List<RegisteredLocalModel> =
+        runCatching { json.decodeFromString<List<RegisteredLocalModel>>(raw) }.getOrDefault(emptyList())
+
+    fun encodeRegisteredLocalModels(list: List<RegisteredLocalModel>): String =
+        runCatching { json.encodeToString(list) }.getOrDefault("[]")
 
     suspend fun acceptTerms() {
         bootCache.edit().putBoolean("terms_accepted", true).apply()
@@ -207,6 +340,7 @@ class PreferencesStore(context: Context) {
             it[Keys.ONBOARDING_COMPLETED] = true
         }
     }
+    suspend fun markPersonasSeeded() { dataStore.edit { it[Keys.PERSONAS_SEEDED] = true } }
     suspend fun updateAvatarGender(gender: String) { dataStore.edit { it[Keys.AVATAR_GENDER] = gender } }
     suspend fun updateDefaultPersona(id: String) { dataStore.edit { it[Keys.DEFAULT_PERSONA] = id } }
     suspend fun updateActiveProviderId(id: String) {
@@ -231,6 +365,38 @@ class PreferencesStore(context: Context) {
     suspend fun updateParticlesEnabled(enabled: Boolean) { dataStore.edit { it[Keys.PARTICLES_ENABLED] = enabled } }
     suspend fun updateHighFpsMode(enabled: Boolean) { dataStore.edit { it[Keys.HIGH_FPS] = enabled } }
     suspend fun updateFloatingMiniCel(enabled: Boolean) { dataStore.edit { it[Keys.FLOATING_MINI_CEL] = enabled } }
+    suspend fun updateCodeWordWrap(enabled: Boolean) { dataStore.edit { it[Keys.CODE_WORD_WRAP] = enabled } }
+    suspend fun updateMoodMethod(method: String) { dataStore.edit { it[Keys.MOOD_METHOD] = method } }
+    suspend fun updateMaxAutoRetries(count: Int) { dataStore.edit { it[Keys.MAX_AUTO_RETRIES] = count.coerceIn(0, 15) } }
+    suspend fun updateHiddenProviderIds(ids: Set<String>) { dataStore.edit { it[Keys.HIDDEN_PROVIDER_IDS] = ids } }
+    suspend fun updateStarredModelsJson(rawJson: String) { dataStore.edit { it[Keys.STARRED_MODELS_JSON] = rawJson } }
+    suspend fun updateRegisteredLocalModelsJson(rawJson: String) { dataStore.edit { it[Keys.REGISTERED_LOCAL_MODELS] = rawJson } }
+    suspend fun updateAgentWorkspace(path: String, prompted: Boolean = true) {
+        dataStore.edit {
+            it[Keys.AGENT_WORKSPACE_PATH] = path.trim().ifBlank { "/sdcard/Documents/CelliumProjects" }
+            it[Keys.AGENT_WORKSPACE_PROMPTED] = prompted
+        }
+    }
+    suspend fun updateContextModify(cfg: ContextModifyConfig) {
+        dataStore.edit {
+            it[Keys.CTX_PERSONA] = cfg.includePersona
+            it[Keys.CTX_MEMORIES] = cfg.includeMemories
+            it[Keys.CTX_ILLUME] = cfg.includeIllumeInstructions
+            it[Keys.CTX_AGENT] = cfg.includeAgentInstructions
+            it[Keys.CTX_MOOD] = cfg.includeMoodInstructions
+            it[Keys.CTX_HISTORY_LIMIT] = cfg.historyLimit.coerceIn(2, 48)
+            it[Keys.GGUF_CTX_LEN] = cfg.ggufContextLength.coerceIn(256, 8192)
+            it[Keys.GGUF_MAX_TOKENS] = cfg.ggufMaxTokens.coerceIn(64, 4096)
+            it[Keys.GGUF_TEMP] = cfg.ggufTemperature.coerceIn(0f, 2f)
+            it[Keys.GGUF_TOP_P] = cfg.ggufTopP.coerceIn(0.1f, 1f)
+            it[Keys.GGUF_TOP_K] = cfg.ggufTopK.coerceIn(1, 128)
+            it[Keys.GGUF_REPEAT_PENALTY] = cfg.ggufRepeatPenalty.coerceIn(1.0f, 1.5f)
+            it[Keys.GGUF_THREADS] = cfg.ggufThreads.coerceIn(1, 8)
+            it[Keys.GGUF_USE_MMAP] = cfg.ggufUseMmap
+            it[Keys.GGUF_FLASH_ATTN] = cfg.ggufFlashAttention
+            it[Keys.GGUF_GPU_LAYERS] = cfg.ggufGpuLayers.coerceIn(0, 32)
+        }
+    }
     suspend fun updateShizukuSettings(autoGuard: Boolean, thresholdMb: Int, autoApproveSafe: Boolean) {
         dataStore.edit {
             it[Keys.SHIZUKU_AUTO_GUARD] = autoGuard
@@ -241,12 +407,26 @@ class PreferencesStore(context: Context) {
     suspend fun updateAgentMode(enabled: Boolean) { dataStore.edit { it[Keys.AGENT_MODE] = enabled } }
     suspend fun updateWebSearchAuto(enabled: Boolean) { dataStore.edit { it[Keys.WEB_SEARCH_AUTO] = enabled } }
     suspend fun updateNotificationsEnabled(enabled: Boolean) { dataStore.edit { it[Keys.NOTIFICATIONS_ENABLED] = enabled } }
-    suspend fun updateAudioSettings(sounds: Boolean, animalese: Boolean, haptics: Boolean, volume: Float) {
+    suspend fun updateAudioSettings(
+        sounds: Boolean,
+        animalese: Boolean,
+        haptics: Boolean,
+        volume: Float,
+        typingStyle: String? = null,
+    ) {
         dataStore.edit {
             it[Keys.SOUNDS_ENABLED] = sounds
             it[Keys.ANIMALESE_ENABLED] = animalese
             it[Keys.HAPTICS_ENABLED] = haptics
             it[Keys.SFX_VOLUME] = volume.coerceIn(0f, 1f)
+            if (typingStyle != null) it[Keys.TYPING_SOUND_STYLE] = typingStyle
+        }
+    }
+    suspend fun updateWakeWordSettings(enabled: Boolean, customPath: String? = null, sensitivity: Float? = null) {
+        dataStore.edit {
+            it[Keys.WAKE_WORD_ENABLED] = enabled
+            if (customPath != null) it[Keys.WAKE_WORD_CUSTOM_PATH] = customPath
+            if (sensitivity != null) it[Keys.WAKE_WORD_SENSITIVITY] = sensitivity.coerceIn(0.20f, 0.95f)
         }
     }
     suspend fun updateVoiceSettings(voice: String, pitch: Float, rate: Float, autoRead: Boolean, handsFree: Boolean) {
@@ -301,6 +481,12 @@ class PreferencesStore(context: Context) {
         animaleseEnabled: Boolean?,
         hapticsEnabled: Boolean?,
         notificationsEnabled: Boolean?,
+        starredModelsJson: String? = null,
+        hiddenProviderIds: Set<String>? = null,
+        moodMethod: String? = null,
+        typingSoundStyle: String? = null,
+        maxAutoRetries: Int? = null,
+        codeWordWrap: Boolean? = null,
     ) {
         if (!activeProviderId.isNullOrBlank()) {
             bootCache.edit().putString("active_provider_id", activeProviderId).apply()
@@ -326,6 +512,12 @@ class PreferencesStore(context: Context) {
             if (animaleseEnabled != null) p[Keys.ANIMALESE_ENABLED] = animaleseEnabled
             if (hapticsEnabled != null) p[Keys.HAPTICS_ENABLED] = hapticsEnabled
             if (notificationsEnabled != null) p[Keys.NOTIFICATIONS_ENABLED] = notificationsEnabled
+            if (!starredModelsJson.isNullOrBlank()) p[Keys.STARRED_MODELS_JSON] = starredModelsJson
+            if (hiddenProviderIds != null) p[Keys.HIDDEN_PROVIDER_IDS] = hiddenProviderIds
+            if (!moodMethod.isNullOrBlank()) p[Keys.MOOD_METHOD] = moodMethod
+            if (!typingSoundStyle.isNullOrBlank()) p[Keys.TYPING_SOUND_STYLE] = typingSoundStyle
+            if (maxAutoRetries != null) p[Keys.MAX_AUTO_RETRIES] = maxAutoRetries.coerceIn(0, 15)
+            if (codeWordWrap != null) p[Keys.CODE_WORD_WRAP] = codeWordWrap
         }
     }
 }

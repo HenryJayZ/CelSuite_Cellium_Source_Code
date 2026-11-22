@@ -8,7 +8,7 @@ import androidx.room.PrimaryKey
 data class ProviderProfileEntity(
     @PrimaryKey val id: String,
     val name: String,
-    val badge: String, // Vector icon key (NO emojis!)
+    val badge: String,
     val protocol: String, // "openai", "anthropic", "on_device"
     val baseUrl: String,
     val apiKey: String,
@@ -19,6 +19,7 @@ data class ProviderProfileEntity(
     val maxTokens: Int = 2048,
     val requiresKey: Boolean = true,
     val isCustom: Boolean = false,
+    val usageCount: Int = 0,
     val updatedAtMs: Long = System.currentTimeMillis(),
 )
 
@@ -33,10 +34,10 @@ data class SessionEntity(
     val archived: Boolean = false,
     val isArena: Boolean = false,
     val arenaProviderA: String = "preset_pollinations_free",
-    val arenaModelA: String = "openai",
+    val arenaModelA: String = "openai-fast",
     val arenaPersonaA: String = "default",
     val arenaProviderB: String = "preset_pollinations_free",
-    val arenaModelB: String = "mistral",
+    val arenaModelB: String = "openai-fast",
     val arenaPersonaB: String = "celysia",
     val activeLeafId: String = "",
     val messageCount: Int = 0,
@@ -58,7 +59,7 @@ data class MessageEntity(
     val sessionId: String,
     val parentId: String? = null,
     val role: String, // "user", "assistant", "tool"
-    val speakerLabel: String = "", // Used in Arena Mode ("AI A · Cel", "AI B · Celysia")
+    val speakerLabel: String = "",
     val content: String,
     val thought: String = "",
     val toolCommand: String = "",
@@ -75,6 +76,7 @@ data class MessageEntity(
     val tokensPerSec: Float = 0f,
     val estimatedCostUsd: Double = 0.0,
     val isError: Boolean = false,
+    val isCompactSummary: Boolean = false,
     val createdAtMs: Long = System.currentTimeMillis(),
 )
 
@@ -101,7 +103,7 @@ data class MemoryEntity(
 @Entity(tableName = "prompt_templates")
 data class PromptTemplateEntity(
     @PrimaryKey val id: String,
-    val slashKey: String, // e.g. "summarize", "code", "explain"
+    val slashKey: String,
     val title: String,
     val promptBody: String,
     val createdAtMs: Long = System.currentTimeMillis(),

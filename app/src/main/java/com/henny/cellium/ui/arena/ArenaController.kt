@@ -6,6 +6,7 @@ import com.henny.cellium.ai.ProviderPresets
 import com.henny.cellium.ai.UniversalLlmClient
 import com.henny.cellium.avatar.MoodDetector
 import com.henny.cellium.core.CelliumSoundEngine
+import com.henny.cellium.core.ContextModifyConfig
 import com.henny.cellium.core.DevLogBuffer
 import com.henny.cellium.data.BuiltInPersonas
 import com.henny.cellium.data.CustomPersona
@@ -29,16 +30,17 @@ import java.util.UUID
 data class ArenaUiState(
     val sessionId: String? = null,
     val providerAId: String = ProviderPresets.ID_POLLINATIONS_FREE,
-    val modelA: String = "openai",
+    val modelA: String = "openai-fast",
     val personaAId: String = "default",
     val providerBId: String = ProviderPresets.ID_POLLINATIONS_FREE,
-    val modelB: String = "mistral",
+    val modelB: String = "openai-fast",
     val personaBId: String = "celeste",
     val messages: List<MessageEntity> = emptyList(),
     val isRunning: Boolean = false,
     val isPaused: Boolean = false,
     val activeSpeaker: String = "", // "A" or "B"
     val streamingContent: String = "",
+    val retryStatusText: String = "",
     val nextTurnSlot: String = "A",
     val maxAutoTurns: Int = 12,
     val turnsCompleted: Int = 0,
@@ -47,8 +49,8 @@ data class ArenaUiState(
 
 /**
  * 2-AI Group Chat (Arena Mode) orchestrator.
- * Two distinct AI slots (any of 200+ providers, models, and personas) converse turn-by-turn
- * while the user can Pause, Resume, Step, Stop, or inject their own messages at any time.
+ * Two distinct AI slots (any provider, model, and persona) converse turn-by-turn
+ * with auto-retry on transient rate limits and zero duplicate bubble flashing.
  */
 class ArenaController(
     private val scope: CoroutineScope,
@@ -59,6 +61,7 @@ class ArenaController(
     private val providersProvider: () -> List<ProviderProfileEntity>,
     private val customPersonasProvider: () -> List<CustomPersonaEntity>,
     private val memoriesProvider: () -> List<MemoryEntity>,
+    private val maxAutoRetriesProvider: () -> Int = { 10 },
     private val onNotifyIfBackground: (sessionId: String, title: String, speaker: String, text: String) -> Unit,
 ) {
     private val _state = MutableStateFlow(ArenaUiState())
@@ -94,14 +97,24 @@ class ArenaController(
             _state.value = _state.value.copy(
                 sessionId = session.id,
                 providerAId = session.arenaProviderA.ifBlank { ProviderPresets.ID_POLLINATIONS_FREE },
-                modelA = session.arenaModelA.ifBlank { "openai" },
+                modelA = normalizePollinationsModel(session.arenaProviderA, session.arenaModelA),
                 personaAId = session.arenaPersonaA.ifBlank { "default" },
                 providerBId = session.arenaProviderB.ifBlank { ProviderPresets.ID_POLLINATIONS_FREE },
-                modelB = session.arenaModelB.ifBlank { "mistral" },
+                modelB = normalizePollinationsModel(session.arenaProviderB, session.arenaModelB),
                 personaBId = session.arenaPersonaB.ifBlank { "celeste" },
             )
             observeMessages(session.id)
         }
+    }
+
+    private fun normalizePollinationsModel(providerId: String, rawModel: String): String {
+        val clean = rawModel.trim()
+        if (providerId == ProviderPresets.ID_POLLINATIONS_FREE || providerId.isBlank()) {
+            if (clean.isBlank() || clean.equals("openai", ignoreCase = true) || clean.equals("mistral", ignoreCase = true)) {
+                return "openai-fast"
+            }
+        }
+        return clean
     }
 
     fun startFreshArena() {
@@ -131,6 +144,7 @@ class ArenaController(
                 isPaused = false,
                 activeSpeaker = "",
                 streamingContent = "",
+                retryStatusText = "",
                 nextTurnSlot = "A",
                 turnsCompleted = 0,
                 errorMessage = null,
@@ -183,7 +197,6 @@ class ArenaController(
         soundEngine.playSend()
         scope.launch {
             if (_state.value.sessionId == null) ensureArenaSession()
-            // Wait briefly for session creation if needed
             var tries = 0
             while (_state.value.sessionId == null && tries < 10) {
                 delay(40)
@@ -234,18 +247,20 @@ class ArenaController(
     fun stop() {
         loopJob?.cancel()
         loopJob = null
+        llmClient.cancelActiveRequests()
         _state.value = _state.value.copy(
             isRunning = false,
             isPaused = false,
             activeSpeaker = "",
             streamingContent = "",
+            retryStatusText = "",
         )
     }
 
     private fun launchLoop(singleStep: Boolean) {
         loopJob?.cancel()
         loopJob = scope.launch {
-            _state.value = _state.value.copy(isRunning = true, errorMessage = null)
+            _state.value = _state.value.copy(isRunning = true, errorMessage = null, retryStatusText = "")
             try {
                 var stepsDone = 0
                 val maxSteps = if (singleStep) 1 else _state.value.maxAutoTurns
@@ -276,6 +291,7 @@ class ArenaController(
                     isRunning = false,
                     activeSpeaker = "",
                     streamingContent = "",
+                    retryStatusText = "",
                 )
             }
         }
@@ -300,7 +316,7 @@ class ArenaController(
         val allMsgs = dao.getMessagesForSessionOnce(sessionId)
         val transcriptPrompt = buildString {
             append("You are participating in a lively 3-way group chat called Cel.Cellium Arena with the Human ('You') and another AI (${otherPersona.name}).\n")
-            append("Respond directly to the latest messages in 2–4 concise, engaging sentences without prefixing your own name.\n\n")
+            append("Respond directly to the latest messages in 2-4 concise, engaging sentences without prefixing your own name.\n\n")
             append("[Conversation Transcript]\n")
             allMsgs.takeLast(14).forEach { m ->
                 val who = m.speakerLabel.ifBlank { if (m.role == "user") "You" else "Assistant" }
@@ -314,33 +330,71 @@ class ArenaController(
             memories = memoriesProvider(),
             agentModeEnabled = false,
             shizukuConnected = false,
+            contextConfig = ContextModifyConfig(
+                includePersona = true,
+                includeMemories = true,
+                includeIllumeInstructions = false,
+                includeAgentInstructions = false,
+                includeMoodInstructions = false,
+            ),
         )
 
-        _state.value = _state.value.copy(activeSpeaker = slot, streamingContent = "")
+        val maxRetries = maxAutoRetriesProvider().coerceIn(0, 15)
+        var attempt = 0
+        var lastError: Exception? = null
         val startMs = System.currentTimeMillis()
         val raw = StringBuilder()
-        var lastEmit = 0L
 
-        val flow = if (effectiveProv.protocol == "on_device") {
-            onDeviceEngine.streamReply(systemPrompt, emptyList(), transcriptPrompt)
-        } else {
-            llmClient.streamChat(effectiveProv, systemPrompt, emptyList(), transcriptPrompt, null)
-        }
-
-        flow.collect { chunk ->
-            if (chunk.contentDelta.isNotEmpty()) {
-                raw.append(chunk.contentDelta)
-                val now = System.currentTimeMillis()
-                if (now - lastEmit >= 36L) {
-                    lastEmit = now
-                    val (_, clean) = ProviderPresets.parseThoughts(raw.toString())
-                    _state.value = _state.value.copy(streamingContent = clean)
+        while (attempt <= maxRetries) {
+            raw.clear()
+            var lastEmit = 0L
+            _state.value = _state.value.copy(
+                activeSpeaker = slot,
+                streamingContent = "",
+                retryStatusText = if (attempt == 0) "" else "Retrying AI $slot ($attempt/$maxRetries)...",
+            )
+            try {
+                val flow = if (effectiveProv.protocol == "on_device") {
+                    onDeviceEngine.streamReply(systemPrompt, emptyList(), transcriptPrompt)
+                } else {
+                    llmClient.streamChat(effectiveProv, systemPrompt, emptyList(), transcriptPrompt, null)
                 }
+
+                flow.collect { chunk ->
+                    if (chunk.contentDelta.isNotEmpty()) {
+                        raw.append(chunk.contentDelta)
+                        val now = System.currentTimeMillis()
+                        if (now - lastEmit >= 36L) {
+                            lastEmit = now
+                            val (_, clean) = ProviderPresets.parseThoughts(raw.toString())
+                            _state.value = _state.value.copy(streamingContent = clean, retryStatusText = "")
+                        }
+                    }
+                }
+                lastError = null
+                break
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                val retryable = effectiveProv.protocol != "on_device" && UniversalLlmClient.isRetryableError(e)
+                if (!retryable || attempt >= maxRetries) {
+                    throw e
+                }
+                attempt++
+                val backoffMs = (1200L * attempt).coerceAtMost(6000L)
+                _state.value = _state.value.copy(
+                    streamingContent = "",
+                    retryStatusText = "Rate limited / busy — retrying AI $slot ($attempt/$maxRetries)...",
+                )
+                delay(backoffMs)
             }
         }
+        if (lastError != null) throw lastError
 
         val (thought, cleanBody) = ProviderPresets.parseThoughts(raw.toString())
-        val finalText = cleanBody.ifBlank { raw.toString().trim() }.ifBlank { "(No response)" }
+        val (tagMood, strippedBody) = MoodDetector.extractInlineMoodTag(cleanBody)
+        val finalText = strippedBody.ifBlank { cleanBody.ifBlank { raw.toString().trim() } }.ifBlank { "(No response)" }
         val latency = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
         val tokens = ProviderPresets.estimateTokens(finalText + thought)
         val tps = (tokens.toFloat() / (latency.toFloat() / 1000f)).coerceAtMost(999f)
@@ -354,7 +408,7 @@ class ArenaController(
             speakerLabel = speakerTag,
             content = finalText,
             thought = thought,
-            mood = MoodDetector.detectMood(finalText),
+            mood = tagMood ?: MoodDetector.detectMood(finalText),
             providerName = effectiveProv.name,
             modelName = effectiveProv.selectedModel,
             tokenEstimate = tokens,
@@ -362,7 +416,15 @@ class ArenaController(
             tokensPerSec = tps,
             estimatedCostUsd = cost,
         )
+
+        // Clear live streaming slot BEFORE upserting to Room so the message NEVER renders twice!
+        _state.value = _state.value.copy(
+            activeSpeaker = "",
+            streamingContent = "",
+            retryStatusText = "",
+        )
         dao.upsertMessage(msg)
+        dao.incrementProviderUsage(effectiveProv.id)
         updateArenaSessionStats(sessionId, finalText)
         soundEngine.playRecv()
         onNotifyIfBackground(sessionId, "Cel.Cellium Arena", speakerTag, finalText)

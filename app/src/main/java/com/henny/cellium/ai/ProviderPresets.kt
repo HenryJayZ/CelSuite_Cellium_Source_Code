@@ -34,11 +34,18 @@ object ProviderPresets {
     const val ID_HUGGINGFACE = "preset_huggingface"
     const val ID_CUSTOM = "preset_custom"
     const val ID_ON_DEVICE = "preset_on_device"
+    const val ID_COMPACT_TEMPLATE = "tpl_compact_builtin"
 
     fun defaultProfiles(): List<ProviderProfileEntity> =
         ProviderCatalog.POPULAR_PROVIDERS.map { it.toEntity() }
 
     fun defaultPromptTemplates(): List<PromptTemplateEntity> = listOf(
+        PromptTemplateEntity(
+            id = ID_COMPACT_TEMPLATE,
+            slashKey = "/compact",
+            title = "Compact Conversation Context",
+            promptBody = "Create a dense, accurate continuity summary of our entire conversation so far. Preserve all key decisions, user preferences, names, code snippets/paths, facts, and open tasks in clean bullet points so we can seamlessly continue from this checkpoint without losing context.",
+        ),
         PromptTemplateEntity(
             id = "tpl_summarize",
             slashKey = "/summarize",
@@ -130,27 +137,41 @@ object ProviderPresets {
     fun decodeModels(rawJson: String): List<String> =
         runCatching { json.decodeFromString<List<String>>(rawJson) }.getOrDefault(emptyList())
 
+    private val THOUGHT_CLOSED_REGEX = Regex(
+        """<(think|thought|thinking|reasoning)\b[^>]*>([\s\S]*?)</\1>""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val THOUGHT_OPEN_REGEX = Regex(
+        """<(think|thought|thinking|reasoning)\b[^>]*>""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /**
+     * Parses reasoning/thinking blocks from DeepSeek (<think>), Gemma (<thought>),
+     * Claude/Qwen (<thinking>), and Reasoning models (<reasoning>), both complete and streaming.
+     */
     fun parseThoughts(raw: String): Pair<String, String> {
-        val thinkRegex = Regex("<think>([\\s\\S]*?)</think>", RegexOption.IGNORE_CASE)
         val thoughts = StringBuilder()
         var cleaned = raw
-        thinkRegex.findAll(raw).forEach { match ->
-            val t = match.groupValues[1].trim()
+        THOUGHT_CLOSED_REGEX.findAll(raw).forEach { match ->
+            val t = match.groupValues[2].trim()
             if (t.isNotEmpty()) {
                 if (thoughts.isNotEmpty()) thoughts.append("\n\n")
                 thoughts.append(t)
             }
         }
-        cleaned = cleaned.replace(thinkRegex, "")
-        val openIdx = cleaned.indexOf("<think>", ignoreCase = true)
-        if (openIdx >= 0) {
-            val partial = cleaned.substring(openIdx + 7).trim()
+        cleaned = cleaned.replace(THOUGHT_CLOSED_REGEX, "")
+        val openMatch = THOUGHT_OPEN_REGEX.find(cleaned)
+        if (openMatch != null) {
+            val partial = cleaned.substring(openMatch.range.last + 1).trim()
             if (partial.isNotEmpty()) {
                 if (thoughts.isNotEmpty()) thoughts.append("\n\n")
                 thoughts.append(partial)
             }
-            cleaned = cleaned.substring(0, openIdx)
+            cleaned = cleaned.substring(0, openMatch.range.first)
         }
+        // Strip any stray closing tag if model opened implicitly
+        cleaned = cleaned.replace(Regex("""</(think|thought|thinking|reasoning)>""", RegexOption.IGNORE_CASE), "")
         return Pair(thoughts.toString().trim(), cleaned.trim())
     }
 

@@ -21,8 +21,11 @@ import com.henny.cellium.avatar.MoodDetector
 import com.henny.cellium.core.CelliumNotificationManager
 import com.henny.cellium.core.CelliumPreferences
 import com.henny.cellium.core.CelliumSoundEngine
+import com.henny.cellium.core.ContextModifyConfig
 import com.henny.cellium.core.DevLogBuffer
 import com.henny.cellium.core.PreferencesStore
+import com.henny.cellium.core.RegisteredLocalModel
+import com.henny.cellium.core.StarredModelEntry
 import com.henny.cellium.data.BuiltInPersonas
 import com.henny.cellium.data.CustomPersona
 import com.henny.cellium.data.PersonaSpec
@@ -35,7 +38,9 @@ import com.henny.cellium.data.local.MessageEntity
 import com.henny.cellium.data.local.PromptTemplateEntity
 import com.henny.cellium.data.local.ProviderProfileEntity
 import com.henny.cellium.data.local.SessionEntity
+import com.henny.cellium.data.sync.CloudStorageSummary
 import com.henny.cellium.data.sync.CloudSyncManager
+import com.henny.cellium.data.sync.CloudSyncMode
 import com.henny.cellium.shizuku.CommandAssessment
 import com.henny.cellium.shizuku.CommandGuard
 import com.henny.cellium.shizuku.CommandSafetyTier
@@ -91,6 +96,8 @@ data class CelliumUiState(
     val isStreaming: Boolean = false,
     val streamingContent: String = "",
     val streamingThought: String = "",
+    val streamingParentMessageId: String? = null,
+    val retryStatusText: String = "",
     val currentMood: String = "idle",
     val pendingGuard: PendingAgentGuard? = null,
     val shizukuStatus: ShizukuStatus = ShizukuStatus.NOT_RUNNING,
@@ -98,14 +105,35 @@ data class CelliumUiState(
     val shizukuReport: String = "Shizuku standby",
     val localModelStatus: LocalModelStatus = LocalModelStatus(),
     val installedLocalModels: List<File> = emptyList(),
+    val registeredLocalModels: List<RegisteredLocalModel> = emptyList(),
     val isGeneratingImage: Boolean = false,
     val imagineStatusText: String = "",
     val isSyncingCloud: Boolean = false,
+    val pendingSyncConflict: Boolean = false,
+    val cloudStorageSummary: CloudStorageSummary? = null,
+    val cloudStorageLoading: Boolean = false,
     val bannerMessage: String? = null,
     val errorMessage: String? = null,
 ) {
     val activeSession: SessionEntity?
         get() = sessions.firstOrNull { it.id == activeSessionId }
+
+    val allPersonaSpecs: List<PersonaSpec>
+        get() = if (customPersonas.isNotEmpty()) {
+            customPersonas.map {
+                PersonaSpec(
+                    id = it.id,
+                    name = it.name,
+                    iconKey = it.iconKey.ifBlank { "sparkle" },
+                    tagline = it.tagline,
+                    systemPrompt = it.systemPrompt,
+                    accentHex = it.accentHex.ifBlank { "#A855F7" },
+                    custom = true,
+                )
+            }
+        } else {
+            BuiltInPersonas.ALL
+        }
 
     val resolvedPersona: PersonaSpec
         get() = BuiltInPersonas.resolve(
@@ -119,7 +147,7 @@ data class CelliumUiState(
                     systemPrompt = it.systemPrompt,
                     accentHex = it.accentHex,
                 )
-            }
+            },
         )
 }
 
@@ -150,20 +178,24 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             initialValue = prefsStore.readCachedInitialPreferences(),
         )
 
-    /**
-     * Decoupled RAM telemetry flow — collected ONLY inside Settings RAM Watchdog
-     * so polling every 5s NEVER recomposes Chat, Imagine, or Live screens!
-     */
     private val _processRamMb = MutableStateFlow(0)
     val processRamMb: StateFlow<Int> = _processRamMb.asStateFlow()
 
     private val _activeSessionId = MutableStateFlow<String?>(null)
     private val _selectedLeafBySession = MutableStateFlow<Map<String, String>>(emptyMap())
+    private val _streamingParentId = MutableStateFlow<String?>(null)
     private val _uiState = MutableStateFlow(CelliumUiState())
     val uiState: StateFlow<CelliumUiState> = _uiState.asStateFlow()
 
     @Volatile private var appInForeground = true
     @Volatile private var currentVisibleTab = "chat"
+
+    // Track active stream context so stopStreaming() can persist partial text cleanly
+    @Volatile private var activeStreamSessionId: String? = null
+    @Volatile private var activeStreamParentId: String? = null
+    @Volatile private var activeStreamProviderName: String = ""
+    @Volatile private var activeStreamModelName: String = ""
+    @Volatile private var activeStreamSpeakerName: String = "Cel"
 
     val arenaController = ArenaController(
         scope = viewModelScope,
@@ -174,8 +206,9 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         providersProvider = { _uiState.value.providers },
         customPersonasProvider = { _uiState.value.customPersonas },
         memoriesProvider = { _uiState.value.memories },
+        maxAutoRetriesProvider = { preferences.value.maxAutoRetries },
         onNotifyIfBackground = { sid, title, speaker, text ->
-            maybePostReplyNotification(sid, title, speaker, text)
+            maybePostReplyNotification(sid, title, speaker, text, isArena = true)
         },
     )
 
@@ -205,9 +238,18 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun maybePostReplyNotification(sessionId: String, title: String, sender: String, text: String) {
+    private fun maybePostReplyNotification(
+        sessionId: String,
+        title: String,
+        sender: String,
+        text: String,
+        isArena: Boolean = false,
+    ) {
         if (!preferences.value.notificationsEnabled) return
-        val viewingThisChat = appInForeground && currentVisibleTab == "chat" && _activeSessionId.value == sessionId
+        val viewingThisChat = appInForeground && (
+            (!isArena && currentVisibleTab == "chat" && _activeSessionId.value == sessionId) ||
+                (isArena && currentVisibleTab == "arena")
+            )
         if (!viewingThisChat) {
             CelliumNotificationManager.notifyAssistantReply(
                 context = appContext,
@@ -226,7 +268,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 val lastId = all.lastOrNull()?.id
                 sendMessageInternal(
                     prompt = event.replyText,
-                    attachmentBitmap = null,
+                    attachmentBitmaps = emptyList(),
                     attachedFile = null,
                     explicitParentId = lastId,
                     sessionIdOverride = event.sessionId,
@@ -238,8 +280,54 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
     private fun seedDefaultsIfNeeded() {
         viewModelScope.launch(Dispatchers.IO) {
             dao.insertProvidersIfMissing(ProviderPresets.defaultProfiles())
-            if (dao.getAllPromptTemplatesOnce().isEmpty()) {
-                dao.insertPromptTemplatesIfMissing(ProviderPresets.defaultPromptTemplates())
+            // Migrate legacy Pollinations URL / stale model name if needed
+            val polli = dao.getProvider(ProviderPresets.ID_POLLINATIONS_FREE)
+            if (polli != null) {
+                val needsUrl = polli.baseUrl.trimEnd('/') == "https://text.pollinations.ai"
+                val needsModel = polli.selectedModel.isBlank() || polli.selectedModel == "openai" || polli.selectedModel == "mistral"
+                if (needsUrl || needsModel) {
+                    dao.upsertProvider(
+                        polli.copy(
+                            baseUrl = "https://text.pollinations.ai/openai",
+                            selectedModel = if (needsModel) "openai-fast" else polli.selectedModel,
+                        )
+                    )
+                }
+            }
+            // Always ensure built-in /compact and default templates exist
+            dao.insertPromptTemplatesIfMissing(ProviderPresets.defaultPromptTemplates())
+
+            // Seed built-in personas into Room once so ALL personas are editable & deletable
+            val existingPersonas = dao.getAllPersonasOnce()
+            if (!preferences.value.personasSeeded && existingPersonas.isEmpty()) {
+                val seeded = BuiltInPersonas.ALL.mapIndexed { idx, p ->
+                    CustomPersonaEntity(
+                        id = p.id,
+                        name = p.name,
+                        iconKey = p.iconKey,
+                        tagline = p.tagline,
+                        systemPrompt = p.systemPrompt,
+                        accentHex = p.accentHex,
+                        createdAtMs = 1_700_000_000_000L + idx * 1000L,
+                    )
+                }
+                dao.insertPersonasIfMissing(seeded)
+                prefsStore.markPersonasSeeded()
+            } else if (!preferences.value.personasSeeded && existingPersonas.isNotEmpty()) {
+                // User upgraded from older version with custom personas: insert built-ins if missing
+                val seeded = BuiltInPersonas.ALL.mapIndexed { idx, p ->
+                    CustomPersonaEntity(
+                        id = p.id,
+                        name = p.name,
+                        iconKey = p.iconKey,
+                        tagline = p.tagline,
+                        systemPrompt = p.systemPrompt,
+                        accentHex = p.accentHex,
+                        createdAtMs = 1_700_000_000_000L + idx * 1000L,
+                    )
+                }
+                dao.insertPersonasIfMissing(seeded)
+                prefsStore.markPersonasSeeded()
             }
             refreshLocalModelsList()
         }
@@ -252,10 +340,13 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 soundEngine.animaleseEnabled = p.animaleseEnabled
                 soundEngine.hapticsEnabled = p.hapticsEnabled
                 soundEngine.masterVolume = p.sfxVolume
+                soundEngine.typingSoundStyle = p.typingSoundStyle
+
                 val currentProviders = _uiState.value.providers
                 val activeProv = currentProviders.firstOrNull { it.id == p.activeProviderId }
                     ?: currentProviders.firstOrNull()
                 _uiState.value = _uiState.value.copy(activeProvider = activeProv)
+                refreshLocalModelsList(p.registeredLocalModelsJson)
             }
         }
 
@@ -295,11 +386,28 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 },
                 _activeSessionId,
                 _selectedLeafBySession,
-            ) { allMsgs, sid, leafMap ->
-                val sessionLeaf = sid?.let {
-                    leafMap[it] ?: _uiState.value.sessions.firstOrNull { s -> s.id == it }?.activeLeafId
+                _streamingParentId,
+            ) { allMsgs, sid, leafMap, streamParent ->
+                if (!streamParent.isNullOrBlank() && allMsgs.any { it.id == streamParent }) {
+                    // While regenerating/streaming under streamParent, show strict ancestor chain up to streamParent
+                    // so the old assistant bubble vanishes IMMEDIATELY without waiting for the new reply!
+                    val truncated = ChatTreeHelper.buildAncestorPath(allMsgs, streamParent)
+                    val childrenByParent = allMsgs.groupBy { it.parentId }
+                    val branchInfo = mutableMapOf<String, BranchSlotInfo>()
+                    for (msg in truncated) {
+                        val siblings = childrenByParent[msg.parentId]?.sortedBy { it.createdAtMs }?.map { it.id }
+                            ?: listOf(msg.id)
+                        if (siblings.size > 1) {
+                            branchInfo[msg.id] = BranchSlotInfo(siblings, siblings.indexOf(msg.id).coerceAtLeast(0))
+                        }
+                    }
+                    ActiveBranchView(truncated, branchInfo, streamParent)
+                } else {
+                    val sessionLeaf = sid?.let {
+                        leafMap[it] ?: _uiState.value.sessions.firstOrNull { s -> s.id == it }?.activeLeafId
+                    }
+                    ChatTreeHelper.buildActivePath(allMsgs, sessionLeaf)
                 }
-                ChatTreeHelper.buildActivePath(allMsgs, sessionLeaf)
             }.collectLatest { branchView ->
                 _uiState.value = _uiState.value.copy(
                     activeMessages = branchView.messages,
@@ -475,6 +583,32 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun toggleHideProvider(providerId: String) {
+        soundEngine.playClick()
+        viewModelScope.launch {
+            val current = preferences.value.hiddenProviderIds
+            val updated = if (providerId in current) current - providerId else current + providerId
+            prefsStore.updateHiddenProviderIds(updated)
+            scheduleBackgroundCloudSync()
+        }
+    }
+
+    fun toggleStarModel(providerId: String, providerName: String, modelName: String) {
+        if (modelName.isBlank()) return
+        soundEngine.playPop()
+        viewModelScope.launch {
+            val current = prefsStore.decodeStarredModels(preferences.value.starredModelsJson).toMutableList()
+            val existingIdx = current.indexOfFirst { it.providerId == providerId && it.modelName == modelName }
+            if (existingIdx >= 0) {
+                current.removeAt(existingIdx)
+            } else {
+                current.add(0, StarredModelEntry(providerId, providerName, modelName))
+            }
+            prefsStore.updateStarredModelsJson(prefsStore.encodeStarredModels(current))
+            scheduleBackgroundCloudSync()
+        }
+    }
+
     fun switchBranch(targetMessageId: String) {
         val sid = _activeSessionId.value ?: return
         soundEngine.playClick()
@@ -532,7 +666,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
 
     /**
      * Edit ANY message (User OR Cel Assistant) in-place without creating a new branch.
-     * For User messages, optionally regenerates Cel's reply right below.
+     * Uses strict buildAncestorPath so the edited user prompt is NEVER double-sent.
      */
     fun editMessageInPlace(original: MessageEntity, editedText: String, regenerateIfUser: Boolean = false) {
         val clean = editedText.trim()
@@ -549,25 +683,22 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             refreshSessionStats(original.sessionId)
             if (original.role == "user" && regenerateIfUser && !_uiState.value.isStreaming) {
                 val all = dao.getMessagesForSessionOnce(original.sessionId)
-                val historyBefore = if (original.parentId != null) {
-                    ChatTreeHelper.buildActivePath(all, original.parentId).messages
-                } else emptyList()
+                val historyBefore = ChatTreeHelper.buildAncestorPath(all, original.parentId)
+                val file = if (original.attachmentFileName.isNotBlank()) {
+                    AttachedTextFile(original.attachmentFileName, original.attachmentFileContent)
+                } else null
                 runAssistantGeneration(
                     sessionId = original.sessionId,
                     parentMessageId = original.id,
                     historyBeforePrompt = historyBefore,
                     promptText = clean,
-                    attachmentBitmap = null,
-                    attachedFile = null,
+                    attachmentBitmaps = emptyList(),
+                    attachedFile = file,
                 )
             }
         }
     }
 
-    /**
-     * Edit ANY message (User OR Cel Assistant) as a brand-new sibling branch!
-     * User branch triggers a fresh Cel reply; Assistant branch inserts an edited sibling version.
-     */
     fun editMessageAsBranch(original: MessageEntity, editedText: String, regenerateIfUser: Boolean = true) {
         val clean = editedText.trim()
         if (clean.isEmpty()) return
@@ -576,7 +707,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             if (regenerateIfUser && !_uiState.value.isStreaming) {
                 sendMessageInternal(
                     prompt = clean,
-                    attachmentBitmap = null,
+                    attachmentBitmaps = emptyList(),
                     attachedFile = null,
                     explicitParentId = original.parentId,
                     sessionIdOverride = original.sessionId,
@@ -597,7 +728,6 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
         } else {
-            // Cel / Assistant sibling branch!
             viewModelScope.launch {
                 val newId = UUID.randomUUID().toString()
                 dao.upsertMessage(
@@ -620,11 +750,14 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         if (_uiState.value.isStreaming) return
         soundEngine.playClick()
         viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(errorMessage = null)
+            // If retrying a failed error bubble, delete the error bubble FIRST so it NEVER creates a 1/2 branch!
+            if (assistantMsg.isError) {
+                dao.deleteMessage(assistantMsg.id)
+            }
             val all = dao.getMessagesForSessionOnce(assistantMsg.sessionId)
             val parentUser = all.firstOrNull { it.id == assistantMsg.parentId } ?: return@launch
-            val branchBeforeUser = if (parentUser.parentId != null) {
-                ChatTreeHelper.buildActivePath(all, parentUser.parentId).messages
-            } else emptyList()
+            val branchBeforeUser = ChatTreeHelper.buildAncestorPath(all, parentUser.parentId)
             val file = if (parentUser.attachmentFileName.isNotBlank()) {
                 AttachedTextFile(parentUser.attachmentFileName, parentUser.attachmentFileContent)
             } else null
@@ -633,7 +766,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 parentMessageId = parentUser.id,
                 historyBeforePrompt = branchBeforeUser,
                 promptText = parentUser.content,
-                attachmentBitmap = null,
+                attachmentBitmaps = emptyList(),
                 attachedFile = file,
             )
         }
@@ -644,10 +777,14 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         if (_uiState.value.isStreaming) return
         soundEngine.playClick()
         viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(errorMessage = null)
+            // Delete any failed error reply right under lastUser so retrying an error NEVER branches!
+            val existingMsgs = dao.getMessagesForSessionOnce(lastUser.sessionId)
+            existingMsgs.filter { it.parentId == lastUser.id && it.isError }.forEach { errChild ->
+                dao.deleteMessage(errChild.id)
+            }
             val all = dao.getMessagesForSessionOnce(lastUser.sessionId)
-            val before = if (lastUser.parentId != null) {
-                ChatTreeHelper.buildActivePath(all, lastUser.parentId).messages
-            } else emptyList()
+            val before = ChatTreeHelper.buildAncestorPath(all, lastUser.parentId)
             val file = if (lastUser.attachmentFileName.isNotBlank()) {
                 AttachedTextFile(lastUser.attachmentFileName, lastUser.attachmentFileContent)
             } else null
@@ -656,25 +793,44 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 parentMessageId = lastUser.id,
                 historyBeforePrompt = before,
                 promptText = lastUser.content,
-                attachmentBitmap = null,
+                attachmentBitmaps = emptyList(),
                 attachedFile = file,
             )
         }
     }
 
-    // ── Chat Sending, Slash Commands, Web Tools & Streaming ──────────────
+    // ── Chat Sending, Slash Commands, /compact, /illume, Web Tools & Streaming ──
 
     fun sendMessage(
         prompt: String,
         attachmentBitmap: Bitmap? = null,
         attachedFile: AttachedTextFile? = null,
     ) {
+        sendMessage(
+            prompt = prompt,
+            attachmentBitmaps = if (attachmentBitmap != null) listOf(attachmentBitmap) else emptyList(),
+            attachedFile = attachedFile,
+        )
+    }
+
+    fun sendMessage(
+        prompt: String,
+        attachmentBitmaps: List<Bitmap>,
+        attachedFile: AttachedTextFile? = null,
+    ) {
         val trimmed = prompt.trim()
-        if ((trimmed.isEmpty() && attachmentBitmap == null && attachedFile == null) || _uiState.value.isStreaming) return
+        if ((trimmed.isEmpty() && attachmentBitmaps.isEmpty() && attachedFile == null) || _uiState.value.isStreaming) return
 
         // /clear
         if (trimmed.equals("/clear", ignoreCase = true)) {
             startNewSession()
+            return
+        }
+
+        // /compact — summarizes conversation history and sets a fresh compact boundary
+        if (trimmed.equals("/compact", ignoreCase = true) || trimmed.startsWith("/compact ", ignoreCase = true)) {
+            val extraFocus = trimmed.removePrefix("/compact").trim()
+            runCompactCommand(extraFocus)
             return
         }
 
@@ -696,9 +852,12 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             }
         }
 
-        // /imagine <prompt>
-        if (trimmed.startsWith("/imagine ", ignoreCase = true)) {
-            val imgPrompt = trimmed.removePrefix("/imagine ").trim()
+        // /illume <prompt> OR legacy /imagine <prompt>
+        if (trimmed.startsWith("/illume ", ignoreCase = true) || trimmed.startsWith("/imagine ", ignoreCase = true)) {
+            val imgPrompt = trimmed
+                .removePrefix("/illume ").removePrefix("/ILLUME ")
+                .removePrefix("/imagine ").removePrefix("/IMAGINE ")
+                .trim()
             if (imgPrompt.isNotEmpty()) {
                 viewModelScope.launch {
                     val res = generateArtwork(imgPrompt)
@@ -736,7 +895,35 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         }
 
         val lastId = _uiState.value.activeMessages.lastOrNull()?.id
-        sendMessageInternal(trimmed, attachmentBitmap, attachedFile, explicitParentId = lastId, sessionIdOverride = null)
+        sendMessageInternal(trimmed, attachmentBitmaps, attachedFile, explicitParentId = lastId, sessionIdOverride = null)
+    }
+
+    private fun runCompactCommand(extraFocus: String) {
+        val currentMsgs = _uiState.value.activeMessages
+        val sid = _activeSessionId.value
+        if (sid.isNullOrBlank() || currentMsgs.size < 2) {
+            showBanner("Need at least 2 messages in this chat before compacting.")
+            return
+        }
+        soundEngine.playSend()
+        viewModelScope.launch {
+            val compactTpl = _uiState.value.promptTemplates.firstOrNull {
+                it.id == ProviderPresets.ID_COMPACT_TEMPLATE || it.slashKey.equals("/compact", ignoreCase = true)
+            }
+            val basePrompt = compactTpl?.promptBody?.ifBlank { null }
+                ?: "Summarize our entire conversation above into a dense, accurate context brief preserving key facts, decisions, code, preferences, and open tasks so we can continue seamlessly."
+            val fullPrompt = if (extraFocus.isNotBlank()) "$basePrompt\n\nFocus especially on: $extraFocus" else basePrompt
+            val parentId = currentMsgs.last().id
+            runAssistantGeneration(
+                sessionId = sid,
+                parentMessageId = parentId,
+                historyBeforePrompt = currentMsgs,
+                promptText = fullPrompt,
+                attachmentBitmaps = emptyList(),
+                attachedFile = null,
+                saveAsCompactSummary = true,
+            )
+        }
     }
 
     private fun runWebSearchInChat(query: String) {
@@ -760,7 +947,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             val lastId = _uiState.value.activeMessages.lastOrNull()?.id
             sendMessageInternal(
                 prompt = "Using the web search results attached below, answer thoroughly and cite sources: $query",
-                attachmentBitmap = null,
+                attachmentBitmaps = emptyList(),
                 attachedFile = AttachedTextFile("web_search_${query.take(24)}.txt", contextBlock),
                 explicitParentId = lastId,
                 sessionIdOverride = null,
@@ -781,7 +968,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             val lastId = _uiState.value.activeMessages.lastOrNull()?.id
             sendMessageInternal(
                 prompt = "$question ($url)",
-                attachmentBitmap = null,
+                attachmentBitmaps = emptyList(),
                 attachedFile = AttachedTextFile("webpage_extract.txt", body),
                 explicitParentId = lastId,
                 sessionIdOverride = null,
@@ -791,24 +978,28 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
 
     private fun sendMessageInternal(
         prompt: String,
-        attachmentBitmap: Bitmap?,
+        attachmentBitmaps: List<Bitmap>,
         attachedFile: AttachedTextFile?,
         explicitParentId: String?,
         sessionIdOverride: String?,
     ) {
         soundEngine.playSend()
         viewModelScope.launch {
-            val fallbackTitle = attachedFile?.fileName ?: "Image Analysis"
+            val fallbackTitle = attachedFile?.fileName ?: if (attachmentBitmaps.size > 1) "${attachmentBitmaps.size} Images" else "Image Analysis"
             val sid = sessionIdOverride ?: ensureActiveSession(prompt.ifBlank { fallbackTitle })
-            val attachPath = attachmentBitmap?.let { saveAttachmentLocally(it) }.orEmpty()
+            val attachPaths = attachmentBitmaps.mapNotNull { bmp ->
+                saveAttachmentLocally(bmp).takeIf { it.isNotBlank() }
+            }.joinToString("\n")
             val userMsgId = UUID.randomUUID().toString()
             val allBefore = dao.getMessagesForSessionOnce(sid)
-            val historyBefore = if (explicitParentId != null) {
-                ChatTreeHelper.buildActivePath(allBefore, explicitParentId).messages
-            } else emptyList()
+            val historyBefore = ChatTreeHelper.buildAncestorPath(allBefore, explicitParentId)
 
             val displayContent = prompt.ifBlank {
-                if (attachedFile != null) "Analyze attached file: ${attachedFile.fileName}" else "[Attached Image]"
+                when {
+                    attachedFile != null -> "Analyze attached file: ${attachedFile.fileName}"
+                    attachmentBitmaps.size > 1 -> "[Attached ${attachmentBitmaps.size} Images]"
+                    else -> "[Attached Image]"
+                }
             }
             val userMsg = MessageEntity(
                 id = userMsgId,
@@ -816,7 +1007,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 parentId = explicitParentId,
                 role = "user",
                 content = displayContent,
-                attachmentPath = attachPath,
+                attachmentPath = attachPaths,
                 attachmentFileName = attachedFile?.fileName.orEmpty(),
                 attachmentFileContent = attachedFile?.content.orEmpty(),
                 tokenEstimate = ProviderPresets.estimateTokens(displayContent),
@@ -830,10 +1021,15 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 parentMessageId = userMsgId,
                 historyBeforePrompt = historyBefore,
                 promptText = displayContent,
-                attachmentBitmap = attachmentBitmap,
+                attachmentBitmaps = attachmentBitmaps,
                 attachedFile = attachedFile,
             )
         }
+    }
+
+    private fun sliceHistoryFromLatestCompact(history: List<MessageEntity>): List<MessageEntity> {
+        val lastCompactIdx = history.indexOfLast { it.isCompactSummary }
+        return if (lastCompactIdx >= 0) history.subList(lastCompactIdx, history.size) else history
     }
 
     private fun runAssistantGeneration(
@@ -841,27 +1037,46 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         parentMessageId: String,
         historyBeforePrompt: List<MessageEntity>,
         promptText: String,
-        attachmentBitmap: Bitmap?,
+        attachmentBitmaps: List<Bitmap>,
         attachedFile: AttachedTextFile?,
+        saveAsCompactSummary: Boolean = false,
     ) {
         val prov = _uiState.value.activeProvider ?: ProviderPresets.defaultProfiles().first()
         val prefs = preferences.value
         val persona = _uiState.value.resolvedPersona
         val shizukuConnected = _uiState.value.shizukuStatus == ShizukuStatus.CONNECTED_SHELL ||
             _uiState.value.shizukuStatus == ShizukuStatus.CONNECTED_ROOT
+        val ctxCfg = prefs.contextModify
+        val effectiveHistory = sliceHistoryFromLatestCompact(historyBeforePrompt)
+
         val systemPrompt = llmClient.buildSystemPrompt(
             persona = persona,
             memories = _uiState.value.memories,
-            agentModeEnabled = prefs.agentModeEnabled,
+            agentModeEnabled = prefs.agentModeEnabled && !saveAsCompactSummary,
             shizukuConnected = shizukuConnected,
+            agentWorkspacePath = prefs.agentWorkspacePath,
+            moodMethod = if (saveAsCompactSummary) "none" else prefs.moodMethod,
+            contextConfig = ctxCfg,
         )
 
+        activeStreamSessionId = sessionId
+        activeStreamParentId = parentMessageId
+        activeStreamProviderName = prov.name
+        activeStreamModelName = if (prov.protocol == "on_device") {
+            onDeviceEngine.status.value.modelName.ifBlank { prov.selectedModel }
+        } else prov.selectedModel
+        activeStreamSpeakerName = persona.name
+
         streamJob?.cancel()
+        _streamingParentId.value = parentMessageId
         streamJob = viewModelScope.launch {
+            dao.incrementProviderUsage(prov.id)
             _uiState.value = _uiState.value.copy(
                 isStreaming = true,
                 streamingContent = "",
                 streamingThought = "",
+                streamingParentMessageId = parentMessageId,
+                retryStatusText = "",
                 currentMood = "thinking",
                 errorMessage = null,
             )
@@ -872,47 +1087,107 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             var lastUiFlushMs = 0L
 
             try {
-                val flow = if (prov.protocol == "on_device") {
-                    onDeviceEngine.streamReply(systemPrompt, historyBeforePrompt, promptText)
-                } else {
-                    llmClient.streamChat(
-                        provider = prov,
-                        systemPrompt = systemPrompt,
-                        history = historyBeforePrompt,
-                        userPrompt = promptText,
-                        imageBitmap = attachmentBitmap,
-                        attachedFileName = attachedFile?.fileName.orEmpty(),
-                        attachedFileContent = attachedFile?.content.orEmpty(),
-                    )
-                }
-                flow.collect { chunk ->
-                    if (chunk.thoughtDelta.isNotEmpty()) rawThought.append(chunk.thoughtDelta)
-                    if (chunk.contentDelta.isNotEmpty()) {
-                        rawContent.append(chunk.contentDelta)
-                        chirpCounter++
-                        if (chirpCounter % 7 == 0) soundEngine.playAnimaleseChirp(chirpCounter)
-                    }
-                    // 32ms UI flush throttle eliminates stutter & typing input delay during fast streams
-                    val now = System.currentTimeMillis()
-                    if (now - lastUiFlushMs >= 32L) {
-                        lastUiFlushMs = now
-                        val (inlineThought, cleanBody) = ProviderPresets.parseThoughts(rawContent.toString())
-                        val mergedThought = listOf(rawThought.toString().trim(), inlineThought)
-                            .filter { it.isNotEmpty() }.joinToString("\n\n")
+                val maxRetries = if (prov.protocol == "on_device") 0 else prefs.maxAutoRetries.coerceIn(0, 15)
+                var attempt = 0
+                var lastErr: Exception? = null
+
+                while (attempt <= maxRetries) {
+                    rawContent.clear()
+                    rawThought.clear()
+                    lastUiFlushMs = 0L
+                    try {
+                        val flow = if (prov.protocol == "on_device") {
+                            onDeviceEngine.streamReply(
+                                systemPrompt = systemPrompt,
+                                history = effectiveHistory,
+                                userPrompt = promptText,
+                                historyLimit = ctxCfg.historyLimit,
+                            )
+                        } else {
+                            llmClient.streamChat(
+                                provider = prov,
+                                systemPrompt = systemPrompt,
+                                history = effectiveHistory,
+                                userPrompt = promptText,
+                                imageBitmaps = attachmentBitmaps,
+                                attachedFileName = attachedFile?.fileName.orEmpty(),
+                                attachedFileContent = attachedFile?.content.orEmpty(),
+                                historyLimit = ctxCfg.historyLimit,
+                            )
+                        }
+                        flow.collect { chunk ->
+                            if (chunk.thoughtDelta.isNotEmpty()) rawThought.append(chunk.thoughtDelta)
+                            if (chunk.contentDelta.isNotEmpty()) {
+                                rawContent.append(chunk.contentDelta)
+                                chirpCounter++
+                                if (chirpCounter % 7 == 0) soundEngine.playAnimaleseChirp(chirpCounter)
+                            }
+                            val now = System.currentTimeMillis()
+                            if (now - lastUiFlushMs >= 32L) {
+                                lastUiFlushMs = now
+                                val (inlineThought, cleanBody) = ProviderPresets.parseThoughts(rawContent.toString())
+                                val (inlineMood, bodyNoMood) = MoodDetector.extractInlineMoodTag(cleanBody)
+                                val mergedThought = listOf(rawThought.toString().trim(), inlineThought)
+                                    .filter { it.isNotEmpty() }.joinToString("\n\n")
+                                val liveMood = inlineMood
+                                    ?: if (bodyNoMood.isNotBlank()) MoodDetector.detectMood(bodyNoMood) else "thinking"
+                                _uiState.value = _uiState.value.copy(
+                                    streamingContent = bodyNoMood,
+                                    streamingThought = mergedThought,
+                                    retryStatusText = "",
+                                    currentMood = liveMood,
+                                )
+                            }
+                        }
+                        lastErr = null
+                        break
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        lastErr = e
+                        val retryable = prov.protocol != "on_device" && UniversalLlmClient.isRetryableError(e)
+                        if (!retryable || attempt >= maxRetries) {
+                            throw e
+                        }
+                        attempt++
+                        val backoffMs = (1200L * attempt).coerceAtMost(6000L)
                         _uiState.value = _uiState.value.copy(
-                            streamingContent = cleanBody,
-                            streamingThought = mergedThought,
-                            currentMood = if (cleanBody.isNotBlank()) MoodDetector.detectMood(cleanBody) else "thinking",
+                            streamingContent = "",
+                            streamingThought = "",
+                            retryStatusText = "Rate limited / busy — retrying ($attempt/$maxRetries)...",
                         )
+                        delay(backoffMs)
+                    }
+                }
+                if (lastErr != null) throw lastErr
+
+                val (inlineThought, cleanBody) = ProviderPresets.parseThoughts(rawContent.toString())
+                val (inlineMood, bodyNoMood) = MoodDetector.extractInlineMoodTag(cleanBody)
+                val mergedThought = listOf(rawThought.toString().trim(), inlineThought)
+                    .filter { it.isNotEmpty() }.joinToString("\n\n")
+                var finalBody = bodyNoMood.ifBlank { cleanBody.ifBlank { rawContent.toString().trim() } }
+
+                // Check for [ILLUME_GEN]...[/ILLUME_GEN] image generation tool trigger
+                var generatedImagePath = ""
+                if (!saveAsCompactSummary) {
+                    val (illumePrompt, strippedOfIllume) = UniversalLlmClient.extractIllumePrompt(finalBody)
+                    if (!illumePrompt.isNullOrBlank()) {
+                        finalBody = strippedOfIllume.ifBlank { "Generated artwork for **\"$illumePrompt\"**." }
+                        _uiState.value = _uiState.value.copy(
+                            streamingContent = finalBody,
+                            retryStatusText = "Rendering artwork via Illume...",
+                        )
+                        val artRes = generateArtwork(illumePrompt)
+                        artRes.onSuccess { art ->
+                            generatedImagePath = art.localPath
+                        }.onFailure { err ->
+                            finalBody = "$finalBody\n\n*(Illume generation failed: ${err.localizedMessage})*"
+                        }
                     }
                 }
 
-                val (inlineThought, cleanBody) = ProviderPresets.parseThoughts(rawContent.toString())
-                val mergedThought = listOf(rawThought.toString().trim(), inlineThought)
-                    .filter { it.isNotEmpty() }.joinToString("\n\n")
-                val finalBody = cleanBody.ifBlank { rawContent.toString().trim() }
                 val latency = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
-                val detectedMood = MoodDetector.detectMood(finalBody)
+                val detectedMood = inlineMood ?: MoodDetector.detectMood(finalBody)
                 val estTokens = ProviderPresets.estimateTokens(finalBody + mergedThought)
                 val tps = (estTokens.toFloat() / (latency.toFloat() / 1000f)).coerceAtMost(999f)
                 val modelUsed = if (prov.protocol == "on_device") {
@@ -926,17 +1201,20 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     sessionId = sessionId,
                     parentId = parentMessageId,
                     role = "assistant",
-                    speakerLabel = persona.name,
+                    speakerLabel = if (saveAsCompactSummary) "Context Compact" else persona.name,
                     content = finalBody.ifBlank { "(Empty response)" },
                     thought = mergedThought,
                     mood = detectedMood,
                     providerName = prov.name,
                     modelName = modelUsed,
+                    attachmentPath = generatedImagePath,
                     tokenEstimate = estTokens,
                     latencyMs = latency,
                     tokensPerSec = tps,
                     estimatedCostUsd = estCost,
+                    isCompactSummary = saveAsCompactSummary,
                 )
+                _streamingParentId.value = null
                 dao.upsertMessage(assistantEntity)
                 _selectedLeafBySession.value = _selectedLeafBySession.value + (sessionId to assistantId)
                 refreshSessionStats(sessionId)
@@ -949,10 +1227,27 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     isStreaming = false,
                     streamingContent = "",
                     streamingThought = "",
+                    streamingParentMessageId = null,
+                    retryStatusText = "",
                     currentMood = detectedMood,
                 )
 
-                if (prefs.agentModeEnabled) {
+                // Mood Engine Method 2: fast background AI mood classification when selected
+                if (!saveAsCompactSummary && prefs.moodMethod == "background_ai" && prov.protocol != "on_device") {
+                    viewModelScope.launch {
+                        val refined = llmClient.classifyMoodFast(prov, finalBody)
+                        if (!refined.isNullOrBlank()) {
+                            _uiState.value = _uiState.value.copy(currentMood = refined)
+                            dao.upsertMessage(assistantEntity.copy(mood = refined))
+                        }
+                    }
+                }
+
+                if (saveAsCompactSummary) {
+                    showBanner("Conversation compacted! Future messages use this summary as fresh context.")
+                }
+
+                if (prefs.agentModeEnabled && !saveAsCompactSummary) {
                     val agentCmd = CommandGuard.extractAgentCommand(finalBody)
                     if (!agentCmd.isNullOrBlank()) {
                         val assessment = CommandGuard.assess(agentCmd)
@@ -966,12 +1261,19 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
             } catch (e: CancellationException) {
-                _uiState.value = _uiState.value.copy(isStreaming = false, streamingContent = "", streamingThought = "")
+                _streamingParentId.value = null
+                _uiState.value = _uiState.value.copy(
+                    isStreaming = false,
+                    streamingContent = "",
+                    streamingThought = "",
+                    streamingParentMessageId = null,
+                    retryStatusText = "",
+                )
                 throw e
             } catch (e: Exception) {
+                _streamingParentId.value = null
                 val errMsg = e.localizedMessage ?: "Failed to get response from ${prov.name}."
                 DevLogBuffer.add("ERROR", "Chat", errMsg)
-                // Persist an error bubble with Retry action directly in the timeline
                 val errId = UUID.randomUUID().toString()
                 dao.upsertMessage(
                     MessageEntity(
@@ -992,19 +1294,71 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     isStreaming = false,
                     streamingContent = "",
                     streamingThought = "",
+                    streamingParentMessageId = null,
+                    retryStatusText = "",
                     currentMood = "error",
                     errorMessage = errMsg,
                 )
+            } finally {
+                activeStreamSessionId = null
+                activeStreamParentId = null
             }
         }
     }
 
+    /**
+     * Instant, lag-free Stop button:
+     * 1. Snapshots any partial streamed text/thought and persists it cleanly to Room so it is NEVER lost.
+     * 2. Immediately cancels active OkHttp network requests and coroutine job.
+     * 3. Cancels GGUF generation off the main thread so the UI never freezes.
+     */
     fun stopStreaming() {
         soundEngine.playClick()
+        val snapContent = _uiState.value.streamingContent.trim()
+        val snapThought = _uiState.value.streamingThought.trim()
+        val sid = activeStreamSessionId
+        val pid = activeStreamParentId
+        val provName = activeStreamProviderName
+        val modelName = activeStreamModelName
+        val speaker = activeStreamSpeakerName
+
         streamJob?.cancel()
         streamJob = null
-        onDeviceEngine.cancelGgufGeneration()
-        _uiState.value = _uiState.value.copy(isStreaming = false, streamingContent = "", streamingThought = "")
+        _streamingParentId.value = null
+        llmClient.cancelActiveRequests()
+
+        _uiState.value = _uiState.value.copy(
+            isStreaming = false,
+            streamingContent = "",
+            streamingThought = "",
+            streamingParentMessageId = null,
+            retryStatusText = "",
+        )
+
+        viewModelScope.launch(Dispatchers.IO) {
+            onDeviceEngine.cancelGgufGeneration()
+            if (!sid.isNullOrBlank() && (snapContent.isNotEmpty() || snapThought.isNotEmpty())) {
+                val partialId = UUID.randomUUID().toString()
+                val text = snapContent.ifBlank { "(Stopped during thinking)" }
+                dao.upsertMessage(
+                    MessageEntity(
+                        id = partialId,
+                        sessionId = sid,
+                        parentId = pid,
+                        role = "assistant",
+                        speakerLabel = speaker,
+                        content = text,
+                        thought = snapThought,
+                        mood = MoodDetector.detectMood(text),
+                        providerName = provName,
+                        modelName = modelName,
+                        tokenEstimate = ProviderPresets.estimateTokens(text + snapThought),
+                    )
+                )
+                _selectedLeafBySession.value = _selectedLeafBySession.value + (sid to partialId)
+                refreshSessionStats(sid)
+            }
+        }
     }
 
     // ── Agent Mode Shizuku Execution ─────────────────────────────────────
@@ -1069,52 +1423,89 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         refreshSessionStats(sessionId)
 
         val all = dao.getMessagesForSessionOnce(sessionId)
-        val path = ChatTreeHelper.buildActivePath(all, toolMsgId).messages
+        val path = ChatTreeHelper.buildAncestorPath(all, toolMsgId)
         runAssistantGeneration(
             sessionId = sessionId,
             parentMessageId = toolMsgId,
             historyBeforePrompt = path,
             promptText = "Summarize the Shizuku command output above clearly and concisely for the user.",
-            attachmentBitmap = null,
+            attachmentBitmaps = emptyList(),
             attachedFile = null,
         )
     }
 
-    // ── Live Voice Mode Reply ────────────────────────────────────────────
+    // ── Live Voice Mode & Floating Assistant Reply ───────────────────────
 
     fun streamLiveReply(
         transcript: String,
+        screenBitmap: Bitmap? = null,
         onDelta: (String) -> Unit,
+        onMoodChanged: (String) -> Unit = {},
         onComplete: (String) -> Unit,
         onError: (String) -> Unit,
     ) {
         val prov = _uiState.value.activeProvider ?: ProviderPresets.defaultProfiles().first()
+        val prefs = preferences.value
         val persona = _uiState.value.resolvedPersona
-        val systemPrompt = "${persona.systemPrompt}\n\n[Live Voice Mode] Reply naturally in 1 to 3 spoken sentences without markdown formatting."
+        val systemPrompt = llmClient.buildSystemPrompt(
+            persona = persona,
+            memories = _uiState.value.memories,
+            agentModeEnabled = false,
+            shizukuConnected = false,
+            moodMethod = prefs.moodMethod,
+            contextConfig = ContextModifyConfig(
+                includePersona = true,
+                includeMemories = true,
+                includeIllumeInstructions = false,
+                includeAgentInstructions = false,
+                includeMoodInstructions = prefs.moodMethod == "inline_tag",
+            ),
+            extraInstruction = "[Live Voice Mode] Reply naturally in 1 to 3 concise spoken sentences without markdown formatting or asterisks.",
+        )
         viewModelScope.launch {
             val sb = StringBuilder()
             try {
+                dao.incrementProviderUsage(prov.id)
                 val flow = if (prov.protocol == "on_device") {
                     onDeviceEngine.streamReply(systemPrompt, emptyList(), transcript)
                 } else {
-                    llmClient.streamChat(prov, systemPrompt, emptyList(), transcript, null)
+                    llmClient.streamChat(
+                        provider = prov,
+                        systemPrompt = systemPrompt,
+                        history = emptyList(),
+                        userPrompt = transcript,
+                        imageBitmap = screenBitmap,
+                    )
                 }
                 flow.collect { chunk ->
                     if (chunk.contentDelta.isNotEmpty()) {
                         sb.append(chunk.contentDelta)
                         val (_, clean) = ProviderPresets.parseThoughts(sb.toString())
-                        onDelta(clean)
+                        val (tagMood, bodyNoMood) = MoodDetector.extractInlineMoodTag(clean)
+                        if (tagMood != null) onMoodChanged(tagMood)
+                        onDelta(bodyNoMood)
                     }
                 }
                 val (_, finalClean) = ProviderPresets.parseThoughts(sb.toString())
-                onComplete(finalClean.ifBlank { sb.toString().trim() })
+                val (tagMood, finalBody) = MoodDetector.extractInlineMoodTag(finalClean)
+                val out = finalBody.ifBlank { finalClean.ifBlank { sb.toString().trim() } }
+                val mood = tagMood ?: MoodDetector.detectMood(out)
+                onMoodChanged(mood)
+                onComplete(out)
+
+                if (prefs.moodMethod == "background_ai" && prov.protocol != "on_device") {
+                    viewModelScope.launch {
+                        val refined = llmClient.classifyMoodFast(prov, out)
+                        if (!refined.isNullOrBlank()) onMoodChanged(refined)
+                    }
+                }
             } catch (e: Exception) {
                 onError(e.localizedMessage ?: "Live Mode error with ${prov.name}")
             }
         }
     }
 
-    // ── Providers, Personas, Memories, Templates, Local Models & Imagine ─
+    // ── Providers, Personas, Memories, Templates, Local Models & Illume ──
 
     suspend fun saveProviderProfile(profile: ProviderProfileEntity) {
         dao.upsertProvider(profile.copy(updatedAtMs = System.currentTimeMillis()))
@@ -1176,31 +1567,75 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun addCustomPersona(name: String, iconKey: String, tagline: String, systemPrompt: String, accentHex: String = "#A855F7") {
+    fun savePersona(
+        existingId: String? = null,
+        name: String,
+        iconKey: String,
+        tagline: String,
+        systemPrompt: String,
+        accentHex: String = "#A855F7",
+    ) {
         soundEngine.playPop()
         viewModelScope.launch {
+            val id = existingId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
             dao.upsertPersona(
                 CustomPersonaEntity(
-                    id = UUID.randomUUID().toString(),
-                    name = name.trim(),
+                    id = id,
+                    name = name.trim().ifBlank { "Persona" },
                     iconKey = iconKey.trim().ifBlank { "sparkle" },
                     tagline = tagline.trim(),
                     systemPrompt = systemPrompt.trim(),
-                    accentHex = accentHex,
+                    accentHex = accentHex.ifBlank { "#A855F7" },
                 )
             )
-            showBanner("Saved persona: $name")
+            scheduleBackgroundCloudSync()
+            showBanner(if (existingId != null) "Updated persona: $name" else "Saved persona: $name")
         }
     }
 
+    fun addCustomPersona(name: String, iconKey: String, tagline: String, systemPrompt: String, accentHex: String = "#A855F7") {
+        savePersona(null, name, iconKey, tagline, systemPrompt, accentHex)
+    }
+
     fun deleteCustomPersona(id: String) {
-        viewModelScope.launch { dao.deletePersona(id) }
+        soundEngine.playClick()
+        viewModelScope.launch {
+            dao.deletePersona(id)
+            val remaining = dao.getAllPersonasOnce()
+            if (_uiState.value.activePersonaId == id && remaining.isNotEmpty()) {
+                selectPersona(remaining.first().id)
+            }
+            scheduleBackgroundCloudSync()
+        }
+    }
+
+    fun restoreDefaultPersonas() {
+        soundEngine.playPop()
+        viewModelScope.launch(Dispatchers.IO) {
+            BuiltInPersonas.ALL.forEachIndexed { idx, p ->
+                dao.upsertPersona(
+                    CustomPersonaEntity(
+                        id = p.id,
+                        name = p.name,
+                        iconKey = p.iconKey,
+                        tagline = p.tagline,
+                        systemPrompt = p.systemPrompt,
+                        accentHex = p.accentHex,
+                        createdAtMs = 1_700_000_000_000L + idx * 1000L,
+                    )
+                )
+            }
+            withContext(Dispatchers.Main) {
+                showBanner("Restored all 8 default personas.")
+            }
+        }
     }
 
     fun addMemory(title: String, content: String) {
         soundEngine.playPop()
         viewModelScope.launch {
             dao.upsertMemory(MemoryEntity(UUID.randomUUID().toString(), title.trim(), content.trim()))
+            scheduleBackgroundCloudSync()
             showBanner("Memory saved locally.")
         }
     }
@@ -1213,23 +1648,36 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch { dao.deleteMemory(id) }
     }
 
-    fun addPromptTemplate(slashTrigger: String, title: String, body: String) {
+    fun savePromptTemplate(existingId: String? = null, slashTrigger: String, title: String, body: String) {
         soundEngine.playPop()
-        val normalized = slashTrigger.trim().let { if (it.startsWith("/")) it else "/$it" }
+        val normalized = if (existingId == ProviderPresets.ID_COMPACT_TEMPLATE) {
+            "/compact"
+        } else {
+            slashTrigger.trim().let { if (it.startsWith("/")) it else "/$it" }
+        }
         viewModelScope.launch {
             dao.upsertPromptTemplate(
                 PromptTemplateEntity(
-                    id = UUID.randomUUID().toString(),
+                    id = existingId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
                     slashKey = normalized,
                     title = title.trim().ifBlank { normalized },
                     promptBody = body.trim(),
                 )
             )
-            showBanner("Saved template $normalized")
+            scheduleBackgroundCloudSync()
+            showBanner("Saved command $normalized")
         }
     }
 
+    fun addPromptTemplate(slashTrigger: String, title: String, body: String) {
+        savePromptTemplate(null, slashTrigger, title, body)
+    }
+
     fun deletePromptTemplate(id: String) {
+        if (id == ProviderPresets.ID_COMPACT_TEMPLATE) {
+            showBanner("/compact is a built-in command and cannot be removed (you can edit its prompt).")
+            return
+        }
         viewModelScope.launch { dao.deletePromptTemplate(id) }
     }
 
@@ -1288,56 +1736,92 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun refreshLocalModelsList() {
+    // ── Offline Local Models (Zero-Copy SAF Mount + Free RAM) ────────────
+
+    fun refreshLocalModelsList(rawJsonOverride: String? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             val files = onDeviceEngine.listInstalledModels()
-            _uiState.value = _uiState.value.copy(installedLocalModels = files)
+            val registered = prefsStore.decodeRegisteredLocalModels(
+                rawJsonOverride ?: preferences.value.registeredLocalModelsJson
+            )
+            val unified = onDeviceEngine.listAllAvailableModels(registered)
+            _uiState.value = _uiState.value.copy(
+                installedLocalModels = files,
+                registeredLocalModels = unified,
+            )
         }
     }
 
-    fun importLocalModel(uri: Uri) {
+    fun importLocalModel(uri: Uri, onLoadedNavigateToChat: (() -> Unit)? = null) {
         viewModelScope.launch {
-            val res = onDeviceEngine.importModelFromUri(uri)
-            res.onSuccess { file ->
-                refreshLocalModelsList()
-                loadLocalModelFile(file)
+            val res = onDeviceEngine.mountOrImportModelFromUri(uri)
+            res.onSuccess { item ->
+                // Persist in registered models list so it NEVER disappears after app restart!
+                val current = prefsStore.decodeRegisteredLocalModels(preferences.value.registeredLocalModelsJson)
+                    .filterNot { it.uriOrPath == item.uriOrPath }
+                val updated = listOf(item) + current
+                prefsStore.updateRegisteredLocalModelsJson(prefsStore.encodeRegisteredLocalModels(updated))
+                refreshLocalModelsList(prefsStore.encodeRegisteredLocalModels(updated))
+                loadLocalModel(item, onLoadedNavigateToChat)
             }.onFailure { err ->
                 _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage)
             }
         }
     }
 
-    fun downloadCuratedLocalModel(model: CuratedLocalModel) {
+    fun downloadCuratedLocalModel(model: CuratedLocalModel, onLoadedNavigateToChat: (() -> Unit)? = null) {
         viewModelScope.launch {
             val res = onDeviceEngine.downloadCuratedModel(model)
             res.onSuccess { file ->
+                val item = RegisteredLocalModel(
+                    uriOrPath = file.absolutePath,
+                    displayName = file.name,
+                    sizeBytes = file.length(),
+                    isContentUri = false,
+                )
                 refreshLocalModelsList()
                 showBanner("Downloaded ${model.name}. Loading...")
-                loadLocalModelFile(file)
+                loadLocalModel(item, onLoadedNavigateToChat)
             }.onFailure { err ->
                 _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage)
             }
         }
     }
 
-    fun loadLocalModelFile(file: File) {
+    fun loadLocalModelFile(file: File, onLoadedNavigateToChat: (() -> Unit)? = null) {
+        loadLocalModel(
+            RegisteredLocalModel(
+                uriOrPath = file.absolutePath,
+                displayName = file.name,
+                sizeBytes = file.length(),
+                isContentUri = false,
+            ),
+            onLoadedNavigateToChat,
+        )
+    }
+
+    fun loadLocalModel(item: RegisteredLocalModel, onLoadedNavigateToChat: (() -> Unit)? = null) {
+        if (_uiState.value.localModelStatus.loading) return
         viewModelScope.launch {
             val prefs = preferences.value
             val res = onDeviceEngine.loadModel(
-                modelPath = file.absolutePath,
-                maxTokens = prefs.localMaxTokens,
+                uriOrPath = item.uriOrPath,
+                displayName = item.displayName,
+                maxTokens = prefs.contextModify.ggufMaxTokens,
                 useGpu = prefs.localUseGpu,
                 shizukuAutoGuard = prefs.shizukuAutoGuard,
+                ggufConfig = prefs.contextModify,
             )
             res.onSuccess {
-                prefsStore.updateLocalModel(file.absolutePath, file.name, prefs.localMaxTokens, prefs.localUseGpu)
+                prefsStore.updateLocalModel(item.uriOrPath, item.displayName, prefs.contextModify.ggufMaxTokens, prefs.localUseGpu)
                 val onDeviceProv = dao.getProvider(ProviderPresets.ID_ON_DEVICE)
                 if (onDeviceProv != null) {
-                    dao.upsertProvider(onDeviceProv.copy(selectedModel = file.name, updatedAtMs = System.currentTimeMillis()))
+                    dao.upsertProvider(onDeviceProv.copy(selectedModel = item.displayName, updatedAtMs = System.currentTimeMillis()))
                 }
                 prefsStore.updateActiveProviderId(ProviderPresets.ID_ON_DEVICE)
                 soundEngine.playPop()
-                showBanner("Loaded offline model: ${file.name}")
+                showBanner("Loaded offline model: ${item.displayName}")
+                onLoadedNavigateToChat?.invoke()
             }.onFailure { err ->
                 _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage)
             }
@@ -1350,11 +1834,42 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun deleteLocalModel(file: File) {
+        deleteLocalModelItem(
+            RegisteredLocalModel(
+                uriOrPath = file.absolutePath,
+                displayName = file.name,
+                sizeBytes = file.length(),
+                isContentUri = false,
+            )
+        )
+    }
+
+    fun deleteLocalModelItem(item: RegisteredLocalModel) {
         viewModelScope.launch(Dispatchers.IO) {
-            onDeviceEngine.deleteModelFile(file)
-            refreshLocalModelsList()
+            onDeviceEngine.deleteLocalModel(item)
+            val remaining = prefsStore.decodeRegisteredLocalModels(preferences.value.registeredLocalModelsJson)
+                .filterNot { it.uriOrPath == item.uriOrPath }
+            val encoded = prefsStore.encodeRegisteredLocalModels(remaining)
+            prefsStore.updateRegisteredLocalModelsJson(encoded)
+            refreshLocalModelsList(encoded)
         }
     }
+
+    fun freeAllRam() {
+        soundEngine.playPop()
+        viewModelScope.launch {
+            val shizukuConnected = _uiState.value.shizukuStatus == ShizukuStatus.CONNECTED_SHELL ||
+                _uiState.value.shizukuStatus == ShizukuStatus.CONNECTED_ROOT
+            val freedMb = onDeviceEngine.reclaimInternalRam(includeShizuku = shizukuConnected)
+            val avail = onDeviceEngine.availableDeviceRamMb()
+            showBanner(
+                if (freedMb > 0) "Freed ~${freedMb} MB RAM (${avail} MB now free)."
+                else "RAM trimmed & caches cleared (${avail} MB available)."
+            )
+        }
+    }
+
+    // ── Illume Artwork Engine ────────────────────────────────────────────
 
     suspend fun generateArtwork(
         prompt: String,
@@ -1366,7 +1881,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         val prefs = preferences.value
         val provider = providerOverride ?: prefs.imagineProvider
         val model = modelOverride ?: if (provider == "kaggle") prefs.kaggleModelId else prefs.imagineModel
-        _uiState.value = _uiState.value.copy(isGeneratingImage = true, imagineStatusText = "Starting...", errorMessage = null)
+        _uiState.value = _uiState.value.copy(isGeneratingImage = true, imagineStatusText = "Starting Illume...", errorMessage = null)
         val res = imagineClient.generateImage(
             prompt = prompt,
             negativePrompt = negativePrompt,
@@ -1417,7 +1932,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
 
     fun sendArtworkToChat(artwork: ArtworkEntity) {
         viewModelScope.launch {
-            val sid = ensureActiveSession("Imagine: ${artwork.prompt.take(32)}")
+            val sid = ensureActiveSession("Illume: ${artwork.prompt.take(32)}")
             val parentId = _uiState.value.activeMessages.lastOrNull()?.id
             val msgId = UUID.randomUUID().toString()
             dao.upsertMessage(
@@ -1439,7 +1954,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // ── Backup JSON, Export, Shizuku & Cloud Sync ────────────────────────
+    // ── Backup JSON, Export, Shizuku & Cloud Sync + Quota Manager ────────
 
     fun exportFullBackupToUri(uri: Uri, includeApiKeys: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -1510,22 +2025,75 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun syncWithGoogleCloud(silent: Boolean = false) {
+    /**
+     * Called immediately after signing in with Google from Guest Mode.
+     * If BOTH local guest data and cloud account data exist, prompts the user to pick
+     * Merge Both, Keep Local (Replace Cloud), or Keep Cloud (Replace Local).
+     */
+    fun checkAndSyncAfterGoogleSignIn() {
+        viewModelScope.launch {
+            val hasLocal = dao.getAllSessionsOnce().isNotEmpty() ||
+                dao.getAllProviders().any { it.apiKey.isNotBlank() }
+            val hasCloud = cloudSync.hasCloudData()
+            if (hasLocal && hasCloud) {
+                _uiState.value = _uiState.value.copy(pendingSyncConflict = true)
+            } else {
+                syncWithGoogleCloud(silent = false, mode = CloudSyncMode.MERGE_BOTH)
+            }
+        }
+    }
+
+    fun resolveSyncConflict(mode: CloudSyncMode) {
+        _uiState.value = _uiState.value.copy(pendingSyncConflict = false)
+        syncWithGoogleCloud(silent = false, mode = mode)
+    }
+
+    fun dismissSyncConflict() {
+        _uiState.value = _uiState.value.copy(pendingSyncConflict = false)
+    }
+
+    fun syncWithGoogleCloud(silent: Boolean = false, mode: CloudSyncMode = CloudSyncMode.MERGE_BOTH) {
         viewModelScope.launch {
             if (!silent) {
                 _uiState.value = _uiState.value.copy(isSyncingCloud = true, errorMessage = null)
             }
-            val res = cloudSync.syncNow(preferences.value)
+            val res = cloudSync.syncNow(preferences.value, mode)
             if (!silent) {
                 _uiState.value = _uiState.value.copy(isSyncingCloud = false)
-                res.onSuccess { showBanner(it.message) }
-                    .onFailure { _uiState.value = _uiState.value.copy(errorMessage = it.localizedMessage) }
+                res.onSuccess {
+                    showBanner(it.message)
+                    refreshCloudStorage()
+                }.onFailure { _uiState.value = _uiState.value.copy(errorMessage = it.localizedMessage) }
+            }
+        }
+    }
+
+    fun refreshCloudStorage() {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(cloudStorageLoading = true)
+            val res = cloudSync.inspectCloudStorage()
+            _uiState.value = _uiState.value.copy(
+                cloudStorageLoading = false,
+                cloudStorageSummary = res.getOrNull() ?: _uiState.value.cloudStorageSummary,
+            )
+        }
+    }
+
+    fun deleteCloudStorageItem(collection: String, docId: String) {
+        soundEngine.playClick()
+        viewModelScope.launch {
+            val res = cloudSync.deleteCloudItem(collection, docId)
+            res.onSuccess {
+                showBanner("Deleted item from Cloud.")
+                refreshCloudStorage()
+            }.onFailure {
+                _uiState.value = _uiState.value.copy(errorMessage = it.localizedMessage)
             }
         }
     }
 
     private fun scheduleBackgroundCloudSync() {
-        if (com.google.firebase.Firebase.auth.currentUser == null) return
+        if (Firebase.auth.currentUser == null) return
         autoSyncJob?.cancel()
         autoSyncJob = viewModelScope.launch {
             delay(2500L)
@@ -1588,7 +2156,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
 
     private fun saveAttachmentLocally(bitmap: Bitmap): String = runCatching {
         val dir = File(appContext.filesDir, "attachments").apply { if (!exists()) mkdirs() }
-        val f = File(dir, "att_${System.currentTimeMillis()}.jpg")
+        val f = File(dir, "att_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.jpg")
         FileOutputStream(f).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 82, it) }
         f.absolutePath
     }.getOrDefault("")

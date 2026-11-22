@@ -71,6 +71,25 @@ object ChatTreeHelper {
         )
     }
 
+    /**
+     * Strict upward walk from [upToId] to root with ZERO downward descent.
+     * Used when building LLM conversation history prior to a user prompt so
+     * Retry/Edit NEVER accidentally descends into the target message or its children.
+     */
+    fun buildAncestorPath(allMessages: List<MessageEntity>, upToId: String?): List<MessageEntity> {
+        if (allMessages.isEmpty() || upToId.isNullOrBlank()) return emptyList()
+        val byId = allMessages.associateBy { it.id }
+        val reversedPath = mutableListOf<MessageEntity>()
+        val visited = mutableSetOf<String>()
+        var cursor: String? = upToId
+        while (cursor != null && visited.add(cursor)) {
+            val node = byId[cursor] ?: break
+            reversedPath.add(node)
+            cursor = node.parentId
+        }
+        return reversedPath.reversed()
+    }
+
     fun descendToLatestLeaf(
         startId: String,
         childrenByParent: Map<String?, List<MessageEntity>>,

@@ -1,20 +1,29 @@
 package com.henny.cellium
 
 import android.app.Activity
+import android.provider.Settings
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.ChatBubble
+import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -23,8 +32,10 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.NavigationRailItemDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -40,7 +51,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.henny.cellium.assistant.FloatingCelOverlayService
 import com.henny.cellium.core.AuthManager
+import com.henny.cellium.data.sync.CloudSyncMode
 import com.henny.cellium.ui.analytics.AnalyticsScreen
 import com.henny.cellium.ui.arena.ArenaScreen
 import com.henny.cellium.ui.avatar.AvatarStudioScreen
@@ -54,20 +67,20 @@ import com.henny.cellium.ui.onboarding.OnboardingScreen
 import com.henny.cellium.ui.settings.SettingsScreen
 import com.henny.cellium.ui.theme.CelTextMuted
 import com.henny.cellium.ui.theme.CelTextPrimary
+import com.henny.cellium.ui.theme.CelTextSecondary
 import com.henny.cellium.ui.theme.LocalCelliumVisuals
 import kotlinx.coroutines.launch
 
 /**
- * Primary 4-tab layout in the user's exact requested order:
- * Imagine · Chat · Live · Settings
- * (Avatar Studio, Stats & Dev Console, and RAM Watchdog live inside Settings.)
+ * Primary 4-tab layout:
+ * Illume · Chat · Live · Settings
  */
 enum class CelliumTab(
     val label: String,
     val icon: ImageVector,
     val tag: String,
 ) {
-    IMAGINE("Imagine", Icons.Rounded.AutoAwesome, "nav_imagine"),
+    IMAGINE("Illume", Icons.Rounded.AutoAwesome, "nav_illume"),
     CHAT("Chat", Icons.Rounded.ChatBubble, "nav_chat"),
     LIVE("Live", Icons.Rounded.Call, "nav_live"),
     SETTINGS("Settings", Icons.Rounded.Settings, "nav_settings"),
@@ -104,20 +117,27 @@ fun CelliumApp(viewModel: CelliumViewModel) {
             googleBusy = false
             res.onSuccess {
                 viewModel.prefsStore.setGuestMode(false)
-                viewModel.syncWithGoogleCloud()
+                viewModel.checkAndSyncAfterGoogleSignIn()
             }.onFailure { err ->
                 googleErr = err.localizedMessage ?: "Google Sign-In failed"
             }
         }
     }
 
-    // Never flash Onboarding/Welcome screen while DataStore finishes initial hydration
+    // Sync system-wide Floating Cel overlay when toggled and overlay permission is granted
+    LaunchedEffect(prefs.floatingMiniCel) {
+        if (prefs.floatingMiniCel && Settings.canDrawOverlays(context)) {
+            FloatingCelOverlayService.start(context, autoListen = false)
+        } else if (!prefs.floatingMiniCel) {
+            FloatingCelOverlayService.stop(context)
+        }
+    }
+
     if (!prefsLoaded && !prefs.onboardingCompleted) {
-        Box(modifier = Modifier.fillMaxSize().background(visuals.voidBg))
+        Box(modifier = Modifier.fillMaxSize().background(Color(0xFF06060A)))
         return
     }
 
-    // Step 1-3 First-Run Onboarding (ONLY for brand-new users who have not completed onboarding)
     if (!prefs.onboardingCompleted) {
         OnboardingScreen(
             providers = uiState.providers,
@@ -143,10 +163,12 @@ fun CelliumApp(viewModel: CelliumViewModel) {
     var currentTab by rememberSaveable { mutableStateOf(CelliumTab.CHAT) }
     var subOverlay by remember { mutableStateOf<SubOverlay>(SubOverlay.None) }
 
-    // Tell ViewModel which tab is visible so WhatsApp-style bundled notifications trigger
-    // whenever Cel replies while the user is on Imagine, Live, Settings, or backgrounded.
     LaunchedEffect(currentTab, subOverlay) {
-        val tabKey = if (subOverlay != SubOverlay.None) "sub" else currentTab.name.lowercase()
+        val tabKey = when (subOverlay) {
+            is SubOverlay.Arena -> "arena"
+            is SubOverlay.None -> currentTab.name.lowercase()
+            else -> "sub"
+        }
         viewModel.setCurrentVisibleTab(tabKey)
     }
 
@@ -202,7 +224,14 @@ fun CelliumApp(viewModel: CelliumViewModel) {
                                         currentTab = tab
                                     },
                                     icon = { Icon(tab.icon, contentDescription = tab.label) },
-                                    label = { Text(tab.label, style = MaterialTheme.typography.labelSmall) },
+                                    label = {
+                                        Text(
+                                            text = tab.label,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                        )
+                                    },
                                     colors = NavigationBarItemDefaults.colors(
                                         selectedIconColor = visuals.primary,
                                         selectedTextColor = CelTextPrimary,
@@ -220,7 +249,8 @@ fun CelliumApp(viewModel: CelliumViewModel) {
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(innerPadding),
+                        .padding(innerPadding)
+                        .consumeWindowInsets(innerPadding),
                 ) {
                     if (useRail) {
                         NavigationRail(
@@ -235,7 +265,14 @@ fun CelliumApp(viewModel: CelliumViewModel) {
                                         currentTab = tab
                                     },
                                     icon = { Icon(tab.icon, contentDescription = tab.label) },
-                                    label = { Text(tab.label, style = MaterialTheme.typography.labelSmall) },
+                                    label = {
+                                        Text(
+                                            text = tab.label,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                        )
+                                    },
                                     colors = NavigationRailItemDefaults.colors(
                                         selectedIconColor = visuals.primary,
                                         selectedTextColor = CelTextPrimary,
@@ -279,14 +316,15 @@ fun CelliumApp(viewModel: CelliumViewModel) {
                                 },
                                 onOpenAvatarStudio = { subOverlay = SubOverlay.AvatarStudio },
                                 onOpenStats = { subOverlay = SubOverlay.StatsConsole },
+                                onJumpToChat = { currentTab = CelliumTab.CHAT },
                             )
                         }
                     }
                 }
             }
 
-            // Draggable Floating Mini-Cel Companion Overlay
-            if (prefs.floatingMiniCel) {
+            // Fallback in-app floating face if system overlay permission is not granted yet
+            if (prefs.floatingMiniCel && !Settings.canDrawOverlays(context)) {
                 FloatingMiniCelOverlay(
                     mood = uiState.currentMood,
                     avatarGender = prefs.avatarGender,
@@ -297,5 +335,49 @@ fun CelliumApp(viewModel: CelliumViewModel) {
                 )
             }
         }
+    }
+
+    // 3-Option Guest -> Google Sign-In Conflict Resolution Dialog (#19)
+    if (uiState.pendingSyncConflict) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissSyncConflict() },
+            containerColor = Color(0xFF140D26),
+            icon = { Icon(Icons.Rounded.CloudSync, contentDescription = null, tint = visuals.primary) },
+            title = { Text("Sync Conflict Detected", color = CelTextPrimary) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "You have both local Guest data on this phone and existing Cloud data in your Google account. How would you like to sync?",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CelTextSecondary,
+                    )
+                    Button(
+                        onClick = { viewModel.resolveSyncConflict(CloudSyncMode.MERGE_BOTH) },
+                        colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Merge Both (Recommended)", maxLines = 1, softWrap = false)
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.resolveSyncConflict(CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Keep Local (Replace Cloud)", maxLines = 1, softWrap = false)
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.resolveSyncConflict(CloudSyncMode.KEEP_CLOUD_REPLACE_LOCAL) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Keep Cloud (Replace Local)", maxLines = 1, softWrap = false)
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissSyncConflict() }) {
+                    Text("Later")
+                }
+            },
+        )
     }
 }
