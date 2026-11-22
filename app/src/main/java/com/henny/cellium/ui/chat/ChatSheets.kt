@@ -131,6 +131,25 @@ fun ProviderSearchDropdownSheet(
         starredModels.map { "${it.providerId}::${it.modelName}" }.toSet()
     }
 
+    LaunchedEffect(activeSaved?.id, activeSaved?.apiKey) {
+        val target = activeSaved ?: return@LaunchedEffect
+        val cached = ProviderPresets.decodeModels(target.cachedModelsJson)
+        if (target.protocol != "on_device" &&
+            target.requiresKey &&
+            target.apiKey.isNotBlank() &&
+            cached.isEmpty() &&
+            onFetchActiveModels != null &&
+            !fetchingModels
+        ) {
+            fetchingModels = true
+            fetchError = null
+            val res = onFetchActiveModels(target)
+            fetchingModels = false
+            res.onSuccess { list -> liveFetchedModels = list }
+                .onFailure { err -> fetchError = err.localizedMessage ?: "Failed to load models" }
+        }
+    }
+
     val filtered = remember(query, selectedCategory, hiddenProviderIds, showHidden, savedById) {
         val base = ProviderCatalog.search(query)
         val catFiltered = when (selectedCategory) {
@@ -427,7 +446,14 @@ fun ProviderSearchDropdownSheet(
                                     onRequestConfigureKey(saved ?: entry.toEntity())
                                 } else {
                                     onSelectCatalogProvider(entry)
-                                    if (dismissOnProviderPick) onDismiss()
+                                    val needsExplicitModelPick = !dismissOnProviderPick ||
+                                        (entry.requiresKey && saved?.selectedModel.isNullOrBlank())
+                                    if (needsExplicitModelPick) {
+                                        query = ""
+                                        modelQuery = ""
+                                    } else {
+                                        onDismiss()
+                                    }
                                 }
                             }
                             .padding(horizontal = 12.dp, vertical = 9.dp),

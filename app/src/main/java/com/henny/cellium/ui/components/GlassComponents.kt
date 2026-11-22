@@ -68,6 +68,7 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalScrollCaptureInProgress
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -202,7 +203,8 @@ fun CelliumBackground(
                     )
                 )
         )
-        if (effectiveParticles && motes.isNotEmpty()) {
+        val scrollCaptureActive = LocalScrollCaptureInProgress.current
+        if (effectiveParticles && motes.isNotEmpty() && !scrollCaptureActive) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val t = tickMs * 0.001f
                 for (m in motes) {

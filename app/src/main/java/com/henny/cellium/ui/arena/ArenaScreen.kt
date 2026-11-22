@@ -400,7 +400,7 @@ fun ArenaScreen(
             savedProviders = ui.providers,
             activeProviderId = if (slot == "A") arena.providerAId else arena.providerBId,
             onSelectCatalogProvider = { entry ->
-                viewModel.activateCatalogProvider(entry)
+                viewModel.ensureCatalogProviderSaved(entry)
                 val saved = ui.providers.firstOrNull { it.id == entry.id }
                 val resolvedModel = saved?.selectedModel?.takeIf { it.isNotBlank() }
                     ?: entry.defaultModel.takeIf { it.isNotBlank() }

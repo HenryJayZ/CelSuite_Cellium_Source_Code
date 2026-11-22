@@ -66,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalScrollCaptureInProgress
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -185,6 +186,7 @@ fun ChatScreen(
     val persona = ui.resolvedPersona
     val activeProv = ui.activeProvider
     val isOfflineProvider = activeProv?.protocol == "on_device"
+    val scrollCaptureActive = LocalScrollCaptureInProgress.current
 
     // No redundant .statusBarsPadding() here — CelliumApp Scaffold handles safeDrawing + consumeWindowInsets
     Column(
@@ -192,7 +194,8 @@ fun ChatScreen(
             .fillMaxSize()
             .imePadding(),
     ) {
-        // Liquid Glass Top Bar (Sessions, Modify [offline], Searchable 200+ Provider Dropdown, Persona, Arena, Agent, New)
+        // Liquid Glass Top Bar (hidden during Android/Samsung Scroll Capture so tiles stitch cleanly)
+        if (!scrollCaptureActive) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -246,7 +249,14 @@ fun ChatScreen(
                     modifier = Modifier.size(16.dp),
                 )
                 Text(
-                    text = activeProv?.let { "${it.name}: ${it.selectedModel.removePrefix("models/").take(16)}" } ?: "Select Provider",
+                    text = activeProv?.let {
+                        val modelLabel = if (it.protocol == "on_device") {
+                            ui.localModelStatus.modelName.ifBlank { it.selectedModel.ifBlank { "No model" } }
+                        } else {
+                            it.selectedModel.removePrefix("models/").ifBlank { "select model" }
+                        }
+                        "${it.name}: ${modelLabel.take(16)}"
+                    } ?: "Select Provider",
                     style = MaterialTheme.typography.labelMedium,
                     color = CelTextPrimary,
                     maxLines = 1,
@@ -318,6 +328,7 @@ fun ChatScreen(
             ) {
                 Icon(Icons.Rounded.Add, contentDescription = "New Chat", tint = CelLavender, modifier = Modifier.size(16.dp))
             }
+        }
         }
 
         // Error or status banner
@@ -445,46 +456,48 @@ fun ChatScreen(
             }
         }
 
-        // Isolated Zero-Lag Composer Bar
-        ChatComposerBar(
-            personaName = persona.name,
-            isStreaming = ui.isStreaming,
-            promptTemplates = ui.promptTemplates,
-            pendingImages = pendingImages,
-            pendingFile = pendingFile,
-            injectedText = injectedComposerText,
-            onClearInjectedText = { injectedComposerText = null },
-            onPastedBitmap = { bmp ->
-                viewModel.soundEngine.playPop()
-                pendingImages = (pendingImages + bmp).take(5)
-            },
-            onRemoveImageAt = { idx ->
-                pendingImages = pendingImages.filterIndexed { i, _ -> i != idx }
-            },
-            onClearFile = { pendingFile = null },
-            onPickImage = {
-                multiPhotoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            },
-            onPickFile = {
-                filePicker.launch(arrayOf("*/*"))
-            },
-            onStartVoiceInput = {
-                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to ${persona.name}")
-                }
-                runCatching { speechLauncher.launch(intent) }
-            },
-            onOpenArena = onOpenArena,
-            onStopStreaming = { viewModel.stopStreaming() },
-            onSend = { text ->
-                val imgs = pendingImages
-                val file = pendingFile
-                pendingImages = emptyList()
-                pendingFile = null
-                viewModel.sendMessage(text, imgs, file)
-            },
-        )
+        // Isolated Zero-Lag Composer Bar (hidden during Android/Samsung Scroll Capture)
+        if (!scrollCaptureActive) {
+            ChatComposerBar(
+                personaName = persona.name,
+                isStreaming = ui.isStreaming,
+                promptTemplates = ui.promptTemplates,
+                pendingImages = pendingImages,
+                pendingFile = pendingFile,
+                injectedText = injectedComposerText,
+                onClearInjectedText = { injectedComposerText = null },
+                onPastedBitmap = { bmp ->
+                    viewModel.soundEngine.playPop()
+                    pendingImages = (pendingImages + bmp).take(5)
+                },
+                onRemoveImageAt = { idx ->
+                    pendingImages = pendingImages.filterIndexed { i, _ -> i != idx }
+                },
+                onClearFile = { pendingFile = null },
+                onPickImage = {
+                    multiPhotoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+                onPickFile = {
+                    filePicker.launch(arrayOf("*/*"))
+                },
+                onStartVoiceInput = {
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to ${persona.name}")
+                    }
+                    runCatching { speechLauncher.launch(intent) }
+                },
+                onOpenArena = onOpenArena,
+                onStopStreaming = { viewModel.stopStreaming() },
+                onSend = { text ->
+                    val imgs = pendingImages
+                    val file = pendingFile
+                    pendingImages = emptyList()
+                    pendingFile = null
+                    viewModel.sendMessage(text, imgs, file)
+                },
+            )
+        }
     }
 
     ui.pendingGuard?.let { pending ->

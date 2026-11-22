@@ -583,6 +583,16 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun ensureCatalogProviderSaved(entry: ProviderCatalogEntry) {
+        soundEngine.playClick()
+        viewModelScope.launch {
+            val existing = dao.getProvider(entry.id)
+            if (existing == null) {
+                dao.upsertProvider(entry.toEntity())
+            }
+        }
+    }
+
     fun toggleHideProvider(providerId: String) {
         soundEngine.playClick()
         viewModelScope.launch {
@@ -672,6 +682,10 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         val clean = editedText.trim()
         if (clean.isEmpty()) return
         soundEngine.playClick()
+        val shouldRegenerate = original.role == "user" && regenerateIfUser && !_uiState.value.isStreaming
+        if (shouldRegenerate) {
+            _streamingParentId.value = original.id
+        }
         viewModelScope.launch {
             dao.upsertMessage(
                 original.copy(
@@ -681,7 +695,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 )
             )
             refreshSessionStats(original.sessionId)
-            if (original.role == "user" && regenerateIfUser && !_uiState.value.isStreaming) {
+            if (shouldRegenerate) {
                 val all = dao.getMessagesForSessionOnce(original.sessionId)
                 val historyBefore = ChatTreeHelper.buildAncestorPath(all, original.parentId)
                 val file = if (original.attachmentFileName.isNotBlank()) {
@@ -1516,10 +1530,10 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         val res = llmClient.fetchModels(profile)
         res.onSuccess { list ->
             if (list.isNotEmpty()) {
-                val chosenModel = if (profile.selectedModel.isNotBlank() && profile.selectedModel in list) {
-                    profile.selectedModel
-                } else {
-                    list.first()
+                val chosenModel = when {
+                    profile.selectedModel.isNotBlank() && profile.selectedModel in list -> profile.selectedModel
+                    !profile.requiresKey -> list.first()
+                    else -> ""
                 }
                 dao.upsertProvider(
                     profile.copy(
@@ -1801,7 +1815,21 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun loadLocalModel(item: RegisteredLocalModel, onLoadedNavigateToChat: (() -> Unit)? = null) {
-        if (_uiState.value.localModelStatus.loading) return
+        val st = _uiState.value.localModelStatus
+        if (st.loading) return
+        if (st.loaded && (st.modelPath == item.uriOrPath || st.modelName == item.displayName)) {
+            viewModelScope.launch {
+                val onDeviceProv = dao.getProvider(ProviderPresets.ID_ON_DEVICE)
+                if (onDeviceProv != null && onDeviceProv.selectedModel != item.displayName) {
+                    dao.upsertProvider(onDeviceProv.copy(selectedModel = item.displayName, updatedAtMs = System.currentTimeMillis()))
+                }
+                prefsStore.updateActiveProviderId(ProviderPresets.ID_ON_DEVICE)
+                soundEngine.playPop()
+                showBanner("${item.displayName} is already loaded — opening Chat.")
+                onLoadedNavigateToChat?.invoke()
+            }
+            return
+        }
         viewModelScope.launch {
             val prefs = preferences.value
             val res = onDeviceEngine.loadModel(
@@ -1847,10 +1875,31 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
     fun deleteLocalModelItem(item: RegisteredLocalModel) {
         viewModelScope.launch(Dispatchers.IO) {
             onDeviceEngine.deleteLocalModel(item)
-            val remaining = prefsStore.decodeRegisteredLocalModels(preferences.value.registeredLocalModelsJson)
-                .filterNot { it.uriOrPath == item.uriOrPath }
+            val prefs = preferences.value
+            val remaining = prefsStore.decodeRegisteredLocalModels(prefs.registeredLocalModelsJson)
+                .filterNot { it.uriOrPath == item.uriOrPath || it.displayName == item.displayName }
             val encoded = prefsStore.encodeRegisteredLocalModels(remaining)
             prefsStore.updateRegisteredLocalModelsJson(encoded)
+
+            val installedFallback = onDeviceEngine.listAllAvailableModels(remaining)
+            val nextModel = installedFallback.firstOrNull()
+            if (prefs.localModelPath == item.uriOrPath || prefs.localModelName == item.displayName) {
+                prefsStore.updateLocalModel(
+                    path = nextModel?.uriOrPath.orEmpty(),
+                    name = nextModel?.displayName.orEmpty(),
+                    maxTokens = prefs.localMaxTokens,
+                    useGpu = prefs.localUseGpu,
+                )
+            }
+            val onDeviceProv = dao.getProvider(ProviderPresets.ID_ON_DEVICE)
+            if (onDeviceProv != null && (onDeviceProv.selectedModel == item.displayName || installedFallback.isEmpty())) {
+                dao.upsertProvider(
+                    onDeviceProv.copy(
+                        selectedModel = nextModel?.displayName ?: "No local model loaded",
+                        updatedAtMs = System.currentTimeMillis(),
+                    )
+                )
+            }
             refreshLocalModelsList(encoded)
         }
     }

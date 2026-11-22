@@ -48,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalScrollCaptureInProgress
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -206,12 +207,13 @@ fun CelliumApp(viewModel: CelliumViewModel) {
 
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val useRail = maxWidth >= 700.dp
+            val scrollCaptureActive = LocalScrollCaptureInProgress.current
 
             Scaffold(
                 containerColor = Color.Transparent,
                 contentWindowInsets = WindowInsets.safeDrawing,
                 bottomBar = {
-                    if (!useRail) {
+                    if (!useRail && !scrollCaptureActive) {
                         NavigationBar(
                             containerColor = visuals.surfaceBg.copy(alpha = 0.92f),
                             tonalElevation = 0.dp,
@@ -252,7 +254,7 @@ fun CelliumApp(viewModel: CelliumViewModel) {
                         .padding(innerPadding)
                         .consumeWindowInsets(innerPadding),
                 ) {
-                    if (useRail) {
+                    if (useRail && !scrollCaptureActive) {
                         NavigationRail(
                             containerColor = visuals.surfaceBg.copy(alpha = 0.92f),
                             modifier = Modifier.fillMaxHeight(),
@@ -324,7 +326,7 @@ fun CelliumApp(viewModel: CelliumViewModel) {
             }
 
             // Fallback in-app floating face if system overlay permission is not granted yet
-            if (prefs.floatingMiniCel && !Settings.canDrawOverlays(context)) {
+            if (prefs.floatingMiniCel && !Settings.canDrawOverlays(context) && !scrollCaptureActive) {
                 FloatingMiniCelOverlay(
                     mood = uiState.currentMood,
                     avatarGender = prefs.avatarGender,
