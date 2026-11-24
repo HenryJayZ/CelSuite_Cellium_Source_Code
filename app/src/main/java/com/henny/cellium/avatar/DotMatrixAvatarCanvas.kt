@@ -91,8 +91,22 @@ fun DotMatrixAvatarCanvas(
     var touchActiveUntilMs by remember { mutableLongStateOf(0L) }
     var lastPetCallbackMs by remember { mutableLongStateOf(0L) }
 
-    var canvasWidth by remember { mutableFloatStateOf(600f) }
-    var canvasHeight by remember { mutableFloatStateOf(400f) }
+    // Plain array avoids triggering Compose MutableState writes inside Canvas draw lambda
+    val canvasDims = remember { floatArrayOf(600f, 400f) }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    var isResumed by remember { mutableStateOf(true) }
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> isResumed = true
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> isResumed = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // Manual blink trigger
     LaunchedEffect(blinkTrigger) {
@@ -136,11 +150,12 @@ fun DotMatrixAvatarCanvas(
         }
     }
 
-    // Continuous 60fps / 30fps physics simulation loop
-    LaunchedEffect(expression, highFps) {
+    // Continuous 60fps / 30fps physics simulation loop (paused automatically in background)
+    LaunchedEffect(expression, highFps, isResumed) {
+        if (!isResumed) return@LaunchedEffect
         var lastFrameMs = 0L
         var passiveAccumMs = 0f
-        val minStepMs = if (highFps) 16L else 33L
+        val minStepMs = if (highFps) 20L else 36L
         val rng = Random(System.nanoTime())
 
         while (true) {
@@ -305,11 +320,12 @@ fun DotMatrixAvatarCanvas(
                         }
                     }
 
-                    // 20% Spring relaxation + deterministic harmonic shimmer
-                    p.cx += (tx - p.cx) * 0.22f
-                    p.cy += (ty - p.cy) * 0.22f
-                    p.cx += sin(tSec * 7.3f + seed) * jitterAmp
-                    p.cy += cos(tSec * 5.9f + seed * 1.31f) * jitterAmp
+                    // Smooth frame-rate-normalized morphing with velocity cap so pixels glide gracefully
+                    val morphLerp = (1f - (1f - 0.085f).pow(dtMs / 16.67f)).coerceIn(0.03f, 0.14f)
+                    val stepX = ((tx - p.cx) * morphLerp).coerceIn(-16f, 16f)
+                    val stepY = ((ty - p.cy) * morphLerp).coerceIn(-16f, 16f)
+                    p.cx += stepX + sin(tSec * 7.3f + seed) * jitterAmp
+                    p.cy += stepY + cos(tSec * 5.9f + seed * 1.31f) * jitterAmp
                 }
                 frameTick = nowMs
             }
@@ -329,10 +345,12 @@ fun DotMatrixAvatarCanvas(
             .pointerInput(scale) {
                 detectDragGestures(
                     onDrag = { change, _ ->
-                        val s = min(canvasWidth / 600f, canvasHeight / 400f) * scale
+                        val cw = canvasDims[0]
+                        val ch = canvasDims[1]
+                        val s = min(cw / 600f, ch / 400f) * scale
                         if (s > 0.001f) {
-                            val ox = (canvasWidth - 600f * s) * 0.5f
-                            val oy = (canvasHeight - 400f * s) * 0.5f
+                            val ox = (cw - 600f * s) * 0.5f
+                            val oy = (ch - 400f * s) * 0.5f
                             touchCanonX = (change.position.x - ox) / s
                             touchCanonY = (change.position.y - oy) / s
                             touchActiveUntilMs = System.currentTimeMillis() + 180L
@@ -350,8 +368,8 @@ fun DotMatrixAvatarCanvas(
         val unusedTick = frameTick
         if (unusedTick < 0L) return@Canvas
 
-        canvasWidth = size.width
-        canvasHeight = size.height
+        canvasDims[0] = size.width
+        canvasDims[1] = size.height
         val s = min(size.width / 600f, size.height / 400f) * scale
         val ox = (size.width - 600f * s) * 0.5f
         val oy = (size.height - 400f * s) * 0.5f

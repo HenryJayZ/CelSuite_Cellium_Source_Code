@@ -1,10 +1,12 @@
 package com.henny.cellium.data.sync
 
+import android.content.Context
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.firestore
+import com.henny.cellium.R
 import com.henny.cellium.core.CelliumPreferences
 import com.henny.cellium.core.DevLogBuffer
 import com.henny.cellium.core.PreferencesStore
@@ -59,10 +61,14 @@ data class CloudStorageSummary(
  * - Syncs providers/keys, starred models, hidden providers, personas, memories, templates & chats
  */
 class CloudSyncManager(
+    private val context: Context,
     private val dao: CelliumDao,
     private val prefsStore: PreferencesStore,
 ) {
-    private val db by lazy { Firebase.firestore }
+    private val db by lazy {
+        val dbId = runCatching { context.getString(R.string.firestore_database_id).trim() }.getOrDefault("")
+        if (dbId.isNotEmpty() && dbId != "(default)") Firebase.firestore(dbId) else Firebase.firestore
+    }
 
     companion object {
         // Firebase Spark free Firestore storage = 1 GiB (1,073,741,824 bytes).
@@ -348,6 +354,18 @@ class CloudSyncManager(
                     hiddenProviderIds = mergedHidden,
                     moodMethod = remoteAccount.getString("moodMethod"),
                     typingSoundStyle = remoteAccount.getString("typingSoundStyle"),
+                    typingSpeed = remoteAccount.getString("typingSpeed"),
+                    ttsEngine = remoteAccount.getString("ttsEngine"),
+                    ttsVoiceName = remoteAccount.getString("ttsVoiceName"),
+                    sttEngine = remoteAccount.getString("sttEngine"),
+                    sttApiKey = currentPrefs.sttApiKey.ifBlank { remoteAccount.getString("sttApiKey").orEmpty() },
+                    sttModel = remoteAccount.getString("sttModel"),
+                    arenaProviderA = remoteAccount.getString("arenaProviderA"),
+                    arenaModelA = remoteAccount.getString("arenaModelA"),
+                    arenaPersonaA = remoteAccount.getString("arenaPersonaA"),
+                    arenaProviderB = remoteAccount.getString("arenaProviderB"),
+                    arenaModelB = remoteAccount.getString("arenaModelB"),
+                    arenaPersonaB = remoteAccount.getString("arenaPersonaB"),
                     maxAutoRetries = remoteAccount.getLong("maxAutoRetries")?.toInt(),
                     codeWordWrap = remoteAccount.getBoolean("codeWordWrap"),
                 )
@@ -379,6 +397,18 @@ class CloudSyncManager(
                     "hiddenProviderIds" to currentPrefs.hiddenProviderIds.toList(),
                     "moodMethod" to currentPrefs.moodMethod,
                     "typingSoundStyle" to currentPrefs.typingSoundStyle,
+                    "typingSpeed" to currentPrefs.typingSpeed,
+                    "ttsEngine" to currentPrefs.ttsEngine,
+                    "ttsVoiceName" to currentPrefs.ttsVoiceName,
+                    "sttEngine" to currentPrefs.sttEngine,
+                    "sttApiKey" to currentPrefs.sttApiKey,
+                    "sttModel" to currentPrefs.sttModel,
+                    "arenaProviderA" to currentPrefs.arenaProviderA,
+                    "arenaModelA" to currentPrefs.arenaModelA,
+                    "arenaPersonaA" to currentPrefs.arenaPersonaA,
+                    "arenaProviderB" to currentPrefs.arenaProviderB,
+                    "arenaModelB" to currentPrefs.arenaModelB,
+                    "arenaPersonaB" to currentPrefs.arenaPersonaB,
                     "maxAutoRetries" to currentPrefs.maxAutoRetries,
                     "codeWordWrap" to currentPrefs.codeWordWrap,
                     "totalSessions" to maxOf(allSessions.size.toLong(), remoteAccount?.getLong("totalSessions") ?: 0L),
@@ -545,6 +575,12 @@ class CloudSyncManager(
                                 pinned = doc.getBoolean("pinned") ?: false,
                                 archived = doc.getBoolean("archived") ?: false,
                                 isArena = doc.getBoolean("isArena") ?: false,
+                                arenaProviderA = doc.getString("arenaProviderA") ?: local?.arenaProviderA ?: "preset_pollinations_free",
+                                arenaModelA = doc.getString("arenaModelA") ?: local?.arenaModelA ?: "openai-fast",
+                                arenaPersonaA = doc.getString("arenaPersonaA") ?: local?.arenaPersonaA ?: "default",
+                                arenaProviderB = doc.getString("arenaProviderB") ?: local?.arenaProviderB ?: "preset_pollinations_free",
+                                arenaModelB = doc.getString("arenaModelB") ?: local?.arenaModelB ?: "openai-fast",
+                                arenaPersonaB = doc.getString("arenaPersonaB") ?: local?.arenaPersonaB ?: "celeste",
                                 activeLeafId = doc.getString("activeLeafId").orEmpty(),
                                 messageCount = (doc.getLong("messageCount") ?: 0L).toInt(),
                                 tokenCount = doc.getLong("tokenCount") ?: 0L,
@@ -602,6 +638,12 @@ class CloudSyncManager(
                                 "pinned" to ls.pinned,
                                 "archived" to ls.archived,
                                 "isArena" to ls.isArena,
+                                "arenaProviderA" to ls.arenaProviderA,
+                                "arenaModelA" to ls.arenaModelA,
+                                "arenaPersonaA" to ls.arenaPersonaA,
+                                "arenaProviderB" to ls.arenaProviderB,
+                                "arenaModelB" to ls.arenaModelB,
+                                "arenaPersonaB" to ls.arenaPersonaB,
                                 "activeLeafId" to ls.activeLeafId,
                                 "messageCount" to ls.messageCount,
                                 "tokenCount" to ls.tokenCount,

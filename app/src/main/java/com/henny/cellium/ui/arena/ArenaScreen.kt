@@ -10,12 +10,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -129,7 +131,7 @@ fun ArenaScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .imePadding(),
+            .windowInsetsPadding(WindowInsets.safeDrawing),
     ) {
         // Header
         Row(
@@ -514,8 +516,10 @@ private fun ArenaSlotCard(
             shape = RoundedCornerShape(8.dp),
             color = accent.copy(alpha = 0.14f),
         ) {
+            val cleanModel = modelName.removePrefix("models/").substringAfterLast('/').ifBlank { "select model" }
+            val shortProv = providerName.substringBefore(" (").trim()
             Text(
-                text = "${providerName.take(14)} · ${modelName.ifBlank { "select model" }.take(14)}",
+                text = "${cleanModel.take(18)} · ${shortProv.take(12)}",
                 style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
                 color = CelLavender,
                 maxLines = 1,

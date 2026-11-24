@@ -12,6 +12,7 @@ import android.service.voice.VoiceInteractionService
 import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
 import android.speech.RecognitionListener
+import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
@@ -33,14 +34,33 @@ import com.henny.cellium.core.PreferencesStore
 import com.henny.cellium.data.BuiltInPersonas
 import com.henny.cellium.data.CustomPersona
 import com.henny.cellium.data.local.CelliumDatabase
+import com.henny.cellium.data.local.MessageEntity
+import com.henny.cellium.data.local.SessionEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.abs
+
+/**
+ * Required companion RecognitionService declared in voice_interaction_service.xml so Android 14/15/16
+ * VoiceInteractionManagerService keeps Cellium locked as the Default Digital Assistant instead of
+ * resetting to "None".
+ */
+class CelliumRecognitionService : RecognitionService() {
+    override fun onStartListening(recognizerIntent: Intent?, listener: Callback?) {
+        runCatching { listener?.error(SpeechRecognizer.ERROR_CLIENT) }
+    }
+
+    override fun onCancel(listener: Callback?) = Unit
+
+    override fun onStopListening(listener: Callback?) = Unit
+}
 
 /**
  * Default Digital Assistant Service for Android (Gemini replacement).
@@ -49,6 +69,13 @@ import kotlin.math.abs
 class CelliumVoiceInteractionService : VoiceInteractionService() {
     override fun onReady() {
         super.onReady()
+    }
+
+    override fun onLaunchVoiceAssistFromKeyguard() {
+        showSession(
+            Bundle(),
+            VoiceInteractionSession.SHOW_WITH_ASSIST or VoiceInteractionSession.SHOW_WITH_SCREENSHOT,
+        )
     }
 }
 
@@ -61,7 +88,8 @@ class CelliumVoiceInteractionSessionService : VoiceInteractionSessionService() {
  * Gemini-style transparent Assistant overlay right over the current app:
  * - Movable animated Cel dot-matrix face with tap-to-hide speech bubble right beside her
  * - Captures current screen via Android onHandleScreenshot() with toggleable Screen Vision chip
- * - Sleek bottom pill bar for typing, mic toggle, screen vision toggle, and dismiss
+ * - Persists turns to Room and keeps conversational memory + active persona
+ * - Shows "Starting mic..." until SpeechRecognizer.onReadyForSpeech fires "Listening..."
  */
 class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
 
@@ -80,6 +108,8 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var isListening = false
+    private var assistSessionId: String? = null
+    private var lastMessageId: String? = null
 
     private fun dp(v: Float): Int = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP, v, context.resources.displayMetrics
@@ -123,7 +153,6 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             setOnClickListener { hide() }
         }
 
-        // Movable Cel floating face + adjacent tap-to-hide speech bubble
         val celRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -169,7 +198,6 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             bottomMargin = dp(112f)
         }
 
-        // Make Cel row smoothly draggable anywhere on screen
         var downX = 0f
         var downY = 0f
         var startTx = 0f
@@ -204,7 +232,6 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         }
         root.addView(celRow, celLp)
 
-        // Bottom Gemini-style pill composer
         val bottomCol = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14f), dp(8f), dp(14f), dp(22f))
@@ -344,29 +371,34 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private fun startListening() {
         tts?.stop()
         isListening = true
-        faceView?.updateState(newMood = "listening", isListening = true)
-        showBubble("Listening...")
+        faceView?.updateState(newMood = "listening", isListening = true, isMicReady = false)
+        showBubble("Starting mic...")
         runCatching {
             speechRecognizer?.destroy()
             val sr = SpeechRecognizer.createSpeechRecognizer(context)
             speechRecognizer = sr
             sr.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) = Unit
+                override fun onReadyForSpeech(params: Bundle?) {
+                    mainHandler.post {
+                        faceView?.updateState(newMood = "listening", isListening = true, isMicReady = true)
+                        showBubble("Listening...")
+                    }
+                }
                 override fun onBeginningOfSpeech() = Unit
                 override fun onRmsChanged(rmsdB: Float) = Unit
                 override fun onBufferReceived(buffer: ByteArray?) = Unit
                 override fun onEndOfSpeech() {
                     isListening = false
-                    faceView?.updateState(newMood = "thinking", isListening = false)
+                    faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
                 }
                 override fun onError(error: Int) {
                     isListening = false
-                    faceView?.updateState(newMood = "idle", isListening = false)
+                    faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                 }
                 override fun onResults(results: Bundle?) {
                     isListening = false
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty().trim()
-                    if (text.isNotEmpty()) askCel(text) else faceView?.updateState(newMood = "idle", isListening = false)
+                    if (text.isNotEmpty()) askCel(text) else faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                 }
                 override fun onPartialResults(partialResults: Bundle?) {
                     val p = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
@@ -386,7 +418,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private fun stopListening() {
         isListening = false
         runCatching { speechRecognizer?.stopListening() }
-        faceView?.updateState(isListening = false)
+        faceView?.updateState(isListening = false, isMicReady = false)
     }
 
     private fun showBubble(text: String) {
@@ -399,7 +431,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     }
 
     private fun askCel(userText: String) {
-        faceView?.updateState(newMood = "thinking", isListening = false)
+        faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
         showBubble("Thinking...")
         scope.launch {
             try {
@@ -412,9 +444,36 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 val personas = dao.getAllPersonasOnce().map {
                     CustomPersona(it.id, it.name, it.iconKey, it.tagline, it.systemPrompt, it.accentHex)
                 }
-                val persona = BuiltInPersonas.resolve(prefs.defaultPersonaId, personas)
+                val latestNonArena = dao.getAllSessionsOnce().firstOrNull { !it.isArena }
+                val personaId = latestNonArena?.personaId?.ifBlank { prefs.defaultPersonaId } ?: prefs.defaultPersonaId
+                val persona = BuiltInPersonas.resolve(personaId, personas)
                 val memories = dao.getAllMemoriesOnce()
                 val bmp = if (includeScreenVision) capturedScreenshot else null
+
+                val sid = assistSessionId ?: UUID.randomUUID().toString().also { newSid ->
+                    assistSessionId = newSid
+                    dao.upsertSession(
+                        SessionEntity(
+                            id = newSid,
+                            title = "Assistant · ${userText.take(32)}",
+                            personaId = persona.id,
+                            providerId = prov.id,
+                            modelName = prov.selectedModel,
+                        )
+                    )
+                }
+                val priorHistory = dao.getMessagesForSessionOnce(sid)
+                val userMsgId = UUID.randomUUID().toString()
+                dao.upsertMessage(
+                    MessageEntity(
+                        id = userMsgId,
+                        sessionId = sid,
+                        parentId = lastMessageId ?: priorHistory.lastOrNull()?.id,
+                        role = "user",
+                        content = userText,
+                        tokenEstimate = ProviderPresets.estimateTokens(userText),
+                    )
+                )
 
                 val sysPrompt = llmClient.buildSystemPrompt(
                     persona = persona,
@@ -433,25 +492,68 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 )
 
                 val sb = StringBuilder()
-                llmClient.streamChat(
-                    provider = prov,
-                    systemPrompt = sysPrompt,
-                    history = emptyList(),
-                    userPrompt = userText,
-                    imageBitmap = bmp,
-                ).collect { chunk ->
-                    if (chunk.contentDelta.isNotEmpty()) {
-                        sb.append(chunk.contentDelta)
-                        val (_, clean) = ProviderPresets.parseThoughts(sb.toString())
-                        val (tagMood, body) = MoodDetector.extractInlineMoodTag(clean)
-                        if (tagMood != null) faceView?.updateState(newMood = tagMood, newGender = prefs.avatarGender)
-                        if (body.isNotBlank()) showBubble(body)
+                val maxRetries = prefs.maxAutoRetries.coerceIn(0, 3)
+                var attempt = 0
+                while (true) {
+                    sb.clear()
+                    try {
+                        llmClient.streamChat(
+                            provider = prov,
+                            systemPrompt = sysPrompt,
+                            history = priorHistory.takeLast(14),
+                            userPrompt = userText,
+                            imageBitmap = bmp,
+                        ).collect { chunk ->
+                            if (chunk.contentDelta.isNotEmpty()) {
+                                sb.append(chunk.contentDelta)
+                                val (_, clean) = ProviderPresets.parseThoughts(sb.toString())
+                                val (tagMood, body) = MoodDetector.extractInlineMoodTag(clean)
+                                if (tagMood != null) faceView?.updateState(newMood = tagMood, newGender = prefs.avatarGender)
+                                if (body.isNotBlank()) showBubble(body)
+                            }
+                        }
+                        break
+                    } catch (e: Exception) {
+                        if (!UniversalLlmClient.isRetryableError(e) || attempt >= maxRetries) throw e
+                        attempt++
+                        showBubble("Busy — retrying ($attempt/$maxRetries)...")
+                        delay(1200L * attempt)
                     }
                 }
+
                 val (_, cleanFinal) = ProviderPresets.parseThoughts(sb.toString())
                 val (tagMood, finalBody) = MoodDetector.extractInlineMoodTag(cleanFinal)
                 val reply = finalBody.ifBlank { cleanFinal.ifBlank { "All set!" } }
                 val mood = tagMood ?: MoodDetector.detectMood(reply)
+
+                val assistantMsgId = UUID.randomUUID().toString()
+                lastMessageId = assistantMsgId
+                dao.upsertMessage(
+                    MessageEntity(
+                        id = assistantMsgId,
+                        sessionId = sid,
+                        parentId = userMsgId,
+                        role = "assistant",
+                        speakerLabel = persona.name,
+                        content = reply,
+                        mood = mood,
+                        providerName = prov.name,
+                        modelName = prov.selectedModel,
+                        tokenEstimate = ProviderPresets.estimateTokens(reply),
+                    )
+                )
+                dao.getSession(sid)?.let { s ->
+                    val count = dao.getMessagesForSessionOnce(sid).size
+                    dao.upsertSession(
+                        s.copy(
+                            activeLeafId = assistantMsgId,
+                            messageCount = count,
+                            lastMessagePreview = reply.take(140),
+                            updatedAtMs = System.currentTimeMillis(),
+                        )
+                    )
+                }
+
                 faceView?.updateState(newMood = mood, newGender = prefs.avatarGender)
                 showBubble(reply)
                 if (ttsReady) {

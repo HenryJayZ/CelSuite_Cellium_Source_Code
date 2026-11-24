@@ -1,6 +1,8 @@
 package com.henny.cellium
 
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -110,17 +112,26 @@ fun CelliumApp(viewModel: CelliumViewModel) {
     var googleErr by remember { mutableStateOf<String?>(null) }
 
     fun triggerGoogleSignIn() {
-        val activity = context as? Activity ?: return
+        val activity = context.findActivity()
+        if (activity == null) {
+            val msg = "Unable to launch Google Sign-In from current context."
+            googleErr = msg
+            viewModel.showBanner(msg)
+            return
+        }
         googleBusy = true
         googleErr = null
         scope.launch {
             val res = authManager.signInWithGoogle(activity)
             googleBusy = false
-            res.onSuccess {
+            res.onSuccess { profile ->
                 viewModel.prefsStore.setGuestMode(false)
+                viewModel.showBanner("Signed in as ${profile.email ?: profile.displayName ?: "Google user"}. Syncing...")
                 viewModel.checkAndSyncAfterGoogleSignIn()
             }.onFailure { err ->
-                googleErr = err.localizedMessage ?: "Google Sign-In failed"
+                val msg = err.localizedMessage ?: "Google Sign-In failed"
+                googleErr = msg
+                viewModel.showBanner(msg)
             }
         }
     }
@@ -382,4 +393,10 @@ fun CelliumApp(viewModel: CelliumViewModel) {
             },
         )
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

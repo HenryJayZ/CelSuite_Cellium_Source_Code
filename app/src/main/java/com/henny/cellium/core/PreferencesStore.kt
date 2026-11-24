@@ -78,6 +78,7 @@ data class CelliumPreferences(
     val highFpsMode: Boolean = true,
     val fontScale: Float = 1.0f,
     val floatingMiniCel: Boolean = false,
+    val floatingTipsShown: Boolean = false,
     val codeWordWrap: Boolean = true,
 
     // Shizuku, Agent & Tools
@@ -96,24 +97,37 @@ data class CelliumPreferences(
     val hiddenProviderIds: Set<String> = emptySet(),
     val starredModelsJson: String = "[]",
 
-    // Voice, TTS, SFX, Haptics & Wake Word
+    // Voice, TTS, STT, Typing Speed, SFX, Haptics & Wake Word
     val soundsEnabled: Boolean = true,
     val animaleseEnabled: Boolean = true,
     val typingSoundStyle: String = "animal_crossing", // "animal_crossing" or "scratchin_melodii"
+    val typingSpeed: String = "medium", // "super_slow", "slow", "medium", "fast", "very_fast", "instant"
     val hapticsEnabled: Boolean = true,
     val sfxVolume: Float = 0.80f,
-    val ttsVoiceName: String = "",
+    val ttsEngine: String = "edge", // "edge", "google", "system"
+    val ttsVoiceName: String = "en-US-AriaNeural",
     val ttsPitch: Float = 1.06f,
     val ttsSpeechRate: Float = 1.04f,
+    val sttEngine: String = "device", // "device", "groq_whisper", "pollinations_audio", "openai_whisper", "huggingface_whisper"
+    val sttApiKey: String = "",
+    val sttModel: String = "",
     val autoReadReplies: Boolean = false,
     val liveHandsFreeLoop: Boolean = true,
     val wakeWordEnabled: Boolean = false,
     val wakeWordCustomPath: String = "",
     val wakeWordSensitivity: Float = 0.55f,
 
+    // Arena Mode Remembered Slots (synced with Cloud)
+    val arenaProviderA: String = "preset_pollinations_free",
+    val arenaModelA: String = "openai-fast",
+    val arenaPersonaA: String = "default",
+    val arenaProviderB: String = "preset_pollinations_free",
+    val arenaModelB: String = "openai-fast",
+    val arenaPersonaB: String = "celeste",
+
     // Multi-Provider Illume Image Studio + Kaggle GPU Notebook (.json)
-    val imagineProvider: String = "pollinations",
-    val imagineModel: String = "sana",
+    val imagineProvider: String = "aihorde",
+    val imagineModel: String = "Auto (Fastest)",
     val imagineApiKey: String = "",
     val imagineCustomUrl: String = "",
     val kaggleUsername: String = "",
@@ -181,16 +195,28 @@ class PreferencesStore(context: Context) {
         val SOUNDS_ENABLED = booleanPreferencesKey("sounds_enabled")
         val ANIMALESE_ENABLED = booleanPreferencesKey("animalese_enabled")
         val TYPING_SOUND_STYLE = stringPreferencesKey("typing_sound_style")
+        val TYPING_SPEED = stringPreferencesKey("typing_speed")
         val HAPTICS_ENABLED = booleanPreferencesKey("haptics_enabled")
         val SFX_VOLUME = floatPreferencesKey("sfx_volume")
+        val TTS_ENGINE = stringPreferencesKey("tts_engine")
         val TTS_VOICE = stringPreferencesKey("tts_voice")
         val TTS_PITCH = floatPreferencesKey("tts_pitch")
         val TTS_RATE = floatPreferencesKey("tts_rate")
+        val STT_ENGINE = stringPreferencesKey("stt_engine")
+        val STT_API_KEY = stringPreferencesKey("stt_api_key")
+        val STT_MODEL = stringPreferencesKey("stt_model")
         val AUTO_READ = booleanPreferencesKey("auto_read")
         val LIVE_HANDS_FREE = booleanPreferencesKey("live_hands_free")
         val WAKE_WORD_ENABLED = booleanPreferencesKey("wake_word_enabled")
         val WAKE_WORD_CUSTOM_PATH = stringPreferencesKey("wake_word_custom_path")
         val WAKE_WORD_SENSITIVITY = floatPreferencesKey("wake_word_sensitivity")
+        val FLOATING_TIPS_SHOWN = booleanPreferencesKey("floating_tips_shown")
+        val ARENA_PROVIDER_A = stringPreferencesKey("arena_provider_a")
+        val ARENA_MODEL_A = stringPreferencesKey("arena_model_a")
+        val ARENA_PERSONA_A = stringPreferencesKey("arena_persona_a")
+        val ARENA_PROVIDER_B = stringPreferencesKey("arena_provider_b")
+        val ARENA_MODEL_B = stringPreferencesKey("arena_model_b")
+        val ARENA_PERSONA_B = stringPreferencesKey("arena_persona_b")
         val IMAGINE_PROVIDER = stringPreferencesKey("imagine_provider")
         val IMAGINE_MODEL = stringPreferencesKey("imagine_model")
         val IMAGINE_API_KEY = stringPreferencesKey("imagine_api_key")
@@ -225,11 +251,19 @@ class PreferencesStore(context: Context) {
     }
 
     val preferencesFlow: Flow<CelliumPreferences> = dataStore.data.map { p ->
+        val savedImagineProv = p[Keys.IMAGINE_PROVIDER]
+        val savedImagineKey = p[Keys.IMAGINE_API_KEY].orEmpty()
+        // Auto-upgrade legacy keyless Pollinations default (which now returns 402/503) to keyless AI Horde
+        val effectiveImagineProv = when {
+            savedImagineProv.isNullOrBlank() -> "aihorde"
+            savedImagineProv == "pollinations" && savedImagineKey.isBlank() -> "aihorde"
+            else -> savedImagineProv
+        }
         val rawImagineModel = p[Keys.IMAGINE_MODEL]
-        val safeImagineModel = if (rawImagineModel.isNullOrBlank() || (rawImagineModel == "flux" && (p[Keys.IMAGINE_PROVIDER] ?: "pollinations") == "pollinations" && p[Keys.IMAGINE_API_KEY].isNullOrBlank())) {
-            "sana"
-        } else {
-            rawImagineModel
+        val safeImagineModel = when {
+            effectiveImagineProv == "aihorde" && (rawImagineModel.isNullOrBlank() || rawImagineModel == "sana" || rawImagineModel == "flux") -> "Auto (Fastest)"
+            rawImagineModel.isNullOrBlank() -> "Auto (Fastest)"
+            else -> rawImagineModel
         }
         CelliumPreferences(
             termsAccepted = p[Keys.TERMS_ACCEPTED] ?: false,
@@ -250,6 +284,7 @@ class PreferencesStore(context: Context) {
             highFpsMode = p[Keys.HIGH_FPS] ?: true,
             fontScale = p[Keys.FONT_SCALE] ?: 1.0f,
             floatingMiniCel = p[Keys.FLOATING_MINI_CEL] ?: false,
+            floatingTipsShown = p[Keys.FLOATING_TIPS_SHOWN] ?: false,
             codeWordWrap = p[Keys.CODE_WORD_WRAP] ?: true,
             shizukuAutoGuard = p[Keys.SHIZUKU_AUTO_GUARD] ?: true,
             ramGuardThresholdMb = p[Keys.RAM_GUARD_THRESHOLD_MB] ?: 1536,
@@ -266,19 +301,30 @@ class PreferencesStore(context: Context) {
             soundsEnabled = p[Keys.SOUNDS_ENABLED] ?: true,
             animaleseEnabled = p[Keys.ANIMALESE_ENABLED] ?: true,
             typingSoundStyle = p[Keys.TYPING_SOUND_STYLE] ?: "animal_crossing",
+            typingSpeed = p[Keys.TYPING_SPEED] ?: "medium",
             hapticsEnabled = p[Keys.HAPTICS_ENABLED] ?: true,
             sfxVolume = p[Keys.SFX_VOLUME] ?: 0.80f,
-            ttsVoiceName = p[Keys.TTS_VOICE] ?: "",
+            ttsEngine = p[Keys.TTS_ENGINE] ?: "edge",
+            ttsVoiceName = p[Keys.TTS_VOICE] ?: "en-US-AriaNeural",
             ttsPitch = p[Keys.TTS_PITCH] ?: 1.06f,
             ttsSpeechRate = p[Keys.TTS_RATE] ?: 1.04f,
+            sttEngine = p[Keys.STT_ENGINE] ?: "device",
+            sttApiKey = p[Keys.STT_API_KEY] ?: "",
+            sttModel = p[Keys.STT_MODEL] ?: "",
             autoReadReplies = p[Keys.AUTO_READ] ?: false,
             liveHandsFreeLoop = p[Keys.LIVE_HANDS_FREE] ?: true,
             wakeWordEnabled = p[Keys.WAKE_WORD_ENABLED] ?: false,
             wakeWordCustomPath = p[Keys.WAKE_WORD_CUSTOM_PATH] ?: "",
             wakeWordSensitivity = p[Keys.WAKE_WORD_SENSITIVITY] ?: 0.55f,
-            imagineProvider = p[Keys.IMAGINE_PROVIDER] ?: "pollinations",
+            arenaProviderA = p[Keys.ARENA_PROVIDER_A] ?: "preset_pollinations_free",
+            arenaModelA = p[Keys.ARENA_MODEL_A] ?: "openai-fast",
+            arenaPersonaA = p[Keys.ARENA_PERSONA_A] ?: "default",
+            arenaProviderB = p[Keys.ARENA_PROVIDER_B] ?: "preset_pollinations_free",
+            arenaModelB = p[Keys.ARENA_MODEL_B] ?: "openai-fast",
+            arenaPersonaB = p[Keys.ARENA_PERSONA_B] ?: "celeste",
+            imagineProvider = effectiveImagineProv,
             imagineModel = safeImagineModel,
-            imagineApiKey = p[Keys.IMAGINE_API_KEY] ?: "",
+            imagineApiKey = savedImagineKey,
             imagineCustomUrl = p[Keys.IMAGINE_CUSTOM_URL] ?: "",
             kaggleUsername = p[Keys.KAGGLE_USERNAME] ?: "",
             kaggleKey = p[Keys.KAGGLE_KEY] ?: "",
@@ -295,17 +341,17 @@ class PreferencesStore(context: Context) {
                 includeIllumeInstructions = p[Keys.CTX_ILLUME] ?: true,
                 includeAgentInstructions = p[Keys.CTX_AGENT] ?: true,
                 includeMoodInstructions = p[Keys.CTX_MOOD] ?: true,
-                historyLimit = (p[Keys.CTX_HISTORY_LIMIT] ?: 12).coerceIn(2, 48),
-                ggufContextLength = (p[Keys.GGUF_CTX_LEN] ?: 1024).coerceIn(256, 8192),
-                ggufMaxTokens = (p[Keys.GGUF_MAX_TOKENS] ?: 512).coerceIn(64, 4096),
+                historyLimit = (p[Keys.CTX_HISTORY_LIMIT] ?: 12).coerceIn(2, 64),
+                ggufContextLength = (p[Keys.GGUF_CTX_LEN] ?: 1024).coerceIn(256, 32768),
+                ggufMaxTokens = (p[Keys.GGUF_MAX_TOKENS] ?: 512).coerceIn(64, 16384),
                 ggufTemperature = (p[Keys.GGUF_TEMP] ?: 0.7f).coerceIn(0f, 2f),
                 ggufTopP = (p[Keys.GGUF_TOP_P] ?: 0.90f).coerceIn(0.1f, 1f),
                 ggufTopK = (p[Keys.GGUF_TOP_K] ?: 40).coerceIn(1, 128),
                 ggufRepeatPenalty = (p[Keys.GGUF_REPEAT_PENALTY] ?: 1.12f).coerceIn(1.0f, 1.5f),
-                ggufThreads = (p[Keys.GGUF_THREADS] ?: 4).coerceIn(1, 8),
+                ggufThreads = (p[Keys.GGUF_THREADS] ?: 4).coerceIn(1, 16),
                 ggufUseMmap = p[Keys.GGUF_USE_MMAP] ?: true,
                 ggufFlashAttention = p[Keys.GGUF_FLASH_ATTN] ?: false,
-                ggufGpuLayers = (p[Keys.GGUF_GPU_LAYERS] ?: 0).coerceIn(0, 32),
+                ggufGpuLayers = (p[Keys.GGUF_GPU_LAYERS] ?: 0).coerceIn(0, 99),
             ),
         )
     }
@@ -384,29 +430,30 @@ class PreferencesStore(context: Context) {
             it[Keys.CTX_ILLUME] = cfg.includeIllumeInstructions
             it[Keys.CTX_AGENT] = cfg.includeAgentInstructions
             it[Keys.CTX_MOOD] = cfg.includeMoodInstructions
-            it[Keys.CTX_HISTORY_LIMIT] = cfg.historyLimit.coerceIn(2, 48)
-            it[Keys.GGUF_CTX_LEN] = cfg.ggufContextLength.coerceIn(256, 8192)
-            it[Keys.GGUF_MAX_TOKENS] = cfg.ggufMaxTokens.coerceIn(64, 4096)
+            it[Keys.CTX_HISTORY_LIMIT] = cfg.historyLimit.coerceIn(2, 64)
+            it[Keys.GGUF_CTX_LEN] = cfg.ggufContextLength.coerceIn(256, 32768)
+            it[Keys.GGUF_MAX_TOKENS] = cfg.ggufMaxTokens.coerceIn(64, 16384)
             it[Keys.GGUF_TEMP] = cfg.ggufTemperature.coerceIn(0f, 2f)
             it[Keys.GGUF_TOP_P] = cfg.ggufTopP.coerceIn(0.1f, 1f)
             it[Keys.GGUF_TOP_K] = cfg.ggufTopK.coerceIn(1, 128)
             it[Keys.GGUF_REPEAT_PENALTY] = cfg.ggufRepeatPenalty.coerceIn(1.0f, 1.5f)
-            it[Keys.GGUF_THREADS] = cfg.ggufThreads.coerceIn(1, 8)
+            it[Keys.GGUF_THREADS] = cfg.ggufThreads.coerceIn(1, 16)
             it[Keys.GGUF_USE_MMAP] = cfg.ggufUseMmap
             it[Keys.GGUF_FLASH_ATTN] = cfg.ggufFlashAttention
-            it[Keys.GGUF_GPU_LAYERS] = cfg.ggufGpuLayers.coerceIn(0, 32)
+            it[Keys.GGUF_GPU_LAYERS] = cfg.ggufGpuLayers.coerceIn(0, 99)
         }
     }
     suspend fun updateShizukuSettings(autoGuard: Boolean, thresholdMb: Int, autoApproveSafe: Boolean) {
         dataStore.edit {
             it[Keys.SHIZUKU_AUTO_GUARD] = autoGuard
-            it[Keys.RAM_GUARD_THRESHOLD_MB] = thresholdMb.coerceIn(512, 4096)
+            it[Keys.RAM_GUARD_THRESHOLD_MB] = thresholdMb.coerceIn(512, 16384)
             it[Keys.AGENT_AUTO_APPROVE_SAFE] = autoApproveSafe
         }
     }
     suspend fun updateAgentMode(enabled: Boolean) { dataStore.edit { it[Keys.AGENT_MODE] = enabled } }
     suspend fun updateWebSearchAuto(enabled: Boolean) { dataStore.edit { it[Keys.WEB_SEARCH_AUTO] = enabled } }
     suspend fun updateNotificationsEnabled(enabled: Boolean) { dataStore.edit { it[Keys.NOTIFICATIONS_ENABLED] = enabled } }
+    suspend fun updateTypingSpeed(speed: String) { dataStore.edit { it[Keys.TYPING_SPEED] = speed } }
     suspend fun updateAudioSettings(
         sounds: Boolean,
         animalese: Boolean,
@@ -429,14 +476,49 @@ class PreferencesStore(context: Context) {
             if (sensitivity != null) it[Keys.WAKE_WORD_SENSITIVITY] = sensitivity.coerceIn(0.20f, 0.95f)
         }
     }
-    suspend fun updateVoiceSettings(voice: String, pitch: Float, rate: Float, autoRead: Boolean, handsFree: Boolean) {
+    suspend fun updateVoiceSettings(
+        voice: String,
+        pitch: Float,
+        rate: Float,
+        autoRead: Boolean,
+        handsFree: Boolean,
+        ttsEngine: String? = null,
+    ) {
         dataStore.edit {
+            if (ttsEngine != null) it[Keys.TTS_ENGINE] = ttsEngine
             it[Keys.TTS_VOICE] = voice
             it[Keys.TTS_PITCH] = pitch.coerceIn(0.65f, 1.55f)
             it[Keys.TTS_RATE] = rate.coerceIn(0.65f, 1.65f)
             it[Keys.AUTO_READ] = autoRead
             it[Keys.LIVE_HANDS_FREE] = handsFree
         }
+    }
+    suspend fun updateSttSettings(engine: String, apiKey: String? = null, model: String? = null) {
+        dataStore.edit {
+            it[Keys.STT_ENGINE] = engine
+            if (apiKey != null) it[Keys.STT_API_KEY] = apiKey.trim()
+            if (model != null) it[Keys.STT_MODEL] = model.trim()
+        }
+    }
+    suspend fun updateArenaDefaults(
+        providerA: String,
+        modelA: String,
+        personaA: String,
+        providerB: String,
+        modelB: String,
+        personaB: String,
+    ) {
+        dataStore.edit {
+            it[Keys.ARENA_PROVIDER_A] = providerA
+            it[Keys.ARENA_MODEL_A] = modelA
+            it[Keys.ARENA_PERSONA_A] = personaA
+            it[Keys.ARENA_PROVIDER_B] = providerB
+            it[Keys.ARENA_MODEL_B] = modelB
+            it[Keys.ARENA_PERSONA_B] = personaB
+        }
+    }
+    suspend fun markFloatingTipsShown() {
+        dataStore.edit { it[Keys.FLOATING_TIPS_SHOWN] = true }
     }
     suspend fun updateImagineConfig(provider: String, model: String, apiKey: String, customUrl: String) {
         dataStore.edit {
@@ -458,7 +540,7 @@ class PreferencesStore(context: Context) {
         dataStore.edit {
             it[Keys.LOCAL_MODEL_PATH] = path
             it[Keys.LOCAL_MODEL_NAME] = name
-            it[Keys.LOCAL_MAX_TOKENS] = maxTokens.coerceIn(256, 4096)
+            it[Keys.LOCAL_MAX_TOKENS] = maxTokens.coerceIn(256, 16384)
             it[Keys.LOCAL_USE_GPU] = useGpu
         }
     }
@@ -485,6 +567,18 @@ class PreferencesStore(context: Context) {
         hiddenProviderIds: Set<String>? = null,
         moodMethod: String? = null,
         typingSoundStyle: String? = null,
+        typingSpeed: String? = null,
+        ttsEngine: String? = null,
+        ttsVoiceName: String? = null,
+        sttEngine: String? = null,
+        sttApiKey: String? = null,
+        sttModel: String? = null,
+        arenaProviderA: String? = null,
+        arenaModelA: String? = null,
+        arenaPersonaA: String? = null,
+        arenaProviderB: String? = null,
+        arenaModelB: String? = null,
+        arenaPersonaB: String? = null,
         maxAutoRetries: Int? = null,
         codeWordWrap: Boolean? = null,
     ) {
@@ -516,6 +610,18 @@ class PreferencesStore(context: Context) {
             if (hiddenProviderIds != null) p[Keys.HIDDEN_PROVIDER_IDS] = hiddenProviderIds
             if (!moodMethod.isNullOrBlank()) p[Keys.MOOD_METHOD] = moodMethod
             if (!typingSoundStyle.isNullOrBlank()) p[Keys.TYPING_SOUND_STYLE] = typingSoundStyle
+            if (!typingSpeed.isNullOrBlank()) p[Keys.TYPING_SPEED] = typingSpeed
+            if (!ttsEngine.isNullOrBlank()) p[Keys.TTS_ENGINE] = ttsEngine
+            if (!ttsVoiceName.isNullOrBlank()) p[Keys.TTS_VOICE] = ttsVoiceName
+            if (!sttEngine.isNullOrBlank()) p[Keys.STT_ENGINE] = sttEngine
+            if (!sttApiKey.isNullOrBlank()) p[Keys.STT_API_KEY] = sttApiKey
+            if (!sttModel.isNullOrBlank()) p[Keys.STT_MODEL] = sttModel
+            if (!arenaProviderA.isNullOrBlank()) p[Keys.ARENA_PROVIDER_A] = arenaProviderA
+            if (!arenaModelA.isNullOrBlank()) p[Keys.ARENA_MODEL_A] = arenaModelA
+            if (!arenaPersonaA.isNullOrBlank()) p[Keys.ARENA_PERSONA_A] = arenaPersonaA
+            if (!arenaProviderB.isNullOrBlank()) p[Keys.ARENA_PROVIDER_B] = arenaProviderB
+            if (!arenaModelB.isNullOrBlank()) p[Keys.ARENA_MODEL_B] = arenaModelB
+            if (!arenaPersonaB.isNullOrBlank()) p[Keys.ARENA_PERSONA_B] = arenaPersonaB
             if (maxAutoRetries != null) p[Keys.MAX_AUTO_RETRIES] = maxAutoRetries.coerceIn(0, 15)
             if (codeWordWrap != null) p[Keys.CODE_WORD_WRAP] = codeWordWrap
         }

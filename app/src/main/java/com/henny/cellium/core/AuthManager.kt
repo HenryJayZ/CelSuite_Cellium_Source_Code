@@ -171,36 +171,107 @@ class AuthManager {
 
     suspend fun signInWithGoogle(activity: Activity): Result<UserProfile> {
         val clientId = try {
-            activity.getString(R.string.default_web_client_id)
+            activity.getString(R.string.default_web_client_id).trim()
         } catch (_: Exception) {
             return Result.failure(IllegalStateException("Google Sign-In configuration missing: default_web_client_id not found."))
         }
+        if (clientId.isBlank()) {
+            return Result.failure(IllegalStateException("Google Sign-In Web Client ID is blank."))
+        }
+
         val credentialManager = CredentialManager.create(activity)
-        val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
-        val request = GetCredentialRequest.Builder().addCredentialOption(signInOption).build()
-        return try {
+
+        // Tier 1: Standard "Sign in with Google" bottom sheet
+        val tier1Start = android.os.SystemClock.elapsedRealtime()
+        try {
+            val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
+            val request = GetCredentialRequest.Builder().addCredentialOption(signInOption).build()
             val cred = credentialManager.getCredential(activity, request).credential
             if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
                 val res = auth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
                 val profile = res.user?.toProfile()
                     ?: return Result.failure(IllegalStateException("Google Sign-In returned empty user."))
-                DevLogBuffer.add("INFO", "Auth", "Optional Google Sign-In succeeded: ${profile.email}")
-                Result.success(profile)
-            } else {
-                Result.failure(IllegalStateException("Unexpected credential type returned."))
+                DevLogBuffer.add("INFO", "Auth", "Google Sign-In (Tier 1) succeeded: ${profile.email}")
+                return Result.success(profile)
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: GetCredentialCancellationException) {
-            DevLogBuffer.add("WARN", "Auth", "Google Sign-In cancelled: ${e.message}")
-            Result.failure(
-                IllegalStateException(
-                    "Google Sign-In cancelled. If you didn't close the sheet, add this APK's SHA-1 fingerprint (8E:18:75:8C:E3:ED:AA:8A:00:CB:DF:D5:E6:D3:4E:57:8C:7C:E6:D1) to Firebase Console -> Project Settings -> Android App."
-                )
-            )
+            val elapsed = android.os.SystemClock.elapsedRealtime() - tier1Start
+            val msg = e.message.orEmpty()
+            val likelyConfigError = elapsed < 2500L ||
+                msg.contains("Developer console", ignoreCase = true) ||
+                msg.contains("28444") ||
+                msg.contains("[16]") ||
+                msg.contains("[10]") ||
+                msg.contains("reauth", ignoreCase = true)
+            DevLogBuffer.add("WARN", "Auth", "Tier 1 cancelled after ${elapsed}ms (likelyConfig=$likelyConfigError): $msg")
+            if (!likelyConfigError) {
+                return Result.failure(IllegalStateException("Google Sign-In cancelled."))
+            }
         } catch (e: Exception) {
-            DevLogBuffer.add("ERROR", "Auth", e.localizedMessage ?: "Google Sign-In failed")
+            DevLogBuffer.add("WARN", "Auth", "Tier 1 GetSignInWithGoogleOption failed: ${e.javaClass.simpleName}: ${e.localizedMessage}")
+        }
+
+        // Tier 2: CredentialManager GetGoogleIdOption (works on older Play Services / non-GMS sheets)
+        try {
+            val googleIdOption = GetGoogleIdOption.Builder()
+                .setFilterByAuthorizedAccounts(false)
+                .setServerClientId(clientId)
+                .setAutoSelectEnabled(false)
+                .build()
+            val request = GetCredentialRequest.Builder().addCredentialOption(googleIdOption).build()
+            val cred = credentialManager.getCredential(activity, request).credential
+            if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+                val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
+                val res = auth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
+                val profile = res.user?.toProfile()
+                    ?: return Result.failure(IllegalStateException("Google Sign-In returned empty user."))
+                DevLogBuffer.add("INFO", "Auth", "Google Sign-In (Tier 2) succeeded: ${profile.email}")
+                return Result.success(profile)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            DevLogBuffer.add("WARN", "Auth", "Tier 2 GetGoogleIdOption failed: ${e.javaClass.simpleName}: ${e.localizedMessage}")
+        }
+
+        // Tier 3: Firebase Auth Chrome Custom Tab OAuth fallback
+        val webFallback = signInWithGoogleWebFallback(activity)
+        if (webFallback.isSuccess) return webFallback
+
+        val fallbackErr = webFallback.exceptionOrNull()?.localizedMessage.orEmpty()
+        return Result.failure(
+            IllegalStateException(
+                if (fallbackErr.contains("INVALID_CERT_HASH", ignoreCase = true) || fallbackErr.isBlank()) {
+                    "Google Sign-In needs SHA-1 8E:18:75:8C:E3:ED:AA:8A:00:CB:DF:D5:E6:D3:4E:57:8C:7C:E6:D1 added to Firebase Console -> Project Settings -> CelSuite.HenryJayz.Cellium."
+                } else {
+                    "Google Sign-In failed: $fallbackErr"
+                }
+            )
+        )
+    }
+
+    private suspend fun signInWithGoogleWebFallback(activity: Activity): Result<UserProfile> {
+        return try {
+            val provider = com.google.firebase.auth.OAuthProvider.newBuilder("google.com")
+                .addCustomParameter("prompt", "select_account")
+                .build()
+            val pending = auth.pendingAuthResult
+            val res = if (pending != null) {
+                pending.await()
+            } else {
+                auth.startActivityForSignInWithProvider(activity, provider).await()
+            }
+            val profile = res.user?.toProfile()
+                ?: return Result.failure(IllegalStateException("Google browser sign-in returned empty user."))
+            DevLogBuffer.add("INFO", "Auth", "Google browser fallback sign-in succeeded: ${profile.email}")
+            Result.success(profile)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            DevLogBuffer.add("WARN", "Auth", "Google browser fallback failed: ${e.localizedMessage}")
             Result.failure(e)
         }
     }

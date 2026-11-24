@@ -32,11 +32,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Assistant
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Hearing
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Wallpaper
 import androidx.compose.material3.FilterChip
@@ -46,12 +50,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,14 +67,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.henny.cellium.assistant.FloatingCelOverlayService
 import com.henny.cellium.assistant.WakeWordService
 import com.henny.cellium.core.CelliumPreferences
+import com.henny.cellium.core.CelliumSttEngine
+import com.henny.cellium.core.CelliumTtsEngine
 import com.henny.cellium.ui.chat.CelliumViewModel
 import com.henny.cellium.ui.components.GlassCard
+import com.henny.cellium.ui.theme.CelAmber
 import com.henny.cellium.ui.theme.CelEmeraldThought
 import com.henny.cellium.ui.theme.CelLavender
 import com.henny.cellium.ui.theme.CelTerminalBg
@@ -85,6 +95,15 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.Locale
 
+private val TYPING_SPEED_OPTIONS = listOf(
+    "super_slow" to "Super Slow",
+    "slow" to "Slow",
+    "medium" to "Medium",
+    "fast" to "Fast",
+    "very_fast" to "Very Fast",
+    "instant" to "Instant (Live Stream)",
+)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ThemeWallpaperStudioCard(
@@ -95,6 +114,12 @@ fun ThemeWallpaperStudioCard(
     val visuals = LocalCelliumVisuals.current
     val scope = rememberCoroutineScope()
     var customHex by remember(prefs.customPrimaryHex) { mutableStateOf(prefs.customPrimaryHex) }
+
+    // Local drag states so sliders stay silky smooth at 60fps without thrashing DataStore
+    var dimDraft by remember(prefs.wallpaperDim) { mutableFloatStateOf(prefs.wallpaperDim) }
+    var glassDraft by remember(prefs.glassOpacity) { mutableFloatStateOf(prefs.glassOpacity) }
+    var glowDraft by remember(prefs.borderGlow) { mutableFloatStateOf(prefs.borderGlow) }
+    var particleDraft by remember(prefs.particleDensity) { mutableFloatStateOf(prefs.particleDensity.toFloat()) }
 
     val wallpaperPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
@@ -178,45 +203,49 @@ fun ThemeWallpaperStudioCard(
         }
 
         Spacer(Modifier.height(8.dp))
-        Text("Wallpaper Dim: ${(prefs.wallpaperDim * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+        Text("Wallpaper Dim: ${(dimDraft * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
         Slider(
-            value = prefs.wallpaperDim,
-            onValueChange = { v ->
+            value = dimDraft,
+            onValueChange = { dimDraft = it },
+            onValueChangeFinished = {
                 scope.launch {
-                    viewModel.prefsStore.updateGlassVisuals(v, prefs.glassOpacity, prefs.borderGlow, prefs.particleDensity, prefs.fontScale)
+                    viewModel.prefsStore.updateGlassVisuals(dimDraft, glassDraft, glowDraft, particleDraft.toInt(), prefs.fontScale)
                 }
             },
             valueRange = 0.15f..0.88f,
         )
 
-        Text("Glass Opacity: ${(prefs.glassOpacity * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+        Text("Glass Opacity: ${(glassDraft * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
         Slider(
-            value = prefs.glassOpacity,
-            onValueChange = { v ->
+            value = glassDraft,
+            onValueChange = { glassDraft = it },
+            onValueChangeFinished = {
                 scope.launch {
-                    viewModel.prefsStore.updateGlassVisuals(prefs.wallpaperDim, v, prefs.borderGlow, prefs.particleDensity, prefs.fontScale)
+                    viewModel.prefsStore.updateGlassVisuals(dimDraft, glassDraft, glowDraft, particleDraft.toInt(), prefs.fontScale)
                 }
             },
             valueRange = 0.35f..0.96f,
         )
 
-        Text("Border Glow: ${(prefs.borderGlow * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+        Text("Border Glow: ${(glowDraft * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
         Slider(
-            value = prefs.borderGlow,
-            onValueChange = { v ->
+            value = glowDraft,
+            onValueChange = { glowDraft = it },
+            onValueChangeFinished = {
                 scope.launch {
-                    viewModel.prefsStore.updateGlassVisuals(prefs.wallpaperDim, prefs.glassOpacity, v, prefs.particleDensity, prefs.fontScale)
+                    viewModel.prefsStore.updateGlassVisuals(dimDraft, glassDraft, glowDraft, particleDraft.toInt(), prefs.fontScale)
                 }
             },
             valueRange = 0.15f..1.0f,
         )
 
-        Text("Ambient Particles: ${prefs.particleDensity}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+        Text("Ambient Particles: ${particleDraft.toInt()}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
         Slider(
-            value = prefs.particleDensity.toFloat(),
-            onValueChange = { v ->
+            value = particleDraft,
+            onValueChange = { particleDraft = it },
+            onValueChangeFinished = {
                 scope.launch {
-                    viewModel.prefsStore.updateGlassVisuals(prefs.wallpaperDim, prefs.glassOpacity, prefs.borderGlow, v.toInt(), prefs.fontScale)
+                    viewModel.prefsStore.updateGlassVisuals(dimDraft, glassDraft, glowDraft, particleDraft.toInt(), prefs.fontScale)
                 }
             },
             valueRange = 0f..48f,
@@ -248,6 +277,12 @@ fun ThemeWallpaperStudioCard(
     }
 }
 
+private data class SystemVoiceItem(
+    val rawName: String,
+    val shortLabel: String,
+    val languageGroup: String,
+)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun VoiceAndAudioLabCard(
@@ -258,9 +293,22 @@ fun VoiceAndAudioLabCard(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var tts by remember { mutableStateOf<TextToSpeech?>(null) }
-    var voiceEntries by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    val selectedEngine = prefs.ttsEngine.ifBlank { CelliumTtsEngine.ENGINE_EDGE }
+
+    // System voices are ONLY loaded lazily when the user opens the "System" engine tab!
+    var systemVoices by remember { mutableStateOf<List<SystemVoiceItem>>(emptyList()) }
+    var expandedGroups by remember { mutableStateOf<Set<String>>(emptySet()) }
     var voiceSearch by remember { mutableStateOf("") }
+
+    // Smooth slider drafts
+    var pitchDraft by remember(prefs.ttsPitch) { mutableFloatStateOf(prefs.ttsPitch) }
+    var rateDraft by remember(prefs.ttsSpeechRate) { mutableFloatStateOf(prefs.ttsSpeechRate) }
+    var sfxVolDraft by remember(prefs.sfxVolume) { mutableFloatStateOf(prefs.sfxVolume) }
+    var wakeSensDraft by remember(prefs.wakeWordSensitivity) { mutableFloatStateOf(prefs.wakeWordSensitivity) }
+
+    // STT override drafts
+    var sttKeyDraft by remember(prefs.sttApiKey) { mutableStateOf(prefs.sttApiKey) }
+    var sttModelDraft by remember(prefs.sttModel) { mutableStateOf(prefs.sttModel) }
 
     val wakeMicLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
@@ -298,7 +346,11 @@ fun VoiceAndAudioLabCard(
         }
     }
 
-    DisposableEffect(context) {
+    // Lazily query system Android TTS voices ONLY if System tab is active
+    DisposableEffect(context, selectedEngine) {
+        if (selectedEngine != CelliumTtsEngine.ENGINE_SYSTEM || systemVoices.isNotEmpty()) {
+            return@DisposableEffect onDispose {}
+        }
         var engine: TextToSpeech? = null
         engine = TextToSpeech(context) { st ->
             if (st == TextToSpeech.SUCCESS) {
@@ -307,34 +359,60 @@ fun VoiceAndAudioLabCard(
                     ?.filter { !it.isNetworkConnectionRequired }
                     ?.sortedWith(
                         compareByDescending<android.speech.tts.Voice> { it.locale.language == "en" }
-                            .thenBy { it.locale.displayName }
+                            .thenBy { it.locale.displayLanguage }
+                            .thenBy { it.locale.displayCountry }
                             .thenBy { it.name }
                     )
                     ?.map { v ->
-                        val shortCode = v.name.substringAfterLast('#').substringAfterLast('-').take(16)
-                        val label = "${v.locale.displayLanguage} (${v.locale.country.ifBlank { v.locale.language }}) · $shortCode"
-                        v.name to label
+                        val shortCode = v.name.substringAfterLast('#').substringAfterLast('-').take(18)
+                        val region = v.locale.displayCountry.ifBlank { v.locale.country.uppercase() }
+                        val group = if (region.isNotBlank()) "${v.locale.displayLanguage} ($region)" else v.locale.displayLanguage
+                        SystemVoiceItem(
+                            rawName = v.name,
+                            shortLabel = shortCode.ifBlank { v.name.take(18) },
+                            languageGroup = group,
+                        )
                     }
                     .orEmpty()
-                voiceEntries = all
+                systemVoices = all
+                // Auto-expand English (United States) only if no search query
+                all.firstOrNull { it.languageGroup.startsWith("English (United States)") }?.let {
+                    expandedGroups = setOf(it.languageGroup)
+                }
             }
         }
-        tts = engine
         onDispose {
             engine?.stop()
             engine?.shutdown()
         }
     }
 
-    val filteredVoices = remember(voiceEntries, voiceSearch) {
+    val filteredEdgeVoices = remember(voiceSearch) {
         val q = voiceSearch.trim().lowercase()
-        if (q.isEmpty()) voiceEntries else voiceEntries.filter {
-            it.first.lowercase().contains(q) || it.second.lowercase().contains(q)
+        if (q.isEmpty()) CelliumTtsEngine.EDGE_VOICES
+        else CelliumTtsEngine.EDGE_VOICES.filter {
+            it.label.lowercase().contains(q) || it.accent.lowercase().contains(q) || it.gender.lowercase().contains(q) || it.id.lowercase().contains(q)
         }
     }
 
+    val filteredGoogleVoices = remember(voiceSearch) {
+        val q = voiceSearch.trim().lowercase()
+        if (q.isEmpty()) CelliumTtsEngine.GOOGLE_VOICES
+        else CelliumTtsEngine.GOOGLE_VOICES.filter {
+            it.label.lowercase().contains(q) || it.accent.lowercase().contains(q) || it.gender.lowercase().contains(q)
+        }
+    }
+
+    val groupedSystemVoices = remember(systemVoices, voiceSearch) {
+        val q = voiceSearch.trim().lowercase()
+        val list = if (q.isEmpty()) systemVoices else systemVoices.filter {
+            it.languageGroup.lowercase().contains(q) || it.shortLabel.lowercase().contains(q) || it.rawName.lowercase().contains(q)
+        }
+        list.groupBy { it.languageGroup }
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        // 1. TTS Voice Lab, Mood Engine & Typing Sound Style
+        // 1. TTS Voice Lab (Sectioned: Edge Neural / Google TTS / System Voices)
         GlassCard(shape = RoundedCornerShape(22.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -348,20 +426,18 @@ fun VoiceAndAudioLabCard(
                 ) {
                     Icon(Icons.Rounded.RecordVoiceOver, contentDescription = null, tint = visuals.secondary)
                     Column {
-                        Text("Voice Lab, Mood & SFX", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
-                        Text("${voiceEntries.size} local device TTS voices available", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                        Text("Text-to-Speech Voice Lab", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
+                        val subtitle = when (selectedEngine) {
+                            CelliumTtsEngine.ENGINE_EDGE -> "Edge Neural TTS · ${CelliumTtsEngine.EDGE_VOICES.size} studio voices"
+                            CelliumTtsEngine.ENGINE_GOOGLE -> "Google TTS · ${CelliumTtsEngine.GOOGLE_VOICES.size} crisp voices"
+                            else -> "System Offline TTS · ${groupedSystemVoices.size} languages (${systemVoices.size})"
+                        }
+                        Text(subtitle, style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
                     }
                 }
                 OutlinedButton(
                     onClick = {
-                        tts?.let { engine ->
-                            engine.setPitch(prefs.ttsPitch)
-                            engine.setSpeechRate(prefs.ttsSpeechRate)
-                            if (prefs.ttsVoiceName.isNotBlank()) {
-                                engine.voices?.firstOrNull { it.name == prefs.ttsVoiceName }?.let { engine.voice = it }
-                            }
-                            engine.speak("Hey bestie! Cel dot Cellium voice lab is crystal clear.", TextToSpeech.QUEUE_FLUSH, null, "preview")
-                        }
+                        viewModel.speakText("Hey bestie! Cel dot Cellium voice lab is crystal clear.")
                     },
                     shape = RoundedCornerShape(10.dp),
                 ) {
@@ -373,89 +449,413 @@ fun VoiceAndAudioLabCard(
 
             Spacer(Modifier.height(10.dp))
 
-            if (voiceEntries.isNotEmpty()) {
-                Text("Device Local TTS Voices (${filteredVoices.size})", style = MaterialTheme.typography.labelSmall, color = CelLavender)
-                Spacer(Modifier.height(4.dp))
-                if (voiceEntries.size > 6) {
-                    OutlinedTextField(
-                        value = voiceSearch,
-                        onValueChange = { voiceSearch = it },
-                        placeholder = { Text("Search all ${voiceEntries.size} device voices...") },
-                        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                    )
-                    Spacer(Modifier.height(6.dp))
-                }
-                LazyColumn(
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    item(key = "sys_default_voice") {
-                        val sel = prefs.ttsVoiceName.isBlank()
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (sel) visuals.primary.copy(alpha = 0.22f) else CelTerminalBg)
-                                .clickable {
-                                    scope.launch {
-                                        viewModel.prefsStore.updateVoiceSettings("", prefs.ttsPitch, prefs.ttsSpeechRate, prefs.autoReadReplies, prefs.liveHandsFreeLoop)
-                                    }
-                                }
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Text("System Default Voice", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary)
-                            if (sel) Icon(Icons.Rounded.Check, contentDescription = null, tint = visuals.primary, modifier = Modifier.size(15.dp))
+            // TTS Engine Tabs
+            Text("TTS Engine", style = MaterialTheme.typography.labelSmall, color = CelLavender)
+            Spacer(Modifier.height(4.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(
+                    selected = selectedEngine == CelliumTtsEngine.ENGINE_EDGE,
+                    onClick = {
+                        val defaultVoice = if (prefs.ttsVoiceName.endsWith("Neural", true)) prefs.ttsVoiceName else CelliumTtsEngine.EDGE_VOICES.first().id
+                        scope.launch {
+                            viewModel.prefsStore.updateVoiceSettings(
+                                voice = defaultVoice,
+                                pitch = pitchDraft,
+                                rate = rateDraft,
+                                autoRead = prefs.autoReadReplies,
+                                handsFree = prefs.liveHandsFreeLoop,
+                                ttsEngine = CelliumTtsEngine.ENGINE_EDGE,
+                            )
                         }
-                    }
-                    items(filteredVoices, key = { it.first }) { (rawName, displayLabel) ->
-                        val sel = prefs.ttsVoiceName == rawName
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (sel) visuals.primary.copy(alpha = 0.22f) else CelTerminalBg)
-                                .clickable {
-                                    scope.launch {
-                                        viewModel.prefsStore.updateVoiceSettings(rawName, prefs.ttsPitch, prefs.ttsSpeechRate, prefs.autoReadReplies, prefs.liveHandsFreeLoop)
-                                    }
-                                }
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(displayLabel, style = MaterialTheme.typography.labelSmall, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(rawName, style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono), color = CelTextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            if (sel) Icon(Icons.Rounded.Check, contentDescription = null, tint = visuals.primary, modifier = Modifier.size(15.dp))
+                    },
+                    label = { Text("Edge Neural (Free)", maxLines = 1, softWrap = false) },
+                )
+                FilterChip(
+                    selected = selectedEngine == CelliumTtsEngine.ENGINE_GOOGLE,
+                    onClick = {
+                        val defaultVoice = if (prefs.ttsVoiceName.startsWith("google:")) prefs.ttsVoiceName else CelliumTtsEngine.GOOGLE_VOICES.first().id
+                        scope.launch {
+                            viewModel.prefsStore.updateVoiceSettings(
+                                voice = defaultVoice,
+                                pitch = pitchDraft,
+                                rate = rateDraft,
+                                autoRead = prefs.autoReadReplies,
+                                handsFree = prefs.liveHandsFreeLoop,
+                                ttsEngine = CelliumTtsEngine.ENGINE_GOOGLE,
+                            )
                         }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
+                    },
+                    label = { Text("Google TTS (Free)", maxLines = 1, softWrap = false) },
+                )
+                FilterChip(
+                    selected = selectedEngine == CelliumTtsEngine.ENGINE_SYSTEM,
+                    onClick = {
+                        val defaultVoice = if (prefs.ttsVoiceName.startsWith("google:") || prefs.ttsVoiceName.endsWith("Neural", true)) "" else prefs.ttsVoiceName
+                        scope.launch {
+                            viewModel.prefsStore.updateVoiceSettings(
+                                voice = defaultVoice,
+                                pitch = pitchDraft,
+                                rate = rateDraft,
+                                autoRead = prefs.autoReadReplies,
+                                handsFree = prefs.liveHandsFreeLoop,
+                                ttsEngine = CelliumTtsEngine.ENGINE_SYSTEM,
+                            )
+                        }
+                    },
+                    label = { Text("System Offline", maxLines = 1, softWrap = false) },
+                )
             }
 
-            Text("Voice Pitch: ${"%.2f".format(prefs.ttsPitch)}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = voiceSearch,
+                onValueChange = { voiceSearch = it },
+                placeholder = {
+                    Text(
+                        when (selectedEngine) {
+                            CelliumTtsEngine.ENGINE_EDGE -> "Search Edge Neural voices (Aria, Ana, Sonia...)"
+                            CelliumTtsEngine.ENGINE_GOOGLE -> "Search Google TTS accents..."
+                            else -> "Search system voices or language..."
+                        }
+                    )
+                },
+                leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+            )
+            Spacer(Modifier.height(6.dp))
+
+            // Voice List by Section
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                when (selectedEngine) {
+                    CelliumTtsEngine.ENGINE_EDGE -> {
+                        items(filteredEdgeVoices, key = { it.id }) { v ->
+                            val sel = prefs.ttsVoiceName == v.id
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (sel) visuals.primary.copy(alpha = 0.22f) else CelTerminalBg)
+                                    .clickable {
+                                        scope.launch {
+                                            viewModel.prefsStore.updateVoiceSettings(
+                                                v.id, pitchDraft, rateDraft, prefs.autoReadReplies, prefs.liveHandsFreeLoop, CelliumTtsEngine.ENGINE_EDGE
+                                            )
+                                        }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("${v.label} · ${v.accent}", style = MaterialTheme.typography.labelMedium, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(v.gender, style = MaterialTheme.typography.labelSmall, color = CelTextSecondary, maxLines = 1)
+                                }
+                                if (sel) Icon(Icons.Rounded.Check, contentDescription = null, tint = visuals.primary, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+
+                    CelliumTtsEngine.ENGINE_GOOGLE -> {
+                        items(filteredGoogleVoices, key = { it.id }) { v ->
+                            val sel = prefs.ttsVoiceName == v.id
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (sel) visuals.primary.copy(alpha = 0.22f) else CelTerminalBg)
+                                    .clickable {
+                                        scope.launch {
+                                            viewModel.prefsStore.updateVoiceSettings(
+                                                v.id, pitchDraft, rateDraft, prefs.autoReadReplies, prefs.liveHandsFreeLoop, CelliumTtsEngine.ENGINE_GOOGLE
+                                            )
+                                        }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(v.label, style = MaterialTheme.typography.labelMedium, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("${v.accent} · ${v.gender}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary, maxLines = 1)
+                                }
+                                if (sel) Icon(Icons.Rounded.Check, contentDescription = null, tint = visuals.primary, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+
+                    else -> {
+                        item(key = "sys_default_voice") {
+                            val sel = prefs.ttsVoiceName.isBlank()
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (sel) visuals.primary.copy(alpha = 0.22f) else CelTerminalBg)
+                                    .clickable {
+                                        scope.launch {
+                                            viewModel.prefsStore.updateVoiceSettings(
+                                                "", pitchDraft, rateDraft, prefs.autoReadReplies, prefs.liveHandsFreeLoop, CelliumTtsEngine.ENGINE_SYSTEM
+                                            )
+                                        }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text("System Default Voice", style = MaterialTheme.typography.labelSmall, color = CelTextPrimary)
+                                if (sel) Icon(Icons.Rounded.Check, contentDescription = null, tint = visuals.primary, modifier = Modifier.size(15.dp))
+                            }
+                        }
+
+                        // Grouped collapsible language sections so 250+ device voices stay super organized!
+                        groupedSystemVoices.forEach { (groupName, itemsInGroup) ->
+                            val isSearching = voiceSearch.isNotBlank()
+                            val isExpanded = isSearching || groupName in expandedGroups
+                            item(key = "hdr_$groupName") {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(visuals.primary.copy(alpha = 0.12f))
+                                        .clickable {
+                                            expandedGroups = if (groupName in expandedGroups) expandedGroups - groupName else expandedGroups + groupName
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Text(
+                                        text = "$groupName (${itemsInGroup.size})",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = CelLavender,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Icon(
+                                        imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                        contentDescription = null,
+                                        tint = CelLavender,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
+                            }
+                            if (isExpanded) {
+                                items(itemsInGroup, key = { it.rawName }) { item ->
+                                    val sel = prefs.ttsVoiceName == item.rawName
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(start = 10.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(if (sel) visuals.primary.copy(alpha = 0.22f) else CelTerminalBg)
+                                            .clickable {
+                                                scope.launch {
+                                                    viewModel.prefsStore.updateVoiceSettings(
+                                                        item.rawName, pitchDraft, rateDraft, prefs.autoReadReplies, prefs.liveHandsFreeLoop, CelliumTtsEngine.ENGINE_SYSTEM
+                                                    )
+                                                }
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(item.shortLabel, style = MaterialTheme.typography.labelSmall, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(item.rawName, style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono), color = CelTextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                        if (sel) Icon(Icons.Rounded.Check, contentDescription = null, tint = visuals.primary, modifier = Modifier.size(15.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            Text("Voice Pitch: ${"%.2f".format(pitchDraft)}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
             Slider(
-                value = prefs.ttsPitch,
-                onValueChange = { p ->
-                    scope.launch { viewModel.prefsStore.updateVoiceSettings(prefs.ttsVoiceName, p, prefs.ttsSpeechRate, prefs.autoReadReplies, prefs.liveHandsFreeLoop) }
+                value = pitchDraft,
+                onValueChange = { pitchDraft = it },
+                onValueChangeFinished = {
+                    scope.launch { viewModel.prefsStore.updateVoiceSettings(prefs.ttsVoiceName, pitchDraft, rateDraft, prefs.autoReadReplies, prefs.liveHandsFreeLoop, selectedEngine) }
                 },
                 valueRange = 0.65f..1.55f,
             )
 
-            Text("Speech Rate: ${"%.2f".format(prefs.ttsSpeechRate)}x", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+            Text("Speech Rate: ${"%.2f".format(rateDraft)}x", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
             Slider(
-                value = prefs.ttsSpeechRate,
-                onValueChange = { r ->
-                    scope.launch { viewModel.prefsStore.updateVoiceSettings(prefs.ttsVoiceName, prefs.ttsPitch, r, prefs.autoReadReplies, prefs.liveHandsFreeLoop) }
+                value = rateDraft,
+                onValueChange = { rateDraft = it },
+                onValueChangeFinished = {
+                    scope.launch { viewModel.prefsStore.updateVoiceSettings(prefs.ttsVoiceName, pitchDraft, rateDraft, prefs.autoReadReplies, prefs.liveHandsFreeLoop, selectedEngine) }
                 },
                 valueRange = 0.65f..1.65f,
             )
+        }
+
+        // 2. Speech-to-Text (STT) Engine Selector (Groq Whisper BYOK, Pollinations Free, OpenAI, HuggingFace, Android System)
+        GlassCard(shape = RoundedCornerShape(22.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Rounded.Hearing, contentDescription = null, tint = CelEmeraldThought)
+                Column {
+                    Text("Speech-to-Text (STT) Engine", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
+                    Text("Upgrade voice recognition accuracy in Live, Chat & Floating Cel", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+
+            val activeStt = CelliumSttEngine.ALL_ENGINES.firstOrNull { it.id == prefs.sttEngine }
+                ?: CelliumSttEngine.ALL_ENGINES.first()
+
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                CelliumSttEngine.ALL_ENGINES.forEach { opt ->
+                    FilterChip(
+                        selected = prefs.sttEngine == opt.id,
+                        onClick = {
+                            scope.launch {
+                                viewModel.prefsStore.updateSttSettings(
+                                    engine = opt.id,
+                                    apiKey = sttKeyDraft,
+                                    model = "",
+                                )
+                            }
+                            sttModelDraft = ""
+                        },
+                        label = { Text(opt.label, maxLines = 1, softWrap = false) },
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            Text(activeStt.subtitle, style = MaterialTheme.typography.bodySmall, color = CelTextSecondary)
+
+            if (activeStt.requiresKey) {
+                val resolvedKey = viewModel.resolveSttApiKey(activeStt.id)
+                val keyReady = resolvedKey.isNotBlank()
+                Spacer(Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = (if (keyReady) CelEmeraldThought else CelAmber).copy(alpha = 0.14f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = if (keyReady && prefs.sttApiKey.isBlank()) {
+                            "API Key Ready — auto-using your saved provider key!"
+                        } else if (keyReady) {
+                            "Custom STT API Key saved & ready."
+                        } else {
+                            "No key found yet — paste a key below or add it in AI Providers."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (keyReady) CelEmeraldThought else CelAmber,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = sttKeyDraft,
+                    onValueChange = { sttKeyDraft = it },
+                    label = { Text("Optional STT API Key (blank = auto-use provider key)") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = sttModelDraft,
+                    onValueChange = { sttModelDraft = it },
+                    label = { Text("Model Override (default: ${activeStt.defaultModel})") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            viewModel.prefsStore.updateSttSettings(
+                                engine = activeStt.id,
+                                apiKey = sttKeyDraft,
+                                model = sttModelDraft,
+                            )
+                            viewModel.showBanner("STT settings saved (${activeStt.label}).")
+                        }
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text("Save STT Key & Model", maxLines = 1, softWrap = false)
+                }
+            }
+        }
+
+        // 3. Cel Typing Speed, Mood Engine & Sound Effects
+        GlassCard(shape = RoundedCornerShape(22.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Rounded.Speed, contentDescription = null, tint = visuals.primary)
+                Column {
+                    Text("Cel Typing Speed, Mood & SFX", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
+                    Text("Pace Cel's reply reveal so Animal Crossing / Melodii chirps shine", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+
+            Text("Cel Typing Speed", style = MaterialTheme.typography.labelLarge, color = CelLavender)
+            Spacer(Modifier.height(6.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                TYPING_SPEED_OPTIONS.forEach { (id, label) ->
+                    FilterChip(
+                        selected = prefs.typingSpeed == id,
+                        onClick = {
+                            viewModel.soundEngine.playClick()
+                            scope.launch { viewModel.prefsStore.updateTypingSpeed(id) }
+                        },
+                        label = { Text(label, maxLines = 1, softWrap = false) },
+                    )
+                }
+            }
+
+            HorizontalDivider(color = visuals.subtleBorder, modifier = Modifier.padding(vertical = 8.dp))
+
+            Text("Streaming Typing Sound Style", style = MaterialTheme.typography.labelLarge, color = CelLavender)
+            Spacer(Modifier.height(6.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(
+                    selected = prefs.typingSoundStyle != "scratchin_melodii",
+                    onClick = {
+                        viewModel.soundEngine.typingSoundStyle = "animal_crossing"
+                        viewModel.soundEngine.playAnimalesePurr()
+                        scope.launch {
+                            viewModel.prefsStore.updateAudioSettings(
+                                prefs.soundsEnabled, prefs.animaleseEnabled, prefs.hapticsEnabled, sfxVolDraft, "animal_crossing"
+                            )
+                        }
+                    },
+                    label = { Text("Animal Crossing", maxLines = 1, softWrap = false) },
+                )
+                FilterChip(
+                    selected = prefs.typingSoundStyle == "scratchin_melodii",
+                    onClick = {
+                        viewModel.soundEngine.typingSoundStyle = "scratchin_melodii"
+                        viewModel.soundEngine.playAnimalesePurr()
+                        scope.launch {
+                            viewModel.prefsStore.updateAudioSettings(
+                                prefs.soundsEnabled, prefs.animaleseEnabled, prefs.hapticsEnabled, sfxVolDraft, "scratchin_melodii"
+                            )
+                        }
+                    },
+                    label = { Text("Scratchin' Melodii", maxLines = 1, softWrap = false) },
+                )
+            }
 
             HorizontalDivider(color = visuals.subtleBorder, modifier = Modifier.padding(vertical = 8.dp))
 
@@ -475,54 +875,21 @@ fun VoiceAndAudioLabCard(
                 )
             }
 
-            HorizontalDivider(color = visuals.subtleBorder, modifier = Modifier.padding(vertical = 8.dp))
-
-            Text("Streaming Typing Sound Style", style = MaterialTheme.typography.labelLarge, color = CelLavender)
-            Spacer(Modifier.height(6.dp))
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                FilterChip(
-                    selected = prefs.typingSoundStyle != "scratchin_melodii",
-                    onClick = {
-                        viewModel.soundEngine.typingSoundStyle = "animal_crossing"
-                        viewModel.soundEngine.playAnimalesePurr()
-                        scope.launch {
-                            viewModel.prefsStore.updateAudioSettings(
-                                prefs.soundsEnabled, prefs.animaleseEnabled, prefs.hapticsEnabled, prefs.sfxVolume, "animal_crossing"
-                            )
-                        }
-                    },
-                    label = { Text("Animal Crossing", maxLines = 1, softWrap = false) },
-                )
-                FilterChip(
-                    selected = prefs.typingSoundStyle == "scratchin_melodii",
-                    onClick = {
-                        viewModel.soundEngine.typingSoundStyle = "scratchin_melodii"
-                        viewModel.soundEngine.playAnimalesePurr()
-                        scope.launch {
-                            viewModel.prefsStore.updateAudioSettings(
-                                prefs.soundsEnabled, prefs.animaleseEnabled, prefs.hapticsEnabled, prefs.sfxVolume, "scratchin_melodii"
-                            )
-                        }
-                    },
-                    label = { Text("Scratchin' Melodii", maxLines = 1, softWrap = false) },
-                )
-            }
-
             Spacer(Modifier.height(6.dp))
             SettingSwitchRow("Auto-Read Chat Replies Aloud", prefs.autoReadReplies) {
-                scope.launch { viewModel.prefsStore.updateVoiceSettings(prefs.ttsVoiceName, prefs.ttsPitch, prefs.ttsSpeechRate, it, prefs.liveHandsFreeLoop) }
+                scope.launch { viewModel.prefsStore.updateVoiceSettings(prefs.ttsVoiceName, pitchDraft, rateDraft, it, prefs.liveHandsFreeLoop, selectedEngine) }
             }
             SettingSwitchRow("Live Mode Hands-Free Loop", prefs.liveHandsFreeLoop) {
-                scope.launch { viewModel.prefsStore.updateVoiceSettings(prefs.ttsVoiceName, prefs.ttsPitch, prefs.ttsSpeechRate, prefs.autoReadReplies, it) }
+                scope.launch { viewModel.prefsStore.updateVoiceSettings(prefs.ttsVoiceName, pitchDraft, rateDraft, prefs.autoReadReplies, it, selectedEngine) }
             }
             SettingSwitchRow("UI Sound Effects (Media Channel)", prefs.soundsEnabled) {
-                scope.launch { viewModel.prefsStore.updateAudioSettings(it, prefs.animaleseEnabled, prefs.hapticsEnabled, prefs.sfxVolume) }
+                scope.launch { viewModel.prefsStore.updateAudioSettings(it, prefs.animaleseEnabled, prefs.hapticsEnabled, sfxVolDraft) }
             }
             SettingSwitchRow("Streaming Voice Chirps", prefs.animaleseEnabled) {
-                scope.launch { viewModel.prefsStore.updateAudioSettings(prefs.soundsEnabled, it, prefs.hapticsEnabled, prefs.sfxVolume) }
+                scope.launch { viewModel.prefsStore.updateAudioSettings(prefs.soundsEnabled, it, prefs.hapticsEnabled, sfxVolDraft) }
             }
             SettingSwitchRow("Tactile Haptic Feedback", prefs.hapticsEnabled) {
-                scope.launch { viewModel.prefsStore.updateAudioSettings(prefs.soundsEnabled, prefs.animaleseEnabled, it, prefs.sfxVolume) }
+                scope.launch { viewModel.prefsStore.updateAudioSettings(prefs.soundsEnabled, prefs.animaleseEnabled, it, sfxVolDraft) }
                 if (it) viewModel.soundEngine.hapticDoubleClick()
             }
             SettingSwitchRow("Bundled Background Chat Notifications", prefs.notificationsEnabled) {
@@ -541,17 +908,18 @@ fun VoiceAndAudioLabCard(
             }
 
             Spacer(Modifier.height(6.dp))
-            Text("SFX Volume: ${(prefs.sfxVolume * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+            Text("SFX Volume: ${(sfxVolDraft * 100).toInt()}%", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
             Slider(
-                value = prefs.sfxVolume,
-                onValueChange = { vol ->
-                    scope.launch { viewModel.prefsStore.updateAudioSettings(prefs.soundsEnabled, prefs.animaleseEnabled, prefs.hapticsEnabled, vol) }
+                value = sfxVolDraft,
+                onValueChange = { sfxVolDraft = it },
+                onValueChangeFinished = {
+                    scope.launch { viewModel.prefsStore.updateAudioSettings(prefs.soundsEnabled, prefs.animaleseEnabled, prefs.hapticsEnabled, sfxVolDraft) }
                 },
                 valueRange = 0f..1f,
             )
         }
 
-        // 2. Default Android Assistant & "Okay Cel" Wake Word Engine
+        // 4. Default Android Assistant & "Okay Cel" Wake Word Engine
         GlassCard(highlighted = prefs.wakeWordEnabled, shape = RoundedCornerShape(22.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Icon(Icons.Rounded.Assistant, contentDescription = null, tint = visuals.primary)
@@ -599,14 +967,15 @@ fun VoiceAndAudioLabCard(
             }
 
             Text(
-                text = "Wake Word Sensitivity: ${(prefs.wakeWordSensitivity * 100).toInt()}%",
+                text = "Wake Word Sensitivity: ${(wakeSensDraft * 100).toInt()}%",
                 style = MaterialTheme.typography.labelSmall,
                 color = CelTextSecondary,
             )
             Slider(
-                value = prefs.wakeWordSensitivity,
-                onValueChange = { v ->
-                    scope.launch { viewModel.prefsStore.updateWakeWordSettings(prefs.wakeWordEnabled, sensitivity = v) }
+                value = wakeSensDraft,
+                onValueChange = { wakeSensDraft = it },
+                onValueChangeFinished = {
+                    scope.launch { viewModel.prefsStore.updateWakeWordSettings(prefs.wakeWordEnabled, sensitivity = wakeSensDraft) }
                 },
                 valueRange = 0.25f..0.90f,
             )

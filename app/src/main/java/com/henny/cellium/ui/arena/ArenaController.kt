@@ -5,9 +5,11 @@ import com.henny.cellium.ai.ProviderCatalog
 import com.henny.cellium.ai.ProviderPresets
 import com.henny.cellium.ai.UniversalLlmClient
 import com.henny.cellium.avatar.MoodDetector
+import com.henny.cellium.core.CelliumPreferences
 import com.henny.cellium.core.CelliumSoundEngine
 import com.henny.cellium.core.ContextModifyConfig
 import com.henny.cellium.core.DevLogBuffer
+import com.henny.cellium.core.PreferencesStore
 import com.henny.cellium.data.BuiltInPersonas
 import com.henny.cellium.data.CustomPersona
 import com.henny.cellium.data.PersonaSpec
@@ -55,6 +57,8 @@ data class ArenaUiState(
 class ArenaController(
     private val scope: CoroutineScope,
     private val dao: CelliumDao,
+    private val prefsStore: PreferencesStore,
+    private val preferencesProvider: () -> CelliumPreferences,
     private val llmClient: UniversalLlmClient,
     private val onDeviceEngine: OnDeviceLlmEngine,
     private val soundEngine: CelliumSoundEngine,
@@ -62,6 +66,7 @@ class ArenaController(
     private val customPersonasProvider: () -> List<CustomPersonaEntity>,
     private val memoriesProvider: () -> List<MemoryEntity>,
     private val maxAutoRetriesProvider: () -> Int = { 10 },
+    private val onArenaConfigChanged: () -> Unit = {},
     private val onNotifyIfBackground: (sessionId: String, title: String, speaker: String, text: String) -> Unit,
 ) {
     private val _state = MutableStateFlow(ArenaUiState())
@@ -72,36 +77,49 @@ class ArenaController(
 
     fun ensureArenaSession(existingSessionId: String? = null) {
         scope.launch {
+            val prefs = preferencesProvider()
             val targetId = existingSessionId ?: _state.value.sessionId
             val existing = targetId?.let { dao.getSession(it) }
             val session = if (existing != null && existing.isArena) {
                 existing
             } else {
                 val id = UUID.randomUUID().toString()
-                val st = _state.value
+                val provA = prefs.arenaProviderA.ifBlank { ProviderPresets.ID_POLLINATIONS_FREE }
+                val modA = normalizePollinationsModel(provA, prefs.arenaModelA)
+                val perA = prefs.arenaPersonaA.ifBlank { "default" }
+                val provB = prefs.arenaProviderB.ifBlank { ProviderPresets.ID_POLLINATIONS_FREE }
+                val modB = normalizePollinationsModel(provB, prefs.arenaModelB)
+                val perB = prefs.arenaPersonaB.ifBlank { "celeste" }
                 SessionEntity(
                     id = id,
                     title = "Arena: 2-AI Group Chat",
-                    personaId = st.personaAId,
-                    providerId = st.providerAId,
-                    modelName = st.modelA,
+                    personaId = perA,
+                    providerId = provA,
+                    modelName = modA,
                     isArena = true,
-                    arenaProviderA = st.providerAId,
-                    arenaModelA = st.modelA,
-                    arenaPersonaA = st.personaAId,
-                    arenaProviderB = st.providerBId,
-                    arenaModelB = st.modelB,
-                    arenaPersonaB = st.personaBId,
+                    arenaProviderA = provA,
+                    arenaModelA = modA,
+                    arenaPersonaA = perA,
+                    arenaProviderB = provB,
+                    arenaModelB = modB,
+                    arenaPersonaB = perB,
                 ).also { dao.upsertSession(it) }
             }
+            val resolvedProvA = session.arenaProviderA.ifBlank { prefs.arenaProviderA.ifBlank { ProviderPresets.ID_POLLINATIONS_FREE } }
+            val resolvedModA = normalizePollinationsModel(resolvedProvA, session.arenaModelA.ifBlank { prefs.arenaModelA })
+            val resolvedPerA = session.arenaPersonaA.ifBlank { prefs.arenaPersonaA.ifBlank { "default" } }
+            val resolvedProvB = session.arenaProviderB.ifBlank { prefs.arenaProviderB.ifBlank { ProviderPresets.ID_POLLINATIONS_FREE } }
+            val resolvedModB = normalizePollinationsModel(resolvedProvB, session.arenaModelB.ifBlank { prefs.arenaModelB })
+            val resolvedPerB = session.arenaPersonaB.ifBlank { prefs.arenaPersonaB.ifBlank { "celeste" } }
+
             _state.value = _state.value.copy(
                 sessionId = session.id,
-                providerAId = session.arenaProviderA.ifBlank { ProviderPresets.ID_POLLINATIONS_FREE },
-                modelA = normalizePollinationsModel(session.arenaProviderA, session.arenaModelA),
-                personaAId = session.arenaPersonaA.ifBlank { "default" },
-                providerBId = session.arenaProviderB.ifBlank { ProviderPresets.ID_POLLINATIONS_FREE },
-                modelB = normalizePollinationsModel(session.arenaProviderB, session.arenaModelB),
-                personaBId = session.arenaPersonaB.ifBlank { "celeste" },
+                providerAId = resolvedProvA,
+                modelA = resolvedModA,
+                personaAId = resolvedPerA,
+                providerBId = resolvedProvB,
+                modelB = resolvedModB,
+                personaBId = resolvedPerB,
             )
             observeMessages(session.id)
         }
@@ -174,20 +192,33 @@ class ArenaController(
 
     private fun persistArenaConfig() {
         val st = _state.value
-        val sid = st.sessionId ?: return
         scope.launch {
-            val existing = dao.getSession(sid) ?: return@launch
-            dao.upsertSession(
-                existing.copy(
-                    arenaProviderA = st.providerAId,
-                    arenaModelA = st.modelA,
-                    arenaPersonaA = st.personaAId,
-                    arenaProviderB = st.providerBId,
-                    arenaModelB = st.modelB,
-                    arenaPersonaB = st.personaBId,
-                    updatedAtMs = System.currentTimeMillis(),
-                )
+            prefsStore.updateArenaDefaults(
+                providerA = st.providerAId,
+                modelA = st.modelA,
+                personaA = st.personaAId,
+                providerB = st.providerBId,
+                modelB = st.modelB,
+                personaB = st.personaBId,
             )
+            val sid = st.sessionId
+            if (sid != null) {
+                val existing = dao.getSession(sid)
+                if (existing != null) {
+                    dao.upsertSession(
+                        existing.copy(
+                            arenaProviderA = st.providerAId,
+                            arenaModelA = st.modelA,
+                            arenaPersonaA = st.personaAId,
+                            arenaProviderB = st.providerBId,
+                            arenaModelB = st.modelB,
+                            arenaPersonaB = st.personaBId,
+                            updatedAtMs = System.currentTimeMillis(),
+                        )
+                    )
+                }
+            }
+            onArenaConfigChanged()
         }
     }
 

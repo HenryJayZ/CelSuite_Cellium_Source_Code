@@ -875,7 +875,7 @@ fun ContextModifySheet(
             Slider(
                 value = draft.historyLimit.toFloat(),
                 onValueChange = { draft = draft.copy(historyLimit = it.toInt()) },
-                valueRange = 2f..36f,
+                valueRange = 2f..64f,
             )
 
             HorizontalDivider(color = visuals.subtleBorder)
@@ -885,14 +885,14 @@ fun ContextModifySheet(
             Slider(
                 value = draft.ggufContextLength.toFloat(),
                 onValueChange = { draft = draft.copy(ggufContextLength = (it.toInt() / 256) * 256) },
-                valueRange = 512f..8192f,
+                valueRange = 512f..32768f,
             )
 
             Text("Max Output Tokens: ${draft.ggufMaxTokens}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
             Slider(
                 value = draft.ggufMaxTokens.toFloat(),
                 onValueChange = { draft = draft.copy(ggufMaxTokens = (it.toInt() / 64) * 64) },
-                valueRange = 128f..4096f,
+                valueRange = 128f..16384f,
             )
 
             Text("Temperature: ${String.format(Locale.US, "%.2f", draft.ggufTemperature)}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
@@ -927,14 +927,14 @@ fun ContextModifySheet(
             Slider(
                 value = draft.ggufThreads.toFloat(),
                 onValueChange = { draft = draft.copy(ggufThreads = it.toInt()) },
-                valueRange = 1f..8f,
+                valueRange = 1f..16f,
             )
 
             Text("GPU Offload Layers: ${draft.ggufGpuLayers}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
             Slider(
                 value = draft.ggufGpuLayers.toFloat(),
                 onValueChange = { draft = draft.copy(ggufGpuLayers = it.toInt()) },
-                valueRange = 0f..32f,
+                valueRange = 0f..99f,
             )
 
             ContextSwitchRow("Use Memory Mapping (mmap · Saves RAM)", draft.ggufUseMmap) {

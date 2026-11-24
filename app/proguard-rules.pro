@@ -34,6 +34,15 @@
 }
 -keep class com.henny.cellium.data.** { *; }
 
+# Preserve Jetpack CredentialManager & Google Sign-In (prevents R8 stripping reflection-loaded providers in release APKs!)
+-keep class androidx.credentials.** { *; }
+-keep interface androidx.credentials.** { *; }
+-keep class com.google.android.libraries.identity.googleid.** { *; }
+-keep class com.google.firebase.auth.** { *; }
+-keep class com.google.android.gms.auth.** { *; }
+-dontwarn androidx.credentials.**
+-dontwarn com.google.android.libraries.identity.googleid.**
+
 # Preserve OkHttp & Kotlin Coroutines
 -dontwarn okhttp3.**
 -dontwarn okio.**

@@ -84,11 +84,41 @@ class MultiImagineClient(private val context: Context) {
         KaggleCredentials(user, key)
     }
 
+    suspend fun fetchAiHordeImageModels(): Result<List<String>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder()
+                .url("https://aihorde.net/api/v2/status/models?type=image&model_state=known")
+                .header("Client-Agent", "CelCellium:2611.23.0:android")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) throw IllegalStateException("AI Horde HTTP ${resp.code}")
+                val body = resp.body?.string().orEmpty()
+                val arr = json.parseToJsonElement(body).jsonArray
+                val ranked = arr.mapNotNull { el ->
+                    val obj = el.jsonObject
+                    val name = obj["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                    val count = obj["count"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                    val eta = obj["eta"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 999
+                    val low = name.lowercase()
+                    if (name.isBlank() || count < 1 || "nsfw" in low || "hentai" in low || "porn" in low || "nude" in low) {
+                        null
+                    } else {
+                        Triple(name, count, eta)
+                    }
+                }.sortedWith(compareByDescending<Triple<String, Int, Int>> { it.second }.thenBy { it.third })
+                    .map { it.first }
+                    .take(14)
+                listOf("Auto (Fastest)") + ranked
+            }
+        }
+    }
+
     suspend fun fetchPollinationsImageModels(): Result<List<String>> = withContext(Dispatchers.IO) {
         runCatching {
             val req = Request.Builder()
                 .url("https://image.pollinations.ai/models")
-                .header("User-Agent", "Cel.Cellium-Android/2611.22.0")
+                .header("User-Agent", "Cel.Cellium-Android/2611.23.0")
                 .get()
                 .build()
             client.newCall(req).execute().use { resp ->
@@ -97,7 +127,7 @@ class MultiImagineClient(private val context: Context) {
                 val arr = json.parseToJsonElement(body).jsonArray
                 arr.mapNotNull { el ->
                     el.jsonPrimitive.contentOrNull?.trim()
-                }.filter { it.isNotBlank() }.ifEmpty { listOf("sana") }
+                }.filter { it.isNotBlank() }.ifEmpty { listOf("flux", "turbo") }
             }
         }
     }
@@ -105,8 +135,8 @@ class MultiImagineClient(private val context: Context) {
     suspend fun generateImage(
         prompt: String,
         negativePrompt: String = "",
-        provider: String = "pollinations",
-        model: String = "sana",
+        provider: String = "aihorde",
+        model: String = "Auto (Fastest)",
         aspectRatio: String = "1:1",
         apiKey: String = "",
         customUrl: String = "",
@@ -128,16 +158,46 @@ class MultiImagineClient(private val context: Context) {
 
         runCatching {
             val resolvedModel = when (provider) {
-                "pollinations" -> {
-                    val m = model.trim()
-                    if (m.isBlank() || (apiKey.isBlank() && m.equals("flux", ignoreCase = true))) "sana" else m
-                }
+                "aihorde" -> model.trim().ifBlank { "Auto (Fastest)" }
+                "pollinations" -> model.trim().ifBlank { "flux" }
                 else -> model.trim()
             }
+            var usedProvider = provider
+            var usedModel = resolvedModel
             val bytes: ByteArray = when (provider) {
+                "aihorde" -> fetchAiHorde(
+                    prompt = cleanPrompt,
+                    negativePrompt = negativePrompt,
+                    model = resolvedModel,
+                    aspectRatio = aspectRatio,
+                    seed = seed,
+                    apiKey = apiKey,
+                    onStatusUpdate = onStatusUpdate,
+                )
                 "pollinations" -> {
                     onStatusUpdate?.invoke("Generating via Pollinations ($resolvedModel)...")
-                    fetchPollinations(fullPrompt, resolvedModel, width, height, seed, apiKey)
+                    try {
+                        fetchPollinations(fullPrompt, resolvedModel, width, height, seed, apiKey)
+                    } catch (e: Exception) {
+                        val msg = e.localizedMessage.orEmpty()
+                        if (apiKey.isBlank() && (msg.contains("402") || msg.contains("503") || msg.contains("429"))) {
+                            DevLogBuffer.add("WARN", "Illume", "Pollinations keyless failed ($msg); auto-falling back to AI Horde free cluster.")
+                            onStatusUpdate?.invoke("Pollinations busy — switching to free AI Horde GPU...")
+                            usedProvider = "aihorde"
+                            usedModel = "Auto (Fastest)"
+                            fetchAiHorde(
+                                prompt = cleanPrompt,
+                                negativePrompt = negativePrompt,
+                                model = "Auto (Fastest)",
+                                aspectRatio = aspectRatio,
+                                seed = seed,
+                                apiKey = "",
+                                onStatusUpdate = onStatusUpdate,
+                            )
+                        } else {
+                            throw e
+                        }
+                    }
                 }
                 "kaggle" -> fetchKaggleGpu(
                     prompt = cleanPrompt,
@@ -172,7 +232,15 @@ class MultiImagineClient(private val context: Context) {
                     val url = if (base.endsWith("/images/generations")) base else "$base/images/generations"
                     fetchOpenAiImages(url, fullPrompt, resolvedModel.ifBlank { "sana" }, aspectRatio, apiKey)
                 }
-                else -> fetchPollinations(fullPrompt, "sana", width, height, seed, apiKey)
+                else -> fetchAiHorde(
+                    prompt = cleanPrompt,
+                    negativePrompt = negativePrompt,
+                    model = "Auto (Fastest)",
+                    aspectRatio = aspectRatio,
+                    seed = seed,
+                    apiKey = apiKey,
+                    onStatusUpdate = onStatusUpdate,
+                )
             }
             val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 ?: throw IllegalStateException("Provider returned a non-image payload.")
@@ -180,17 +248,128 @@ class MultiImagineClient(private val context: Context) {
             FileOutputStream(outFile).use { fos ->
                 bmp.compress(Bitmap.CompressFormat.PNG, 96, fos)
             }
-            DevLogBuffer.add("INFO", "Illume", "Generated ${width}x$height via $provider ($resolvedModel)")
+            DevLogBuffer.add("INFO", "Illume", "Generated ${width}x$height via $usedProvider ($usedModel)")
             GeneratedImageResult(
                 localFile = outFile,
                 bitmap = bmp,
                 seed = seed,
-                provider = provider,
-                model = resolvedModel,
+                provider = usedProvider,
+                model = usedModel,
             )
         }.onFailure { err ->
             DevLogBuffer.add("ERROR", "Illume", "Generation failed ($provider): ${err.localizedMessage}")
         }
+    }
+
+    /**
+     * Free keyless community GPU generation via AI Horde (https://aihorde.net).
+     * Uses anonymous key "0000000000" (0 kudos needed for <=576px, <=25 steps) or user's free Horde key.
+     */
+    private suspend fun fetchAiHorde(
+        prompt: String,
+        negativePrompt: String,
+        model: String,
+        aspectRatio: String,
+        seed: Long,
+        apiKey: String,
+        onStatusUpdate: ((String) -> Unit)?,
+    ): ByteArray {
+        val hordeKey = apiKey.trim().ifBlank { "0000000000" }
+        val (w, h) = when (aspectRatio) {
+            "16:9" -> 576 to 384
+            "9:16" -> 384 to 576
+            "4:3" -> 576 to 448
+            "3:4" -> 448 to 576
+            else -> 512 to 512
+        }
+        val combinedPrompt = if (negativePrompt.isNotBlank()) {
+            "$prompt ### ${negativePrompt.trim()}"
+        } else prompt
+
+        val modelList = if (model.isBlank() || model.equals("Auto (Fastest)", ignoreCase = true)) {
+            listOf("Deliberate", "ICBINP - I Can't Believe It's Not Photography", "Realistic Vision", "stable_diffusion")
+        } else {
+            listOf(model)
+        }
+
+        val payload = buildJsonObject {
+            put("prompt", combinedPrompt)
+            put("params", buildJsonObject {
+                put("width", w)
+                put("height", h)
+                put("steps", 22)
+                put("cfg_scale", 7.0)
+                put("sampler_name", "k_euler_a")
+                put("seed", seed.toString())
+                put("n", 1)
+            })
+            put("nsfw", false)
+            put("censor_nsfw", true)
+            put("trusted_workers", false)
+            put("r2", true)
+            put("models", buildJsonArray { modelList.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
+        }.toString()
+
+        onStatusUpdate?.invoke("AI Horde: submitting to free GPU cluster...")
+        val submitReq = Request.Builder()
+            .url("https://aihorde.net/api/v2/generate/async")
+            .header("apikey", hordeKey)
+            .header("Client-Agent", "CelCellium:2611.23.0:android")
+            .post(payload.toRequestBody(jsonMedia))
+            .build()
+
+        val jobId = client.newCall(submitReq).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw IllegalStateException("AI Horde submit HTTP ${resp.code}: ${body.take(220)}")
+            }
+            val obj = json.parseToJsonElement(body).jsonObject
+            obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: throw IllegalStateException("AI Horde returned no job ID.")
+        }
+
+        // Poll every 2.5s up to ~110 seconds
+        for (attempt in 1..44) {
+            delay(2500L)
+            val statusReq = Request.Builder()
+                .url("https://aihorde.net/api/v2/generate/status/$jobId")
+                .header("apikey", hordeKey)
+                .header("Client-Agent", "CelCellium:2611.23.0:android")
+                .get()
+                .build()
+            client.newCall(statusReq).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) return@use
+                val obj = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull() ?: return@use
+                val faulted = obj["faulted"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() == true
+                if (faulted) throw IllegalStateException("AI Horde worker faulted. Please tap Generate again.")
+                val isPossible = obj["is_possible"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: true
+                if (!isPossible) throw IllegalStateException("No online AI Horde worker currently supports '$model'. Pick 'Auto (Fastest)'.")
+                val done = obj["done"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() == true
+                if (done) {
+                    val gens = obj["generations"]?.jsonArray
+                    val first = gens?.firstOrNull()?.jsonObject
+                        ?: throw IllegalStateException("AI Horde finished without returning an image.")
+                    val imgVal = first["img"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    if (imgVal.startsWith("http://") || imgVal.startsWith("https://")) {
+                        onStatusUpdate?.invoke("AI Horde: downloading artwork...")
+                        client.newCall(Request.Builder().url(imgVal).get().build()).execute().use { dl ->
+                            if (!dl.isSuccessful) throw IllegalStateException("AI Horde image download HTTP ${dl.code}")
+                            return dl.body?.bytes() ?: throw IllegalStateException("Empty AI Horde image stream.")
+                        }
+                    } else if (imgVal.isNotBlank()) {
+                        return Base64.decode(imgVal, Base64.DEFAULT)
+                    } else {
+                        throw IllegalStateException("AI Horde returned empty image field.")
+                    }
+                } else {
+                    val pos = obj["queue_position"]?.jsonPrimitive?.contentOrNull ?: "?"
+                    val waitSec = obj["wait_time"]?.jsonPrimitive?.contentOrNull ?: "?"
+                    onStatusUpdate?.invoke("AI Horde GPU: queue #$pos (~${waitSec}s)...")
+                }
+            }
+        }
+        throw IllegalStateException("AI Horde timed out waiting for a free worker. Please try again.")
     }
 
     /**
@@ -456,14 +635,28 @@ print("CELLIUM_DONE")
     companion object {
         val PROVIDERS = listOf(
             ImagineProviderOption(
-                id = "pollinations",
-                label = "Pollinations (Free · Keyless)",
+                id = "aihorde",
+                label = "AI Horde (Free · Keyless)",
                 requiresKey = false,
-                defaultModels = listOf("sana"),
+                defaultModels = listOf(
+                    "Auto (Fastest)",
+                    "Deliberate",
+                    "ICBINP - I Can't Believe It's Not Photography",
+                    "Realistic Vision",
+                    "Nova Anime XL",
+                    "AlbedoBase XL (SDXL)",
+                    "AIO Pixel Art",
+                ),
+            ),
+            ImagineProviderOption(
+                id = "pollinations",
+                label = "Pollinations (Key / Fallback)",
+                requiresKey = false,
+                defaultModels = listOf("flux", "turbo", "sana"),
             ),
             ImagineProviderOption(
                 id = "kaggle",
-                label = "Kaggle GPU (kaggle.json)",
+                label = "Kaggle GPU (Free 30h/wk)",
                 requiresKey = true,
                 defaultModels = listOf(
                     "stabilityai/sdxl-turbo",
@@ -490,7 +683,7 @@ print("CELLIUM_DONE")
                 id = "custom",
                 label = "Custom Endpoint",
                 requiresKey = false,
-                defaultModels = listOf("sana"),
+                defaultModels = listOf("flux"),
             ),
         )
     }

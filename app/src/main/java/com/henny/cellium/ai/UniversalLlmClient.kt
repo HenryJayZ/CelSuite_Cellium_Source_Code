@@ -98,10 +98,10 @@ class UniversalLlmClient {
         }
 
         if (contextConfig.includeIllumeInstructions) {
-            append("\n\n[Illume Image Generator Tool]\n")
-            append("You CAN generate real images directly inside Cel.Cellium! Whenever the user asks you to draw, generate, create, or make an image/picture/wallpaper/art, include ONE block with a rich visual prompt:\n")
-            append("[ILLUME_GEN]\n<detailed visual prompt describing subject, style, lighting, and colors>\n[/ILLUME_GEN]\n")
-            append("Do NOT pretend you cannot generate images and do NOT fake '[generating...]' text. Cellium will render the real artwork from your [ILLUME_GEN] block automatically.")
+            append("\n\n[Illume Built-In Image Generator — ACTIVE]\n")
+            append("You HAVE a real built-in image generator right inside this app! Whenever the user asks you to generate, draw, paint, create, make, or render an image, art, photo, wallpaper, or picture, you MUST emit this exact tag (no code fences around it):\n")
+            append("[ILLUME_GEN]\n<detailed visual description of the scene, style, lighting, colors>\n[/ILLUME_GEN]\n")
+            append("NEVER say you are text-only or cannot generate images. Just write a brief friendly line and include the [ILLUME_GEN]...[/ILLUME_GEN] block so Cellium automatically renders and attaches the image.")
         }
 
         if (agentModeEnabled && contextConfig.includeAgentInstructions) {
@@ -760,15 +760,35 @@ class UniversalLlmClient {
 
     companion object {
         private val ILLUME_BLOCK_REGEX = Regex(
-            """\[ILLUME_GEN]([\s\S]*?)\[/ILLUME_GEN]""",
+            """(?:```[a-zA-Z]*\s*)?\[(?:ILLUME_GEN|ILLUME|IMAGE_GEN|IMAGINE)]([\s\S]*?)\[/(?:ILLUME_GEN|ILLUME|IMAGE_GEN|IMAGINE)](?:\s*```)?""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val ILLUME_INLINE_REGEX = Regex(
+            """\[(?:ILLUME_GEN|ILLUME|IMAGE_GEN|IMAGINE)\s*:\s*([^\]]+)]""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val ILLUME_UNCLOSED_REGEX = Regex(
+            """(?:```[a-zA-Z]*\s*)?\[(?:ILLUME_GEN|ILLUME|IMAGE_GEN)]([\s\S]+)$""",
             RegexOption.IGNORE_CASE,
         )
 
         fun extractIllumePrompt(assistantBodyOnly: String): Pair<String?, String> {
-            val match = ILLUME_BLOCK_REGEX.find(assistantBodyOnly) ?: return null to assistantBodyOnly
-            val prompt = match.groupValues[1].trim()
-            val cleaned = assistantBodyOnly.replace(ILLUME_BLOCK_REGEX, "").trim()
-            return (prompt.ifBlank { null }) to cleaned
+            ILLUME_BLOCK_REGEX.find(assistantBodyOnly)?.let { match ->
+                val prompt = match.groupValues[1].trim().trim('`', '"', '\'')
+                val cleaned = assistantBodyOnly.replace(ILLUME_BLOCK_REGEX, "").trim()
+                return (prompt.ifBlank { null }) to cleaned
+            }
+            ILLUME_INLINE_REGEX.find(assistantBodyOnly)?.let { match ->
+                val prompt = match.groupValues[1].trim().trim('`', '"', '\'')
+                val cleaned = assistantBodyOnly.replace(ILLUME_INLINE_REGEX, "").trim()
+                return (prompt.ifBlank { null }) to cleaned
+            }
+            ILLUME_UNCLOSED_REGEX.find(assistantBodyOnly)?.let { match ->
+                val prompt = match.groupValues[1].replace("```", "").trim().trim('"', '\'')
+                val cleaned = assistantBodyOnly.replace(ILLUME_UNCLOSED_REGEX, "").trim()
+                return (prompt.ifBlank { null }) to cleaned
+            }
+            return null to assistantBodyOnly
         }
 
         fun isRetryableError(err: Throwable): Boolean {

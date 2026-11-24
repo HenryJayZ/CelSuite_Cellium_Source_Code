@@ -1,0 +1,17 @@
+1. Welp Google sign in still didn't work, just recreate the key and everything so it works right out of the box (make sure everything syncs in the google account perfectly) (screenshot)
+
+2. welp as usual, pollination image generation is not working out of the box for consumers, can't you search the web for the foolproof way to do this according to people that failed with trial and error on platforms on e.g reddit? (screenshot 2)
+
+3. Omg I just realized, in this screenshot of multiple requests in live mode, if I give my app to two people, and they both talk to pollination, would one of them stop?, Hmm, Cuz I mean there is no API key so Pollination can't tell those two people apart right?
+
+4. In this screenshot, Cellium is not working as my Phone assistant in Default assistant settings, it's just showing "none" when I pick Cellium, and holding my home button does nothing 
+
+5. In Live mode, You never made the features in my original Cel PC App, Cuz it has no memory and I think it's not picking up the persona I gave it
+
+6. Omg we forgot to make a way to disable floating Cel! 😹🫣, Um, do it like Google where an Abyss (with a very obvious ❌) would be there (dark red hell abyss will be animated) to drag the floating window, or if the user goes to live mode again and clicks "Float" again 
+
+7. The floating face feels dead, make her get bored and then soon sleep 😴... until disturbed by me and she wakes up angry 😡😹🤭, and repeat!
+
+8. on the floating, It says "listening" even tho the user's mic is not ready 👀....
+
+9. 

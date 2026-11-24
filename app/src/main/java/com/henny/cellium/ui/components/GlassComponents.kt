@@ -125,49 +125,7 @@ fun CelliumBackground(
     val effectiveDim = dimAlpha ?: visuals.wallpaperDim
     val effectiveParticles = particlesEnabled ?: visuals.particlesEnabled
     val densityCount = visuals.particleDensity.coerceIn(0, 60)
-
-    val motes = remember(densityCount) {
-        val rng = Random(422026)
-        List(densityCount) {
-            AmbientMote(
-                xFrac = rng.nextFloat(),
-                yFrac = rng.nextFloat(),
-                radius = 2.0f + rng.nextFloat() * 4.2f,
-                speed = 0.012f + rng.nextFloat() * 0.025f,
-                phase = rng.nextFloat() * 6.28f,
-                magenta = rng.nextBoolean(),
-            )
-        }
-    }
     val context = LocalContext.current
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    var isResumed by remember { mutableStateOf(true) }
-    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            when (event) {
-                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> isResumed = true
-                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> isResumed = false
-                else -> Unit
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    var tickMs by remember { mutableLongStateOf(0L) }
-    val frameStepMs = if (visuals.highFpsMode) 20L else 48L
-    LaunchedEffect(effectiveParticles, frameStepMs, isResumed) {
-        if (!effectiveParticles || densityCount == 0 || !isResumed) return@LaunchedEffect
-        var lastMs = 0L
-        while (true) {
-            withFrameMillis { now ->
-                if (now - lastMs >= frameStepMs) {
-                    lastMs = now
-                    tickMs = now
-                }
-            }
-        }
-    }
 
     val wallpaperRequest = remember(visuals.customWallpaperUri) {
         val data: Any = if (visuals.customWallpaperUri.isNotBlank()) {
@@ -183,6 +141,16 @@ fun CelliumBackground(
     }
 
     val neutralScrim = Color(0xFF06060A)
+    val scrimBrush = remember(effectiveDim) {
+        Brush.verticalGradient(
+            colors = listOf(
+                neutralScrim.copy(alpha = (effectiveDim + 0.14f).coerceIn(0.18f, 0.92f)),
+                neutralScrim.copy(alpha = effectiveDim.coerceIn(0.10f, 0.86f)),
+                neutralScrim.copy(alpha = (effectiveDim + 0.20f).coerceIn(0.24f, 0.94f)),
+            )
+        )
+    }
+
     Box(modifier = modifier.fillMaxSize().background(neutralScrim)) {
         AsyncImage(
             model = wallpaperRequest,
@@ -193,34 +161,87 @@ fun CelliumBackground(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            neutralScrim.copy(alpha = (effectiveDim + 0.14f).coerceIn(0.18f, 0.92f)),
-                            neutralScrim.copy(alpha = effectiveDim.coerceIn(0.10f, 0.86f)),
-                            neutralScrim.copy(alpha = (effectiveDim + 0.20f).coerceIn(0.24f, 0.94f)),
-                        )
-                    )
-                )
+                .background(scrimBrush)
         )
         val scrollCaptureActive = LocalScrollCaptureInProgress.current
-        if (effectiveParticles && motes.isNotEmpty() && !scrollCaptureActive) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val t = tickMs * 0.001f
-                for (m in motes) {
-                    val y = ((m.yFrac - t * m.speed) % 1f + 1f) % 1f
-                    val x = m.xFrac + sin(t * 0.7f + m.phase) * 0.025f
-                    val alpha = (0.16f + 0.22f * (0.5f + 0.5f * sin(t * 1.4f + m.phase))).coerceIn(0.06f, 0.45f)
-                    val color = if (m.magenta) visuals.secondary else visuals.primary
-                    drawCircle(
-                        color = color.copy(alpha = alpha),
-                        radius = m.radius * density,
-                        center = Offset(x * size.width, y * size.height),
-                    )
+        if (effectiveParticles && densityCount > 0 && !scrollCaptureActive) {
+            AmbientParticlesOverlay(
+                densityCount = densityCount,
+                highFpsMode = visuals.highFpsMode,
+                primary = visuals.primary,
+                secondary = visuals.secondary,
+            )
+        }
+        content()
+    }
+}
+
+/**
+ * Isolated ambient particle layer so frame ticks ONLY invalidate this lightweight Canvas draw phase
+ * and NEVER trigger recomposition of CelliumBackground or any foreground UI screens.
+ */
+@Composable
+private fun AmbientParticlesOverlay(
+    densityCount: Int,
+    highFpsMode: Boolean,
+    primary: Color,
+    secondary: Color,
+) {
+    val motes = remember(densityCount) {
+        val rng = Random(422026)
+        List(densityCount) {
+            AmbientMote(
+                xFrac = rng.nextFloat(),
+                yFrac = rng.nextFloat(),
+                radius = 2.0f + rng.nextFloat() * 4.2f,
+                speed = 0.012f + rng.nextFloat() * 0.025f,
+                phase = rng.nextFloat() * 6.28f,
+                magenta = rng.nextBoolean(),
+            )
+        }
+    }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    var isResumed by remember { mutableStateOf(true) }
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> isResumed = true
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> isResumed = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    var tickMs by remember { mutableLongStateOf(0L) }
+    val frameStepMs = if (highFpsMode) 33L else 55L
+    LaunchedEffect(frameStepMs, isResumed) {
+        if (!isResumed) return@LaunchedEffect
+        var lastMs = 0L
+        while (true) {
+            withFrameMillis { now ->
+                if (now - lastMs >= frameStepMs) {
+                    lastMs = now
+                    tickMs = now
                 }
             }
         }
-        content()
+    }
+
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val t = tickMs * 0.001f
+        for (m in motes) {
+            val y = ((m.yFrac - t * m.speed) % 1f + 1f) % 1f
+            val x = m.xFrac + sin(t * 0.7f + m.phase) * 0.025f
+            val alpha = (0.16f + 0.22f * (0.5f + 0.5f * sin(t * 1.4f + m.phase))).coerceIn(0.06f, 0.45f)
+            val color = if (m.magenta) secondary else primary
+            drawCircle(
+                color = color.copy(alpha = alpha),
+                radius = m.radius * density,
+                center = Offset(x * size.width, y * size.height),
+            )
+        }
     }
 }
 
@@ -452,32 +473,48 @@ private fun formatInlineMarkdown(text: String): AnnotatedString = buildAnnotated
     }
 }
 
+private sealed interface CompiledMdBlock {
+    data class Paragraph(val formatted: AnnotatedString) : CompiledMdBlock
+    data class Heading(val level: Int, val formatted: AnnotatedString) : CompiledMdBlock
+    data class Bullet(val formatted: AnnotatedString) : CompiledMdBlock
+    data class Code(val language: String, val code: String) : CompiledMdBlock
+}
+
 @Composable
 fun MarkdownMessageContent(
     text: String,
     defaultWordWrap: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
-    val blocks = remember(text) { parseMarkdownBlocks(text) }
+    val compiledBlocks = remember(text) {
+        parseMarkdownBlocks(text).map { block ->
+            when (block) {
+                is MdBlock.Heading -> CompiledMdBlock.Heading(block.level, formatInlineMarkdown(block.text))
+                is MdBlock.Bullet -> CompiledMdBlock.Bullet(formatInlineMarkdown(block.text))
+                is MdBlock.Paragraph -> CompiledMdBlock.Paragraph(formatInlineMarkdown(block.text))
+                is MdBlock.Code -> CompiledMdBlock.Code(block.language, block.code)
+            }
+        }
+    }
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        for (block in blocks) {
+        for (block in compiledBlocks) {
             when (block) {
-                is MdBlock.Heading -> {
+                is CompiledMdBlock.Heading -> {
                     val style = when (block.level) {
                         1 -> MaterialTheme.typography.titleLarge
                         2 -> MaterialTheme.typography.titleMedium
                         else -> MaterialTheme.typography.titleSmall
                     }
                     Text(
-                        text = formatInlineMarkdown(block.text),
+                        text = block.formatted,
                         style = style,
                         color = CelSoftLavender,
                     )
                 }
-                is MdBlock.Bullet -> {
+                is CompiledMdBlock.Bullet -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
                             text = "•",
@@ -485,20 +522,20 @@ fun MarkdownMessageContent(
                             color = CelViolet,
                         )
                         Text(
-                            text = formatInlineMarkdown(block.text),
+                            text = block.formatted,
                             style = MaterialTheme.typography.bodyMedium,
                             color = CelTextPrimary,
                         )
                     }
                 }
-                is MdBlock.Paragraph -> {
+                is CompiledMdBlock.Paragraph -> {
                     Text(
-                        text = formatInlineMarkdown(block.text),
+                        text = block.formatted,
                         style = MaterialTheme.typography.bodyMedium,
                         color = CelTextPrimary,
                     )
                 }
-                is MdBlock.Code -> CodeCard(
+                is CompiledMdBlock.Code -> CodeCard(
                     language = block.language,
                     code = block.code,
                     defaultWordWrap = defaultWordWrap,

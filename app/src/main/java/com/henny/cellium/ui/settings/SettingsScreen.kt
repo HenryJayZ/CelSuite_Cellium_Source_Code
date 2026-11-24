@@ -81,6 +81,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -96,6 +97,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.henny.cellium.BuildConfig
 import com.henny.cellium.core.ContextModifyConfig
 import com.henny.cellium.core.UserProfile
 import com.henny.cellium.data.local.CustomPersonaEntity
@@ -221,7 +223,7 @@ fun SettingsScreen(
             item {
                 Text("Cel.Cellium Settings", style = MaterialTheme.typography.titleLarge, color = CelTextPrimary)
                 Text(
-                    "v2611.22.0 · Local-First Room SQLite · CelSuite.HenryJayz.Cellium",
+                    "${BuildConfig.VERSION_NAME} · Local-First Room SQLite · CelSuite.HenryJayz.Cellium",
                     style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
                     color = CelTextSecondary,
                 )
@@ -277,7 +279,7 @@ fun SettingsScreen(
                         SettingsCategory.PROVIDERS -> "${uiState.activeProvider?.name ?: "None"} · Retry ${prefs.maxAutoRetries}x"
                         SettingsCategory.OFFLINE -> "${uiState.registeredLocalModels.size} models · Live RAM $processRamMb MB"
                         SettingsCategory.APPEARANCE -> "Theme: ${prefs.themePresetId} · Wrap ${if (prefs.codeWordWrap) "ON" else "OFF"}"
-                        SettingsCategory.VOICE -> "Wake: ${if (prefs.wakeWordEnabled) "ON" else "OFF"} · Mood: ${if (prefs.moodMethod == "background_ai") "AI" else "Tag"}"
+                        SettingsCategory.VOICE -> "TTS: ${prefs.ttsEngine.uppercase()} · STT: ${prefs.sttEngine.substringBefore('_').uppercase()} · Speed: ${prefs.typingSpeed}"
                         SettingsCategory.PERSONAS -> "${uiState.customPersonas.size} personas · ${uiState.memories.size} memories"
                         SettingsCategory.CONTEXT -> "History ${prefs.contextModify.historyLimit} turns · n_ctx ${prefs.contextModify.ggufContextLength}"
                         SettingsCategory.AGENT -> "Shizuku: ${uiState.shizukuStatus.name} · Agent ${if (prefs.agentModeEnabled) "ON" else "OFF"}"
@@ -506,52 +508,75 @@ fun SettingsScreen(
                                     scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(includeMoodInstructions = it)) }
                                 }
 
-                                Text("History Turns Sent: ${cfg.historyLimit}", style = MaterialTheme.typography.labelSmall, color = CelLavender)
+                                var histDraft by remember(cfg.historyLimit) { mutableFloatStateOf(cfg.historyLimit.toFloat()) }
+                                var ctxDraft by remember(cfg.ggufContextLength) { mutableFloatStateOf(cfg.ggufContextLength.toFloat()) }
+                                var maxTokDraft by remember(cfg.ggufMaxTokens) { mutableFloatStateOf(cfg.ggufMaxTokens.toFloat()) }
+                                var tempDraft by remember(cfg.ggufTemperature) { mutableFloatStateOf(cfg.ggufTemperature) }
+                                var topPDraft by remember(cfg.ggufTopP) { mutableFloatStateOf(cfg.ggufTopP) }
+                                var repDraft by remember(cfg.ggufRepeatPenalty) { mutableFloatStateOf(cfg.ggufRepeatPenalty) }
+                                var threadsDraft by remember(cfg.ggufThreads) { mutableFloatStateOf(cfg.ggufThreads.toFloat()) }
+                                var gpuLayersDraft by remember(cfg.ggufGpuLayers) { mutableFloatStateOf(cfg.ggufGpuLayers.toFloat()) }
+
+                                Text("History Turns Sent: ${histDraft.toInt()}", style = MaterialTheme.typography.labelSmall, color = CelLavender)
                                 Slider(
-                                    value = cfg.historyLimit.toFloat(),
-                                    onValueChange = { v -> scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(historyLimit = v.toInt())) } },
-                                    valueRange = 2f..36f,
+                                    value = histDraft,
+                                    onValueChange = { histDraft = it },
+                                    onValueChangeFinished = { scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(historyLimit = histDraft.toInt())) } },
+                                    valueRange = 2f..64f,
                                 )
 
                                 HorizontalDivider(color = visuals.subtleBorder, modifier = Modifier.padding(vertical = 8.dp))
-                                Text("Offline .gguf llama.cpp Knobs", style = MaterialTheme.typography.titleSmall, color = visuals.primary)
+                                Text("Offline .gguf llama.cpp Knobs (No Caps)", style = MaterialTheme.typography.titleSmall, color = visuals.primary)
                                 Spacer(Modifier.height(6.dp))
 
-                                Text("Context Length (n_ctx): ${cfg.ggufContextLength}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                                Text("Context Length (n_ctx): ${(ctxDraft.toInt() / 256) * 256}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
                                 Slider(
-                                    value = cfg.ggufContextLength.toFloat(),
-                                    onValueChange = { v -> scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufContextLength = (v.toInt() / 256) * 256)) } },
-                                    valueRange = 512f..8192f,
+                                    value = ctxDraft,
+                                    onValueChange = { ctxDraft = it },
+                                    onValueChangeFinished = { scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufContextLength = (ctxDraft.toInt() / 256) * 256)) } },
+                                    valueRange = 512f..32768f,
                                 )
-                                Text("Max Output Tokens: ${cfg.ggufMaxTokens}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                                Text("Max Output Tokens: ${(maxTokDraft.toInt() / 64) * 64}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
                                 Slider(
-                                    value = cfg.ggufMaxTokens.toFloat(),
-                                    onValueChange = { v -> scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufMaxTokens = (v.toInt() / 64) * 64)) } },
-                                    valueRange = 128f..4096f,
+                                    value = maxTokDraft,
+                                    onValueChange = { maxTokDraft = it },
+                                    onValueChangeFinished = { scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufMaxTokens = (maxTokDraft.toInt() / 64) * 64)) } },
+                                    valueRange = 128f..16384f,
                                 )
-                                Text("Temperature: ${String.format(Locale.US, "%.2f", cfg.ggufTemperature)}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                                Text("Temperature: ${String.format(Locale.US, "%.2f", tempDraft)}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
                                 Slider(
-                                    value = cfg.ggufTemperature,
-                                    onValueChange = { v -> scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufTemperature = v)) } },
+                                    value = tempDraft,
+                                    onValueChange = { tempDraft = it },
+                                    onValueChangeFinished = { scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufTemperature = tempDraft)) } },
                                     valueRange = 0f..1.8f,
                                 )
-                                Text("Top-P: ${String.format(Locale.US, "%.2f", cfg.ggufTopP)} · Top-K: ${cfg.ggufTopK}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                                Text("Top-P: ${String.format(Locale.US, "%.2f", topPDraft)} · Top-K: ${cfg.ggufTopK}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
                                 Slider(
-                                    value = cfg.ggufTopP,
-                                    onValueChange = { v -> scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufTopP = v)) } },
+                                    value = topPDraft,
+                                    onValueChange = { topPDraft = it },
+                                    onValueChangeFinished = { scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufTopP = topPDraft)) } },
                                     valueRange = 0.1f..1.0f,
                                 )
-                                Text("Repeat Penalty: ${String.format(Locale.US, "%.2f", cfg.ggufRepeatPenalty)}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                                Text("Repeat Penalty: ${String.format(Locale.US, "%.2f", repDraft)}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
                                 Slider(
-                                    value = cfg.ggufRepeatPenalty,
-                                    onValueChange = { v -> scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufRepeatPenalty = v)) } },
+                                    value = repDraft,
+                                    onValueChange = { repDraft = it },
+                                    onValueChangeFinished = { scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufRepeatPenalty = repDraft)) } },
                                     valueRange = 1.0f..1.45f,
                                 )
-                                Text("CPU Threads: ${cfg.ggufThreads} · GPU Layers: ${cfg.ggufGpuLayers}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                                Text("CPU Threads: ${threadsDraft.toInt()}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
                                 Slider(
-                                    value = cfg.ggufThreads.toFloat(),
-                                    onValueChange = { v -> scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufThreads = v.toInt())) } },
-                                    valueRange = 1f..8f,
+                                    value = threadsDraft,
+                                    onValueChange = { threadsDraft = it },
+                                    onValueChangeFinished = { scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufThreads = threadsDraft.toInt())) } },
+                                    valueRange = 1f..16f,
+                                )
+                                Text("GPU Offload Layers: ${gpuLayersDraft.toInt()}", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                                Slider(
+                                    value = gpuLayersDraft,
+                                    onValueChange = { gpuLayersDraft = it },
+                                    onValueChangeFinished = { scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufGpuLayers = gpuLayersDraft.toInt())) } },
+                                    valueRange = 0f..99f,
                                 )
                                 SettingSwitchRow("Memory-Map Weights (mmap · Saves RAM)", cfg.ggufUseMmap) {
                                     scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(ggufUseMmap = it)) }
@@ -659,17 +684,19 @@ fun SettingsScreen(
                                 SettingSwitchRow("Auto-Protect When RAM Crosses Threshold", prefs.shizukuAutoGuard) {
                                     scope.launch { viewModel.prefsStore.updateShizukuSettings(it, prefs.ramGuardThresholdMb, prefs.agentAutoApproveSafe) }
                                 }
+                                var ramGuardDraft by remember(prefs.ramGuardThresholdMb) { mutableFloatStateOf(prefs.ramGuardThresholdMb.toFloat()) }
                                 Text(
-                                    "RAM Guard Trigger: ${prefs.ramGuardThresholdMb} MB (${"%.1f".format(prefs.ramGuardThresholdMb / 1024f)} GB)",
+                                    "RAM Guard Trigger: ${ramGuardDraft.toInt()} MB (${"%.1f".format(ramGuardDraft / 1024f)} GB)",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = CelTextSecondary,
                                 )
                                 Slider(
-                                    value = prefs.ramGuardThresholdMb.toFloat(),
-                                    onValueChange = { v ->
-                                        scope.launch { viewModel.prefsStore.updateShizukuSettings(prefs.shizukuAutoGuard, v.toInt(), prefs.agentAutoApproveSafe) }
+                                    value = ramGuardDraft,
+                                    onValueChange = { ramGuardDraft = it },
+                                    onValueChangeFinished = {
+                                        scope.launch { viewModel.prefsStore.updateShizukuSettings(prefs.shizukuAutoGuard, ramGuardDraft.toInt(), prefs.agentAutoApproveSafe) }
                                     },
-                                    valueRange = 512f..3584f,
+                                    valueRange = 512f..16384f,
                                 )
                                 SettingSwitchRow("Enable AI Agent Mode (Shizuku Shell Calls)", prefs.agentModeEnabled) {
                                     scope.launch { viewModel.prefsStore.updateAgentMode(it) }

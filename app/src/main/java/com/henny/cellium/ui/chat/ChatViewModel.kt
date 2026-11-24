@@ -21,6 +21,8 @@ import com.henny.cellium.avatar.MoodDetector
 import com.henny.cellium.core.CelliumNotificationManager
 import com.henny.cellium.core.CelliumPreferences
 import com.henny.cellium.core.CelliumSoundEngine
+import com.henny.cellium.core.CelliumSttEngine
+import com.henny.cellium.core.CelliumTtsEngine
 import com.henny.cellium.core.ContextModifyConfig
 import com.henny.cellium.core.DevLogBuffer
 import com.henny.cellium.core.PreferencesStore
@@ -159,13 +161,15 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
 
     val prefsStore = PreferencesStore(appContext)
     val soundEngine = CelliumSoundEngine(appContext)
+    val ttsEngine = CelliumTtsEngine(appContext)
+    val sttEngine = CelliumSttEngine(appContext)
     val shizukuBridge = ShizukuBridge(appContext)
     val llmClient = UniversalLlmClient()
     val webTools = WebToolsClient()
     val onDeviceEngine = OnDeviceLlmEngine(appContext, shizukuBridge)
     val imagineClient = MultiImagineClient(appContext)
     val backupManager = AppBackupManager(dao)
-    private val cloudSync = CloudSyncManager(dao, prefsStore)
+    private val cloudSync = CloudSyncManager(appContext, dao, prefsStore)
 
     private val _preferencesLoaded = MutableStateFlow(false)
     val preferencesLoaded: StateFlow<Boolean> = _preferencesLoaded.asStateFlow()
@@ -200,6 +204,8 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
     val arenaController = ArenaController(
         scope = viewModelScope,
         dao = dao,
+        prefsStore = prefsStore,
+        preferencesProvider = { preferences.value },
         llmClient = llmClient,
         onDeviceEngine = onDeviceEngine,
         soundEngine = soundEngine,
@@ -207,12 +213,46 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         customPersonasProvider = { _uiState.value.customPersonas },
         memoriesProvider = { _uiState.value.memories },
         maxAutoRetriesProvider = { preferences.value.maxAutoRetries },
+        onArenaConfigChanged = { scheduleBackgroundCloudSync() },
         onNotifyIfBackground = { sid, title, speaker, text ->
             maybePostReplyNotification(sid, title, speaker, text, isArena = true)
         },
     )
 
+    fun speakText(
+        text: String,
+        onStart: (() -> Unit)? = null,
+        onComplete: (() -> Unit)? = null,
+    ) {
+        val p = preferences.value
+        ttsEngine.speak(
+            rawText = text,
+            engine = p.ttsEngine,
+            voiceName = p.ttsVoiceName,
+            pitch = p.ttsPitch,
+            speechRate = p.ttsSpeechRate,
+            onStart = onStart,
+            onComplete = onComplete,
+        )
+    }
+
+    fun resolveSttApiKey(engineId: String = preferences.value.sttEngine): String {
+        val explicit = preferences.value.sttApiKey.trim()
+        if (explicit.isNotBlank()) return explicit
+        val providers = _uiState.value.providers
+        return when (engineId) {
+            CelliumSttEngine.ENGINE_GROQ ->
+                providers.firstOrNull { it.id == ProviderPresets.ID_GROQ || it.name.contains("groq", ignoreCase = true) }?.apiKey.orEmpty()
+            CelliumSttEngine.ENGINE_OPENAI ->
+                providers.firstOrNull { it.id == ProviderPresets.ID_OPENAI || it.name.equals("OpenAI", ignoreCase = true) }?.apiKey.orEmpty()
+            CelliumSttEngine.ENGINE_HUGGINGFACE ->
+                providers.firstOrNull { it.id == ProviderPresets.ID_HUGGINGFACE || it.name.contains("hugging", ignoreCase = true) }?.apiKey.orEmpty()
+            else -> ""
+        }
+    }
+
     private var streamJob: Job? = null
+    private var liveStreamJob: Job? = null
     private var autoSyncJob: Job? = null
     private var autoGuardTriggeredForPeak = false
 
@@ -335,6 +375,8 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
 
     private fun observeCoreFlows() {
         viewModelScope.launch {
+            var lastRegisteredModelsJson: String? = null
+            var lastActiveProviderId: String? = null
             preferences.collectLatest { p ->
                 soundEngine.enabled = p.soundsEnabled
                 soundEngine.animaleseEnabled = p.animaleseEnabled
@@ -342,11 +384,19 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 soundEngine.masterVolume = p.sfxVolume
                 soundEngine.typingSoundStyle = p.typingSoundStyle
 
-                val currentProviders = _uiState.value.providers
-                val activeProv = currentProviders.firstOrNull { it.id == p.activeProviderId }
-                    ?: currentProviders.firstOrNull()
-                _uiState.value = _uiState.value.copy(activeProvider = activeProv)
-                refreshLocalModelsList(p.registeredLocalModelsJson)
+                if (p.activeProviderId != lastActiveProviderId) {
+                    lastActiveProviderId = p.activeProviderId
+                    val currentProviders = _uiState.value.providers
+                    val activeProv = currentProviders.firstOrNull { it.id == p.activeProviderId }
+                        ?: currentProviders.firstOrNull()
+                    if (activeProv != _uiState.value.activeProvider) {
+                        _uiState.value = _uiState.value.copy(activeProvider = activeProv)
+                    }
+                }
+                if (p.registeredLocalModelsJson != lastRegisteredModelsJson) {
+                    lastRegisteredModelsJson = p.registeredLocalModelsJson
+                    refreshLocalModelsList(p.registeredLocalModelsJson)
+                }
             }
         }
 
@@ -1100,6 +1150,67 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             var chirpCounter = 0
             var lastUiFlushMs = 0L
 
+            // Decoupled typewriter reveal pacing so Animal Crossing / Scratchin' Melodii chirps shine!
+            val typingSpeed = prefs.typingSpeed
+            val isInstantTyping = typingSpeed == "instant"
+            val charsPerTick = when (typingSpeed) {
+                "super_slow" -> 1
+                "slow" -> 1
+                "medium" -> 2
+                "fast" -> 4
+                "very_fast" -> 9
+                else -> Int.MAX_VALUE
+            }
+            val tickDelayMs = when (typingSpeed) {
+                "super_slow" -> 52L
+                "slow" -> 30L
+                "medium" -> 30L
+                "fast" -> 26L
+                "very_fast" -> 22L
+                else -> 0L
+            }
+
+            val targetBodyText = java.util.concurrent.atomic.AtomicReference("")
+            val targetThoughtText = java.util.concurrent.atomic.AtomicReference("")
+            val targetMood = java.util.concurrent.atomic.AtomicReference("thinking")
+            val networkDone = java.util.concurrent.atomic.AtomicBoolean(false)
+            var displayedLength = 0
+
+            var revealJob: Job? = null
+            if (!isInstantTyping) {
+                revealJob = viewModelScope.launch {
+                    while (!networkDone.get() || displayedLength < targetBodyText.get().length) {
+                        val full = targetBodyText.get()
+                        val thoughtSnap = targetThoughtText.get()
+                        val moodSnap = targetMood.get()
+                        if (displayedLength < full.length) {
+                            val nextLen = (displayedLength + charsPerTick).coerceAtMost(full.length)
+                            val newlyRevealed = full.substring(displayedLength, nextLen)
+                            displayedLength = nextLen
+                            val speakableChar = newlyRevealed.firstOrNull { it.isLetterOrDigit() }
+                            if (speakableChar != null) {
+                                soundEngine.playAnimaleseChirp(
+                                    speakableChar.code,
+                                    isQuestion = full.endsWith("?"),
+                                )
+                            }
+                            _uiState.value = _uiState.value.copy(
+                                streamingContent = full.substring(0, displayedLength),
+                                streamingThought = thoughtSnap,
+                                retryStatusText = "",
+                                currentMood = moodSnap,
+                            )
+                        } else if (thoughtSnap.isNotEmpty() && _uiState.value.streamingThought != thoughtSnap) {
+                            _uiState.value = _uiState.value.copy(
+                                streamingThought = thoughtSnap,
+                                currentMood = moodSnap,
+                            )
+                        }
+                        delay(tickDelayMs)
+                    }
+                }
+            }
+
             try {
                 val maxRetries = if (prov.protocol == "on_device") 0 else prefs.maxAutoRetries.coerceIn(0, 15)
                 var attempt = 0
@@ -1108,6 +1219,9 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 while (attempt <= maxRetries) {
                     rawContent.clear()
                     rawThought.clear()
+                    targetBodyText.set("")
+                    targetThoughtText.set("")
+                    displayedLength = 0
                     lastUiFlushMs = 0L
                     try {
                         val flow = if (prov.protocol == "on_device") {
@@ -1133,8 +1247,10 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                             if (chunk.thoughtDelta.isNotEmpty()) rawThought.append(chunk.thoughtDelta)
                             if (chunk.contentDelta.isNotEmpty()) {
                                 rawContent.append(chunk.contentDelta)
-                                chirpCounter++
-                                if (chirpCounter % 7 == 0) soundEngine.playAnimaleseChirp(chirpCounter)
+                                if (isInstantTyping) {
+                                    chirpCounter++
+                                    if (chirpCounter % 5 == 0) soundEngine.playAnimaleseChirp(chirpCounter)
+                                }
                             }
                             val now = System.currentTimeMillis()
                             if (now - lastUiFlushMs >= 32L) {
@@ -1145,22 +1261,29 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                                     .filter { it.isNotEmpty() }.joinToString("\n\n")
                                 val liveMood = inlineMood
                                     ?: if (bodyNoMood.isNotBlank()) MoodDetector.detectMood(bodyNoMood) else "thinking"
-                                _uiState.value = _uiState.value.copy(
-                                    streamingContent = bodyNoMood,
-                                    streamingThought = mergedThought,
-                                    retryStatusText = "",
-                                    currentMood = liveMood,
-                                )
+                                targetBodyText.set(bodyNoMood)
+                                targetThoughtText.set(mergedThought)
+                                targetMood.set(liveMood)
+                                if (isInstantTyping) {
+                                    _uiState.value = _uiState.value.copy(
+                                        streamingContent = bodyNoMood,
+                                        streamingThought = mergedThought,
+                                        retryStatusText = "",
+                                        currentMood = liveMood,
+                                    )
+                                }
                             }
                         }
                         lastErr = null
                         break
                     } catch (e: CancellationException) {
+                        revealJob?.cancel()
                         throw e
                     } catch (e: Exception) {
                         lastErr = e
                         val retryable = prov.protocol != "on_device" && UniversalLlmClient.isRetryableError(e)
                         if (!retryable || attempt >= maxRetries) {
+                            revealJob?.cancel()
                             throw e
                         }
                         attempt++
@@ -1173,13 +1296,23 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                         delay(backoffMs)
                     }
                 }
-                if (lastErr != null) throw lastErr
+                if (lastErr != null) {
+                    revealJob?.cancel()
+                    throw lastErr
+                }
 
                 val (inlineThought, cleanBody) = ProviderPresets.parseThoughts(rawContent.toString())
                 val (inlineMood, bodyNoMood) = MoodDetector.extractInlineMoodTag(cleanBody)
                 val mergedThought = listOf(rawThought.toString().trim(), inlineThought)
                     .filter { it.isNotEmpty() }.joinToString("\n\n")
                 var finalBody = bodyNoMood.ifBlank { cleanBody.ifBlank { rawContent.toString().trim() } }
+
+                // Let typewriter finish revealing the remaining buffered text cleanly before finalizing!
+                targetBodyText.set(finalBody)
+                targetThoughtText.set(mergedThought)
+                targetMood.set(inlineMood ?: MoodDetector.detectMood(finalBody))
+                networkDone.set(true)
+                revealJob?.join()
 
                 // Check for [ILLUME_GEN]...[/ILLUME_GEN] image generation tool trigger
                 var generatedImagePath = ""
@@ -1233,6 +1366,9 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 _selectedLeafBySession.value = _selectedLeafBySession.value + (sessionId to assistantId)
                 refreshSessionStats(sessionId)
                 soundEngine.playRecv()
+                if (prefs.autoReadReplies && !saveAsCompactSummary && appInForeground) {
+                    speakText(assistantEntity.content)
+                }
 
                 val sessTitle = dao.getSession(sessionId)?.title ?: "Cel.Cellium"
                 maybePostReplyNotification(sessionId, sessTitle, persona.name, assistantEntity.content)
@@ -1247,7 +1383,9 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 )
 
                 // Mood Engine Method 2: fast background AI mood classification when selected
-                if (!saveAsCompactSummary && prefs.moodMethod == "background_ai" && prov.protocol != "on_device") {
+                // Skip on keyless Pollinations Classic API (1 concurrent request per IP prevents HTTP 429)
+                val isKeylessPollinations = prov.id == ProviderPresets.ID_POLLINATIONS_FREE && prov.apiKey.isBlank()
+                if (!saveAsCompactSummary && prefs.moodMethod == "background_ai" && prov.protocol != "on_device" && !isKeylessPollinations) {
                     viewModelScope.launch {
                         val refined = llmClient.classifyMoodFast(prov, finalBody)
                         if (!refined.isNullOrBlank()) {
@@ -1458,9 +1596,12 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         onComplete: (String) -> Unit,
         onError: (String) -> Unit,
     ) {
+        val cleanTranscript = transcript.trim()
+        if (cleanTranscript.isEmpty()) return
         val prov = _uiState.value.activeProvider ?: ProviderPresets.defaultProfiles().first()
         val prefs = preferences.value
         val persona = _uiState.value.resolvedPersona
+        val ctxCfg = prefs.contextModify
         val systemPrompt = llmClient.buildSystemPrompt(
             persona = persona,
             memories = _uiState.value.memories,
@@ -1474,45 +1615,122 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 includeAgentInstructions = false,
                 includeMoodInstructions = prefs.moodMethod == "inline_tag",
             ),
-            extraInstruction = "[Live Voice Mode] Reply naturally in 1 to 3 concise spoken sentences without markdown formatting or asterisks.",
+            extraInstruction = "[Live Voice Mode] Reply naturally in 1 to 3 concise spoken sentences without markdown formatting or asterisks. Remember the conversation history.",
         )
-        viewModelScope.launch {
+
+        // Cancel any previous in-flight live request so Pollinations Classic API never throws HTTP 429 overlap
+        liveStreamJob?.cancel()
+        liveStreamJob = viewModelScope.launch {
             val sb = StringBuilder()
+            val startMs = System.currentTimeMillis()
             try {
-                dao.incrementProviderUsage(prov.id)
-                val flow = if (prov.protocol == "on_device") {
-                    onDeviceEngine.streamReply(systemPrompt, emptyList(), transcript)
-                } else {
-                    llmClient.streamChat(
-                        provider = prov,
-                        systemPrompt = systemPrompt,
-                        history = emptyList(),
-                        userPrompt = transcript,
-                        imageBitmap = screenBitmap,
+                val sid = ensureActiveSession("Live · ${persona.name}")
+                val allBefore = dao.getMessagesForSessionOnce(sid)
+                val currentLeafId = _selectedLeafBySession.value[sid]
+                    ?: dao.getSession(sid)?.activeLeafId?.takeIf { it.isNotBlank() }
+                    ?: allBefore.lastOrNull()?.id
+                val ancestorHistory = sliceHistoryFromLatestCompact(
+                    ChatTreeHelper.buildAncestorPath(allBefore, currentLeafId)
+                )
+
+                val userMsgId = UUID.randomUUID().toString()
+                dao.upsertMessage(
+                    MessageEntity(
+                        id = userMsgId,
+                        sessionId = sid,
+                        parentId = currentLeafId,
+                        role = "user",
+                        content = cleanTranscript,
+                        tokenEstimate = ProviderPresets.estimateTokens(cleanTranscript),
                     )
-                }
-                flow.collect { chunk ->
-                    if (chunk.contentDelta.isNotEmpty()) {
-                        sb.append(chunk.contentDelta)
-                        val (_, clean) = ProviderPresets.parseThoughts(sb.toString())
-                        val (tagMood, bodyNoMood) = MoodDetector.extractInlineMoodTag(clean)
-                        if (tagMood != null) onMoodChanged(tagMood)
-                        onDelta(bodyNoMood)
+                )
+                _selectedLeafBySession.value = _selectedLeafBySession.value + (sid to userMsgId)
+                refreshSessionStats(sid)
+
+                dao.incrementProviderUsage(prov.id)
+                val maxRetries = if (prov.protocol == "on_device") 0 else prefs.maxAutoRetries.coerceIn(0, 4)
+                var attempt = 0
+                while (true) {
+                    sb.clear()
+                    try {
+                        val flow = if (prov.protocol == "on_device") {
+                            onDeviceEngine.streamReply(
+                                systemPrompt = systemPrompt,
+                                history = ancestorHistory,
+                                userPrompt = cleanTranscript,
+                                historyLimit = ctxCfg.historyLimit,
+                            )
+                        } else {
+                            llmClient.streamChat(
+                                provider = prov,
+                                systemPrompt = systemPrompt,
+                                history = ancestorHistory,
+                                userPrompt = cleanTranscript,
+                                imageBitmap = screenBitmap,
+                                historyLimit = ctxCfg.historyLimit,
+                            )
+                        }
+                        flow.collect { chunk ->
+                            if (chunk.contentDelta.isNotEmpty()) {
+                                sb.append(chunk.contentDelta)
+                                val (_, clean) = ProviderPresets.parseThoughts(sb.toString())
+                                val (tagMood, bodyNoMood) = MoodDetector.extractInlineMoodTag(clean)
+                                if (tagMood != null) onMoodChanged(tagMood)
+                                onDelta(bodyNoMood)
+                            }
+                        }
+                        break
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        val retryable = prov.protocol != "on_device" && UniversalLlmClient.isRetryableError(e)
+                        if (!retryable || attempt >= maxRetries) throw e
+                        attempt++
+                        onDelta("Busy — retrying ($attempt/$maxRetries)...")
+                        delay((1300L * attempt).coerceAtMost(5000L))
                     }
                 }
+
                 val (_, finalClean) = ProviderPresets.parseThoughts(sb.toString())
                 val (tagMood, finalBody) = MoodDetector.extractInlineMoodTag(finalClean)
                 val out = finalBody.ifBlank { finalClean.ifBlank { sb.toString().trim() } }
                 val mood = tagMood ?: MoodDetector.detectMood(out)
+                val latency = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                val estTokens = ProviderPresets.estimateTokens(out)
+
+                val assistantMsgId = UUID.randomUUID().toString()
+                val assistantEntity = MessageEntity(
+                    id = assistantMsgId,
+                    sessionId = sid,
+                    parentId = userMsgId,
+                    role = "assistant",
+                    speakerLabel = persona.name,
+                    content = out.ifBlank { "(Empty response)" },
+                    mood = mood,
+                    providerName = prov.name,
+                    modelName = prov.selectedModel,
+                    tokenEstimate = estTokens,
+                    latencyMs = latency,
+                )
+                dao.upsertMessage(assistantEntity)
+                _selectedLeafBySession.value = _selectedLeafBySession.value + (sid to assistantMsgId)
+                refreshSessionStats(sid)
+
                 onMoodChanged(mood)
                 onComplete(out)
 
-                if (prefs.moodMethod == "background_ai" && prov.protocol != "on_device") {
+                val isKeylessPollinations = prov.id == ProviderPresets.ID_POLLINATIONS_FREE && prov.apiKey.isBlank()
+                if (prefs.moodMethod == "background_ai" && prov.protocol != "on_device" && !isKeylessPollinations) {
                     viewModelScope.launch {
                         val refined = llmClient.classifyMoodFast(prov, out)
-                        if (!refined.isNullOrBlank()) onMoodChanged(refined)
+                        if (!refined.isNullOrBlank()) {
+                            onMoodChanged(refined)
+                            dao.upsertMessage(assistantEntity.copy(mood = refined))
+                        }
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 onError(e.localizedMessage ?: "Live Mode error with ${prov.name}")
             }
@@ -2226,5 +2444,6 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         arenaController.stop()
         shizukuBridge.unregisterListeners()
         soundEngine.release()
+        ttsEngine.release()
     }
 }

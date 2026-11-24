@@ -328,7 +328,6 @@ class OnDeviceLlmEngine(
                 isContentUri = isContentUri,
                 displayName = resolvedName,
                 ggufConfig = ggufConfig,
-                isLowRamDevice = totalRamMb <= 4800L,
             )
         } else {
             loadMediaPipeModel(File(uriOrPath), maxTokens, useGpu)
@@ -340,14 +339,13 @@ class OnDeviceLlmEngine(
         isContentUri: Boolean,
         displayName: String,
         ggufConfig: ContextModifyConfig,
-        isLowRamDevice: Boolean,
     ): Result<Unit> = runCatching {
         val (bridgeClass, bridgeInstance) = resolveLlamaBridge()
             ?: throw IllegalStateException("Llamatik native llama.cpp runtime is unavailable on this ABI.")
 
-        // 1. Apply 4GB-safe GGUF parameters via LlamaBridge.updateGenerateParams BEFORE initGenerateModel!
-        val safeCtx = if (isLowRamDevice) ggufConfig.ggufContextLength.coerceAtMost(2048) else ggufConfig.ggufContextLength
-        val safeThreads = if (isLowRamDevice) ggufConfig.ggufThreads.coerceIn(2, 4) else ggufConfig.ggufThreads
+        // 1. Apply exact user-configured GGUF parameters via LlamaBridge.updateGenerateParams (zero artificial GB/RAM caps!)
+        val targetCtx = ggufConfig.ggufContextLength
+        val targetThreads = ggufConfig.ggufThreads
         applyLlamaGenerateParams(
             bridgeClass = bridgeClass,
             bridgeInstance = bridgeInstance,
@@ -356,8 +354,8 @@ class OnDeviceLlmEngine(
             topP = ggufConfig.ggufTopP,
             topK = ggufConfig.ggufTopK,
             repeatPenalty = ggufConfig.ggufRepeatPenalty,
-            contextLength = safeCtx,
-            numThreads = safeThreads,
+            contextLength = targetCtx,
+            numThreads = targetThreads,
             useMmap = ggufConfig.ggufUseMmap,
             flashAttention = ggufConfig.ggufFlashAttention,
             gpuLayers = ggufConfig.ggufGpuLayers,
@@ -381,7 +379,7 @@ class OnDeviceLlmEngine(
         if (!ok) {
             runCatching { activeMountedPfd?.close() }
             activeMountedPfd = null
-            throw IllegalStateException("Failed to initialize GGUF '$displayName'. On 4GB RAM devices try a Q4_K_M model <=1.5GB or lower Context Length in Modify.")
+            throw IllegalStateException("Failed to initialize GGUF '$displayName'. Verify the file is a valid GGUF model, or try enabling mmap / adjusting Context Length in Modify.")
         }
 
         ggufLoadedPath = uriOrPath
@@ -395,7 +393,7 @@ class OnDeviceLlmEngine(
         DevLogBuffer.add(
             "INFO",
             "OnDevice",
-            "Loaded GGUF $displayName (ctx=$safeCtx, threads=$safeThreads, mmap=${ggufConfig.ggufUseMmap}) | Avail RAM: ${availableDeviceRamMb()} MB",
+            "Loaded GGUF $displayName (ctx=$targetCtx, threads=$targetThreads, mmap=${ggufConfig.ggufUseMmap}) | Avail RAM: ${availableDeviceRamMb()} MB",
         )
     }.onFailure { err ->
         runCatching { activeMountedPfd?.close() }
@@ -463,7 +461,7 @@ class OnDeviceLlmEngine(
     private fun loadMediaPipeModel(file: File, maxTokens: Int, useGpu: Boolean): Result<Unit> = runCatching {
         val optsBuilder = LlmInference.LlmInferenceOptions.builder()
             .setModelPath(file.absolutePath)
-            .setMaxTokens(maxTokens.coerceIn(256, 4096))
+            .setMaxTokens(maxTokens.coerceIn(256, 16384))
             .setPreferredBackend(if (useGpu) LlmInference.Backend.GPU else LlmInference.Backend.CPU)
         val engine = try {
             LlmInference.createFromOptions(appContext, optsBuilder.build())
@@ -472,7 +470,7 @@ class OnDeviceLlmEngine(
                 DevLogBuffer.add("WARN", "OnDevice", "GPU delegate unavailable, falling back to CPU: ${gpuErr.localizedMessage}")
                 val cpuOpts = LlmInference.LlmInferenceOptions.builder()
                     .setModelPath(file.absolutePath)
-                    .setMaxTokens(maxTokens.coerceIn(256, 4096))
+                    .setMaxTokens(maxTokens.coerceIn(256, 16384))
                     .setPreferredBackend(LlmInference.Backend.CPU)
                     .build()
                 LlmInference.createFromOptions(appContext, cpuOpts)

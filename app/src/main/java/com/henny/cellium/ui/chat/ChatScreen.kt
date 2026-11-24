@@ -1,13 +1,14 @@
 package com.henny.cellium.ui.chat
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.os.Build
 import android.provider.MediaStore
 import android.speech.RecognizerIntent
-import android.speech.tts.TextToSpeech
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -68,12 +69,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalScrollCaptureInProgress
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.henny.cellium.avatar.AvatarLibrary
 import com.henny.cellium.avatar.DotMatrixAvatarCanvas
+import com.henny.cellium.core.CelliumSttEngine
 import com.henny.cellium.data.local.ProviderProfileEntity
 import com.henny.cellium.ui.components.CelliumIcons
 import com.henny.cellium.ui.components.GlassCard
@@ -124,19 +131,40 @@ fun ChatScreen(
         viewModel.prefsStore.decodeStarredModels(prefs.starredModelsJson)
     }
 
-    var tts by remember { mutableStateOf<TextToSpeech?>(null) }
-    DisposableEffect(context) {
-        var engine: TextToSpeech? = null
-        engine = TextToSpeech(context) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                engine?.language = Locale.US
+    var isCloudSttListening by remember { mutableStateOf(false) }
+
+    val startCloudStt: () -> Unit = {
+        val engineId = prefs.sttEngine
+        val opt = CelliumSttEngine.ALL_ENGINES.firstOrNull { it.id == engineId }
+        val apiKey = viewModel.resolveSttApiKey(engineId)
+        if (opt?.requiresKey == true && apiKey.isBlank()) {
+            viewModel.showBanner("Add your ${opt.label} API key in Settings -> Voice & Audio first.")
+        } else {
+            isCloudSttListening = true
+            viewModel.showBanner("Listening via ${opt?.label ?: engineId}... (tap mic to finish)")
+            scope.launch {
+                val res = viewModel.sttEngine.recordAndTranscribe(
+                    engineId = engineId,
+                    apiKey = apiKey,
+                    modelOverride = prefs.sttModel,
+                    onTranscribing = {
+                        viewModel.showBanner("Transcribing via ${opt?.label ?: engineId}...")
+                    },
+                )
+                isCloudSttListening = false
+                res.onSuccess { txt ->
+                    viewModel.clearBanner()
+                    injectedComposerText = txt
+                }.onFailure { err ->
+                    viewModel.showBanner("STT error: ${err.localizedMessage ?: "Failed"}")
+                }
             }
         }
-        tts = engine
-        onDispose {
-            engine?.stop()
-            engine?.shutdown()
-        }
+    }
+
+    val micPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) startCloudStt()
+        else viewModel.showBanner("Microphone permission required for voice input.")
     }
 
     val multiPhotoPicker = rememberLauncherForActivityResult(
@@ -249,19 +277,43 @@ fun ChatScreen(
                     modifier = Modifier.size(16.dp),
                 )
                 Text(
-                    text = activeProv?.let {
-                        val modelLabel = if (it.protocol == "on_device") {
-                            ui.localModelStatus.modelName.ifBlank { it.selectedModel.ifBlank { "No model" } }
+                    text = buildAnnotatedString {
+                        if (activeProv == null) {
+                            withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = CelTextPrimary)) {
+                                append("Select Model")
+                            }
                         } else {
-                            it.selectedModel.removePrefix("models/").ifBlank { "select model" }
+                            val rawModel = if (activeProv.protocol == "on_device") {
+                                ui.localModelStatus.modelName.ifBlank { activeProv.selectedModel.ifBlank { "No model" } }
+                            } else {
+                                activeProv.selectedModel
+                                    .removePrefix("models/")
+                                    .substringAfterLast('/')
+                                    .ifBlank { "select model" }
+                            }
+                            val shortProv = activeProv.name
+                                .substringBefore(" (")
+                                .replace(" AI", "")
+                                .trim()
+                            withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = CelTextPrimary)) {
+                                append(rawModel.take(24))
+                            }
+                            withStyle(
+                                SpanStyle(
+                                    color = CelLavender.copy(alpha = 0.80f),
+                                    fontFamily = JetBrainsMono,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                            ) {
+                                append("  ✦ $shortProv")
+                            }
                         }
-                        "${it.name}: ${modelLabel.take(16)}"
-                    } ?: "Select Provider",
+                    },
                     style = MaterialTheme.typography.labelMedium,
-                    color = CelTextPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 185.dp),
+                    modifier = Modifier.widthIn(max = 242.dp),
                 )
                 Icon(Icons.Rounded.ArrowDropDown, contentDescription = null, tint = CelLavender, modifier = Modifier.size(16.dp))
             }
@@ -407,14 +459,7 @@ fun ChatScreen(
                             onRegenerate = { viewModel.regenerateAssistantMessage(it) },
                             onForkSession = { viewModel.forkSessionFromMessage(it) },
                             onSpeak = { text ->
-                                tts?.let { engine ->
-                                    if (prefs.ttsVoiceName.isNotBlank()) {
-                                        engine.voices?.firstOrNull { it.name == prefs.ttsVoiceName }?.let { engine.voice = it }
-                                    }
-                                    engine.setSpeechRate(prefs.ttsSpeechRate)
-                                    engine.setPitch(prefs.ttsPitch)
-                                    engine.speak(text.take(3500), TextToSpeech.QUEUE_FLUSH, null, "cel_msg")
-                                }
+                                viewModel.speakText(text)
                             },
                             onDelete = { viewModel.deleteMessage(it) },
                         )
@@ -481,11 +526,19 @@ fun ChatScreen(
                     filePicker.launch(arrayOf("*/*"))
                 },
                 onStartVoiceInput = {
-                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to ${persona.name}")
+                    if (prefs.sttEngine == CelliumSttEngine.ENGINE_DEVICE) {
+                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to ${persona.name}")
+                        }
+                        runCatching { speechLauncher.launch(intent) }
+                    } else if (isCloudSttListening) {
+                        viewModel.sttEngine.requestStopRecording()
+                    } else {
+                        val micOk = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                        if (micOk) startCloudStt()
+                        else micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
                     }
-                    runCatching { speechLauncher.launch(intent) }
                 },
                 onOpenArena = onOpenArena,
                 onStopStreaming = { viewModel.stopStreaming() },

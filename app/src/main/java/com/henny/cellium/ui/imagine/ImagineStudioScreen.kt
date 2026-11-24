@@ -1,5 +1,6 @@
 package com.henny.cellium.ui.imagine
 
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Science
 import androidx.compose.material.icons.rounded.UploadFile
@@ -52,6 +54,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -79,6 +82,7 @@ fun ImagineStudioScreen(
     onJumpToChat: () -> Unit,
 ) {
     val visuals = LocalCelliumVisuals.current
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val prefs by viewModel.preferences.collectAsStateWithLifecycle()
@@ -86,14 +90,14 @@ fun ImagineStudioScreen(
     var prompt by remember { mutableStateOf("") }
     var negativePrompt by remember { mutableStateOf("") }
     var selectedProvider by remember(prefs.imagineProvider) { mutableStateOf(prefs.imagineProvider) }
-    var selectedModel by remember(prefs.imagineModel) { mutableStateOf(prefs.imagineModel.ifBlank { "sana" }) }
+    var selectedModel by remember(prefs.imagineModel) { mutableStateOf(prefs.imagineModel.ifBlank { "Auto (Fastest)" }) }
     var aspectRatio by remember { mutableStateOf("1:1") }
     var apiKey by remember(prefs.imagineApiKey) { mutableStateOf(prefs.imagineApiKey) }
     var customUrl by remember(prefs.imagineCustomUrl) { mutableStateOf(prefs.imagineCustomUrl) }
     var kaggleSlug by remember(prefs.kaggleKernelSlug) { mutableStateOf(prefs.kaggleKernelSlug) }
     var showKeyPanel by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
-    var livePollinationsModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var liveProviderModels by remember(selectedProvider) { mutableStateOf<List<String>>(emptyList()) }
     var refreshingModels by remember { mutableStateOf(false) }
 
     val kaggleJsonPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -105,9 +109,9 @@ fun ImagineStudioScreen(
 
     val activeOption = MultiImagineClient.PROVIDERS.firstOrNull { it.id == selectedProvider }
         ?: MultiImagineClient.PROVIDERS.first()
-    val modelChoices = remember(selectedProvider, livePollinationsModels) {
-        if (selectedProvider == "pollinations" && livePollinationsModels.isNotEmpty()) {
-            livePollinationsModels
+    val modelChoices = remember(selectedProvider, liveProviderModels) {
+        if (liveProviderModels.isNotEmpty()) {
+            liveProviderModels
         } else {
             activeOption.defaultModels
         }
@@ -128,7 +132,7 @@ fun ImagineStudioScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Illume Studio", style = MaterialTheme.typography.titleLarge, color = CelTextPrimary)
                         Text(
-                            "Pollinations (Free Sana / Live) · Kaggle GPU · HuggingFace · OpenAI",
+                            "AI Horde (Free Keyless GPU) · Kaggle 30h/wk · Pollinations · HuggingFace · OpenAI",
                             style = MaterialTheme.typography.labelSmall,
                             color = CelTextSecondary,
                         )
@@ -169,20 +173,24 @@ fun ImagineStudioScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("Models", style = MaterialTheme.typography.labelSmall, color = CelLavender)
-                    if (selectedProvider == "pollinations") {
+                    if (selectedProvider == "aihorde" || selectedProvider == "pollinations") {
                         OutlinedButton(
                             onClick = {
                                 refreshingModels = true
                                 scope.launch {
-                                    val res = viewModel.imagineClient.fetchPollinationsImageModels()
+                                    val res = if (selectedProvider == "aihorde") {
+                                        viewModel.imagineClient.fetchAiHordeImageModels()
+                                    } else {
+                                        viewModel.imagineClient.fetchPollinationsImageModels()
+                                    }
                                     refreshingModels = false
                                     res.onSuccess { list ->
-                                        livePollinationsModels = list
+                                        liveProviderModels = list
                                         if (list.isNotEmpty() && selectedModel !in list) {
                                             selectedModel = list.first()
                                             viewModel.prefsStore.updateImagineConfig(selectedProvider, selectedModel, apiKey, customUrl)
                                         }
-                                        viewModel.showBanner("Fetched ${list.size} live Pollinations image models.")
+                                        viewModel.showBanner("Fetched ${list.size} live ${activeOption.label} models.")
                                     }.onFailure { err ->
                                         localError = err.localizedMessage
                                     }
@@ -257,23 +265,61 @@ fun ImagineStudioScreen(
                             }
                         } else {
                             Text(
-                                text = "Import your kaggle.json token from Kaggle Account Settings to run free cloud GPU Diffusers notebooks.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = CelTextSecondary,
+                                text = "Get 30 hrs/week of FREE NVIDIA T4/P100 cloud GPU for SDXL & Flux!",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = CelLavender,
                             )
                         }
-                        OutlinedButton(
-                            onClick = { kaggleJsonPicker.launch(arrayOf("application/json", "*/*")) },
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth().testTag("import_kaggle_json_button"),
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(visuals.primary.copy(alpha = 0.10f))
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
                             Text(
-                                text = if (prefs.kaggleUsername.isNotBlank()) "Replace kaggle.json" else "Import kaggle.json",
-                                maxLines = 1,
-                                softWrap = false,
+                                text = "How to get your kaggle.json in 30 seconds:",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = CelTextPrimary,
                             )
+                            Text("1. Tap 'Open Kaggle Settings' below & sign in (free).", style = MaterialTheme.typography.bodySmall, color = CelTextSecondary)
+                            Text("2. Scroll down to the API section and tap 'Create New Token'.", style = MaterialTheme.typography.bodySmall, color = CelTextSecondary)
+                            Text("3. Your browser automatically downloads kaggle.json.", style = MaterialTheme.typography.bodySmall, color = CelTextSecondary)
+                            Text("4. Return here and tap 'Import kaggle.json' below!", style = MaterialTheme.typography.bodySmall, color = CelTextSecondary)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    runCatching {
+                                        val i = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.kaggle.com/settings/account"))
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        context.startActivity(i)
+                                    }
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(Icons.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("Kaggle Settings", maxLines = 1, softWrap = false)
+                            }
+                            OutlinedButton(
+                                onClick = { kaggleJsonPicker.launch(arrayOf("application/json", "*/*")) },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.weight(1f).testTag("import_kaggle_json_button"),
+                            ) {
+                                Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text(
+                                    text = if (prefs.kaggleUsername.isNotBlank()) "Replace JSON" else "Import JSON",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                            }
                         }
                         OutlinedTextField(
                             value = kaggleSlug,

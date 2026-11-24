@@ -153,7 +153,7 @@ fun OnboardingScreen(
                                 color = CelTextPrimary,
                             )
                             Text(
-                                text = "v2611.21.0 · Step ${step + 1} of 3",
+                                text = "${com.henny.cellium.BuildConfig.VERSION_NAME} · Step ${step + 1} of 3",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = CelLavender,
                             )
