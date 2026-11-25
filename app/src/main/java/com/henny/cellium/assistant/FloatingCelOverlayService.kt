@@ -251,6 +251,10 @@ class FloatingCelOverlayService : Service() {
     private var bubbleView: TextView? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
 
+    private var sideMenuContainer: LinearLayout? = null
+    private var sideMenuParams: WindowManager.LayoutParams? = null
+    private var sideMenuVisible = false
+
     private var abyssView: HellAbyssDismissView? = null
     private var abyssParams: WindowManager.LayoutParams? = null
     private var abyssVisible = false
@@ -273,8 +277,10 @@ class FloatingCelOverlayService : Service() {
     private var handsFreeEnabled = false
     private var consecutiveSilenceErrors = 0
 
-    // Living idle lifecycle state
+    // Living idle lifecycle state + angry wake-up hold guard (prevents 0.5s animation reset!)
     private var lastInteractionMs = SystemClock.uptimeMillis()
+    private var angryHoldUntilMs = 0L
+    private var calmDownRunnable: Runnable? = null
     private var isBored = false
     private var isAsleep = false
     private var autoHideBubbleRunnable: Runnable? = null
@@ -377,28 +383,44 @@ class FloatingCelOverlayService : Service() {
         ensureOverlayCreated()
 
         val autoListen = intent?.getBooleanExtra(EXTRA_AUTO_LISTEN, false) == true
+        val enableHandsFree = intent?.getBooleanExtra(EXTRA_HANDS_FREE, false) == true
+        val requestScreenVision = intent?.getBooleanExtra(EXTRA_SCREEN_VISION, false) == true
         scope.launch {
             val store = PreferencesStore(applicationContext)
             val prefs = store.preferencesFlow.first()
             faceView?.updateState(newGender = prefs.avatarGender)
-            if (firstCreated && !prefs.floatingTipsShown) {
+            if (enableHandsFree && !handsFreeEnabled) {
+                handsFreeEnabled = true
+                faceView?.updateState(isHandsFree = true)
+            }
+            if (requestScreenVision && !screenVisionEnabled) {
+                if (mediaProjection != null) {
+                    screenVisionEnabled = true
+                    updateScreenVisionChip()
+                } else {
+                    AssistantConsentActivity.launchScreenVisionConsent(this@FloatingCelOverlayService)
+                }
+            }
+            if (firstCreated && !prefs.floatingTipsShown && !enableHandsFree) {
                 store.markFloatingTipsShown()
                 showSpeechBubble(
-                    "Tip: Tap me to talk, double-tap my face for Hands-Free mode, long-press to type, or drag me down to close!",
-                    autoHideMs = 7500L,
+                    "Tip: Tap my face for quick actions (Auto, Talk, Type, Screen Eye), or drag me down to dismiss!",
+                    autoHideMs = 7000L,
                 )
             } else if (autoListen) {
-                mainHandler.postDelayed({ startListening() }, 240L)
+                mainHandler.postDelayed({ startListening() }, 280L)
             }
         }
         return START_STICKY
     }
 
+    private fun isAngryHeld(): Boolean = SystemClock.uptimeMillis() < angryHoldUntilMs
+
     private fun markUserInteraction(resetMoodToIdle: Boolean = false) {
         lastInteractionMs = SystemClock.uptimeMillis()
         isBored = false
         isAsleep = false
-        if (resetMoodToIdle && !isListening && !isThinking && !isTalking) {
+        if (resetMoodToIdle && !isListening && !isThinking && !isTalking && !isAngryHeld()) {
             faceView?.updateState(newMood = "idle")
         }
     }
@@ -406,25 +428,31 @@ class FloatingCelOverlayService : Service() {
     private fun wakeUpAngry(andDrag: Boolean = false) {
         isAsleep = false
         isBored = false
-        lastInteractionMs = SystemClock.uptimeMillis()
-        vibratePulse(45L)
+        val now = SystemClock.uptimeMillis()
+        lastInteractionMs = now
+        // Hold angry expression for a full 5 seconds so ACTION_UP / drag never resets it after 0.5s!
+        angryHoldUntilMs = now + 5_000L
+        hapticFeedback(VibrationEffect.EFFECT_HEAVY_CLICK, 45L)
         val line = angryWakeLines.random()
         faceView?.updateState(newMood = "angry")
-        showSpeechBubble(line, autoHideMs = 4500L)
+        showSpeechBubble(line, autoHideMs = 4800L)
         if (!andDrag) {
             scope.launch {
                 val prefs = PreferencesStore(applicationContext).preferencesFlow.first()
                 speakOut(line, prefs.ttsEngine, prefs.ttsVoiceName, prefs.ttsPitch, prefs.ttsSpeechRate)
             }
         }
-        mainHandler.postDelayed({
-            if (!isListening && !isThinking && !isTalking && !isDragging && !isAsleep) {
+        calmDownRunnable?.let { mainHandler.removeCallbacks(it) }
+        val r = Runnable {
+            if (!isListening && !isThinking && !isTalking && !isDragging && !isAsleep && !isAngryHeld()) {
                 faceView?.updateState(newMood = "idle")
             }
-        }, 4600L)
+        }
+        calmDownRunnable = r
+        mainHandler.postDelayed(r, 5_100L)
     }
 
-    private fun vibratePulse(durationMs: Long) {
+    private fun hapticFeedback(predefinedEffect: Int, fallbackMs: Long) {
         runCatching {
             val vib = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 getSystemService(VibratorManager::class.java)?.defaultVibrator
@@ -432,16 +460,22 @@ class FloatingCelOverlayService : Service() {
                 @Suppress("DEPRECATION")
                 getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vib?.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
+            if (vib == null || !vib.hasVibrator()) return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                vib.vibrate(VibrationEffect.createPredefined(predefinedEffect))
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vib.vibrate(VibrationEffect.createOneShot(fallbackMs, VibrationEffect.DEFAULT_AMPLITUDE))
             } else {
                 @Suppress("DEPRECATION")
-                vib?.vibrate(durationMs)
+                vib.vibrate(fallbackMs)
             }
         }
     }
 
     private fun dismissFloatingCel(updatePreference: Boolean) {
+        hideSideMenu()
+        hideAbyssDismissZone()
+        removeBottomChatBar()
         if (updatePreference) {
             scope.launch {
                 runCatching { PreferencesStore(applicationContext).updateFloatingMiniCel(false) }
@@ -497,10 +531,11 @@ class FloatingCelOverlayService : Service() {
     ).toInt()
 
     private fun showAbyssDismissZone() {
-        if (abyssVisible) return
-        val abyss = abyssView ?: HellAbyssDismissView(this).also { abyssView = it }
+        if (abyssVisible && abyssView != null) return
+        hideAbyssDismissZone()
+        val abyss = HellAbyssDismissView(this).also { abyssView = it }
         val hPx = dp(164f)
-        val params = abyssParams ?: WindowManager.LayoutParams(
+        val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             hPx,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -515,16 +550,25 @@ class FloatingCelOverlayService : Service() {
         runCatching {
             wm.addView(abyss, params)
             abyssVisible = true
+        }.onFailure {
+            abyssView = null
+            abyssVisible = false
         }
     }
 
+    /**
+     * Unconditionally removes the Hell Abyss overlay view from WindowManager so it can NEVER get stuck
+     * on screen even after interrupted touches, ACTION_CANCEL, or service teardown!
+     */
     private fun hideAbyssDismissZone() {
-        if (!abyssVisible) return
-        abyssView?.let {
-            if (it.isAttachedToWindow) runCatching { wm.removeView(it) }
-        }
+        val view = abyssView
+        abyssView = null
         abyssVisible = false
         inDismissZone = false
+        if (view != null) {
+            runCatching { wm.removeViewImmediate(view) }
+                .onFailure { runCatching { wm.removeView(view) } }
+        }
     }
 
     private fun ensureOverlayCreated() {
@@ -554,45 +598,31 @@ class FloatingCelOverlayService : Service() {
         }
         faceParams = params
 
-        // Smooth drag + Hell Abyss dismiss + single-tap talk + double-tap Hands-Free + long-press type bar
+        // Smooth drag + Hell Abyss dismiss + tap opens Mini Floating Side Menu
         var initX = 0
         var initY = 0
         var downRawX = 0f
         var downRawY = 0f
         var moved = false
-        var longPressed = false
-        var lastTapUpMs = 0L
-        var pendingSingleTap: Runnable? = null
-
-        val longPressRunnable = Runnable {
-            if (!moved) {
-                longPressed = true
-                markUserInteraction()
-                vibratePulse(25L)
-                toggleBottomChatBar()
-            }
-        }
 
         container.setOnTouchListener { _, event ->
-            when (event.action) {
+            when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     initX = params.x
                     initY = params.y
                     downRawX = event.rawX
                     downRawY = event.rawY
                     moved = false
-                    longPressed = false
-                    mainHandler.postDelayed(longPressRunnable, 460L)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downRawX).toInt()
                     val dy = (event.rawY - downRawY).toInt()
-                    if (!moved && (abs(dx) > dp(6f) || abs(dy) > dp(6f))) {
+                    if (!moved && (abs(dx) > dp(7f) || abs(dy) > dp(7f))) {
                         moved = true
                         isDragging = true
-                        mainHandler.removeCallbacks(longPressRunnable)
-                        pendingSingleTap?.let { mainHandler.removeCallbacks(it) }
+                        hideSideMenu()
+                        hapticFeedback(VibrationEffect.EFFECT_TICK, 14L)
                         if (isAsleep) {
                             wakeUpAngry(andDrag = true)
                         } else {
@@ -614,51 +644,35 @@ class FloatingCelOverlayService : Service() {
                             inDismissZone = nowInZone
                             abyssView?.setHovering(nowInZone)
                             if (nowInZone) {
-                                vibratePulse(35L)
+                                hapticFeedback(VibrationEffect.EFFECT_CLICK, 24L)
                                 faceView?.updateState(newMood = "scared")
                             } else {
-                                faceView?.updateState(newMood = "idle")
+                                hapticFeedback(VibrationEffect.EFFECT_TICK, 12L)
+                                faceView?.updateState(newMood = if (isAngryHeld()) "angry" else "idle")
                             }
                         }
                     }
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    mainHandler.removeCallbacks(longPressRunnable)
-                    if (moved) {
-                        isDragging = false
-                        val shouldDismiss = inDismissZone
-                        hideAbyssDismissZone()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_OUTSIDE -> {
+                    val wasMoved = moved
+                    val shouldDismiss = inDismissZone
+                    isDragging = false
+                    hideAbyssDismissZone()
+                    if (wasMoved) {
                         if (shouldDismiss) {
-                            vibratePulse(60L)
+                            hapticFeedback(VibrationEffect.EFFECT_HEAVY_CLICK, 50L)
                             dismissFloatingCel(updatePreference = true)
                         } else {
                             markUserInteraction(resetMoodToIdle = true)
                         }
-                    } else if (!longPressed) {
+                    } else if (event.actionMasked == MotionEvent.ACTION_UP) {
                         if (isAsleep) {
                             wakeUpAngry(andDrag = false)
                         } else {
-                            val now = SystemClock.uptimeMillis()
-                            if (now - lastTapUpMs <= 270L) {
-                                // Double-tap detected -> Toggle Hands-Free Mode
-                                pendingSingleTap?.let { mainHandler.removeCallbacks(it) }
-                                pendingSingleTap = null
-                                lastTapUpMs = 0L
-                                toggleHandsFreeMode()
-                            } else {
-                                lastTapUpMs = now
-                                val single = Runnable {
-                                    markUserInteraction()
-                                    if (isListening) {
-                                        stopListening()
-                                    } else {
-                                        startListening()
-                                    }
-                                }
-                                pendingSingleTap = single
-                                mainHandler.postDelayed(single, 275L)
-                            }
+                            hapticFeedback(VibrationEffect.EFFECT_CLICK, 18L)
+                            markUserInteraction()
+                            toggleSideMenu()
                         }
                     }
                     true
@@ -681,7 +695,10 @@ class FloatingCelOverlayService : Service() {
                 setStroke(dp(1f), Color.argb(175, 192, 132, 252))
             }
             visibility = View.GONE
-            setOnClickListener { hideSpeechBubble() }
+            setOnClickListener {
+                hapticFeedback(VibrationEffect.EFFECT_TICK, 12L)
+                hideSpeechBubble()
+            }
         }
         bubbleView = bubble
         val bParams = WindowManager.LayoutParams(
@@ -702,23 +719,197 @@ class FloatingCelOverlayService : Service() {
         mainHandler.postDelayed(idleTickerRunnable, 1000L)
     }
 
+    private fun toggleSideMenu() {
+        if (sideMenuVisible) {
+            hideSideMenu()
+        } else {
+            showSideMenu()
+        }
+    }
+
+    private fun showSideMenu() {
+        hideSideMenu()
+        hideSpeechBubble()
+        val fParams = faceParams ?: return
+        val menuW = dp(168f)
+
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8f), dp(8f), dp(8f), dp(8f))
+            background = GradientDrawable().apply {
+                setColor(Color.argb(242, 12, 9, 24))
+                cornerRadius = dp(20f).toFloat()
+                setStroke(dp(1.2f), Color.argb(185, 192, 132, 252))
+            }
+        }
+
+        fun makeMenuBtn(
+            label: String,
+            accentHex: String = "#F5F0FF",
+            bgColor: Int = Color.argb(110, 40, 28, 72),
+            onTap: () -> Unit,
+        ): TextView = TextView(this).apply {
+            text = label
+            setTextColor(Color.parseColor(accentHex))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            setPadding(dp(12f), dp(9f), dp(12f), dp(9f))
+            background = GradientDrawable().apply {
+                setColor(bgColor)
+                cornerRadius = dp(13f).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(5f) }
+            setOnClickListener {
+                hapticFeedback(VibrationEffect.EFFECT_CLICK, 18L)
+                onTap()
+            }
+        }
+
+        // 1. Auto continuous conversation toggle
+        col.addView(
+            makeMenuBtn(
+                label = if (handsFreeEnabled) "Auto Chat: ON" else "Auto Chat: OFF",
+                accentHex = if (handsFreeEnabled) "#38BDF8" else "#E2DCFA",
+                bgColor = if (handsFreeEnabled) Color.argb(140, 14, 58, 92) else Color.argb(100, 36, 26, 62),
+            ) {
+                hideSideMenu()
+                toggleHandsFreeMode()
+            }
+        )
+
+        // 2. Say Something / Stop Listening
+        col.addView(
+            makeMenuBtn(
+                label = if (isListening) "Stop Listening" else "Say Something",
+                accentHex = if (isListening) "#FCA5A5" else "#C084FC",
+                bgColor = if (isListening) Color.argb(145, 96, 20, 34) else Color.argb(125, 68, 30, 118),
+            ) {
+                hideSideMenu()
+                if (isListening) stopListening() else startListening()
+            }
+        )
+
+        // 3. Type message
+        col.addView(
+            makeMenuBtn(
+                label = if (barVisible) "Hide Keyboard Bar" else "Type a Message",
+                accentHex = "#F5F0FF",
+            ) {
+                hideSideMenu()
+                toggleBottomChatBar()
+            }
+        )
+
+        // 4. Screen Vision toggle
+        col.addView(
+            makeMenuBtn(
+                label = if (screenVisionEnabled) "Screen Eye: ON" else "Screen Eye: OFF",
+                accentHex = if (screenVisionEnabled) "#34D399" else "#C4B5FD",
+                bgColor = if (screenVisionEnabled) Color.argb(135, 16, 78, 58) else Color.argb(100, 36, 26, 62),
+            ) {
+                hideSideMenu()
+                if (screenVisionEnabled) {
+                    screenVisionEnabled = false
+                    updateScreenVisionChip()
+                    showSpeechBubble("Screen Vision OFF", autoHideMs = 2600L)
+                } else if (mediaProjection != null) {
+                    screenVisionEnabled = true
+                    updateScreenVisionChip()
+                    showSpeechBubble("Screen Vision ON", autoHideMs = 2600L)
+                } else {
+                    AssistantConsentActivity.launchScreenVisionConsent(this@FloatingCelOverlayService)
+                }
+            }
+        )
+
+        // 5. Dismiss Floating Cel
+        col.addView(
+            makeMenuBtn(
+                label = "Dismiss Cel",
+                accentHex = "#FCA5A5",
+                bgColor = Color.argb(120, 82, 18, 28),
+            ) {
+                hapticFeedback(VibrationEffect.EFFECT_HEAVY_CLICK, 40L)
+                dismissFloatingCel(updatePreference = true)
+            }.apply {
+                (layoutParams as LinearLayout.LayoutParams).bottomMargin = 0
+            }
+        )
+
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+        val faceCenterX = fParams.x + fParams.width / 2
+        val placeLeft = faceCenterX > screenW / 2
+        val menuX = if (placeLeft) {
+            (fParams.x - menuW - dp(8f)).coerceAtLeast(dp(8f))
+        } else {
+            (fParams.x + fParams.width + dp(8f)).coerceAtMost(screenW - menuW - dp(8f))
+        }
+        val menuY = (fParams.y - dp(24f)).coerceIn(dp(28f), screenH - dp(250f))
+
+        val mParams = WindowManager.LayoutParams(
+            menuW,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = menuX
+            y = menuY
+        }
+
+        col.setOnTouchListener { _, ev ->
+            if (ev.action == MotionEvent.ACTION_OUTSIDE) {
+                hideSideMenu()
+                true
+            } else false
+        }
+
+        sideMenuContainer = col
+        sideMenuParams = mParams
+        runCatching {
+            wm.addView(col, mParams)
+            sideMenuVisible = true
+        }.onFailure {
+            sideMenuContainer = null
+            sideMenuVisible = false
+        }
+    }
+
+    private fun hideSideMenu() {
+        val view = sideMenuContainer
+        sideMenuContainer = null
+        sideMenuVisible = false
+        if (view != null) {
+            runCatching { wm.removeViewImmediate(view) }
+                .onFailure { runCatching { wm.removeView(view) } }
+        }
+    }
+
     private fun toggleHandsFreeMode() {
         markUserInteraction()
         handsFreeEnabled = !handsFreeEnabled
         consecutiveSilenceErrors = 0
-        vibratePulse(if (handsFreeEnabled) 40L else 22L)
+        hapticFeedback(
+            if (handsFreeEnabled) VibrationEffect.EFFECT_DOUBLE_CLICK else VibrationEffect.EFFECT_CLICK,
+            if (handsFreeEnabled) 38L else 20L,
+        )
         faceView?.updateState(isHandsFree = handsFreeEnabled)
         if (handsFreeEnabled) {
             showSpeechBubble(
-                "Hands-Free ON — I'll keep listening after I reply! Double-tap my face again to stop.",
-                autoHideMs = 4500L,
+                "Auto Chat ON — I'll keep listening after I reply!",
+                autoHideMs = 4200L,
             )
             if (!isListening && !isThinking && !isTalking) {
-                mainHandler.postDelayed({ if (handsFreeEnabled) startListening() }, 700L)
+                mainHandler.postDelayed({ if (handsFreeEnabled) startListening() }, 650L)
             }
         } else {
             stopListening()
-            showSpeechBubble("Hands-Free OFF.", autoHideMs = 2600L)
+            showSpeechBubble("Auto Chat OFF.", autoHideMs = 2400L)
         }
     }
 
@@ -849,8 +1040,9 @@ class FloatingCelOverlayService : Service() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setPadding(dp(10f), dp(6f), dp(6f), dp(6f))
             setOnClickListener {
+                hapticFeedback(VibrationEffect.EFFECT_TICK, 14L)
+                // Only close the text bar — never dismiss Floating Cel!
                 removeBottomChatBar()
-                dismissFloatingCel(updatePreference = true)
             }
         }
 
@@ -934,6 +1126,8 @@ class FloatingCelOverlayService : Service() {
                         engineId = sttEngineId,
                         apiKey = apiKey,
                         modelOverride = prefs.sttModel,
+                        preSpeechTimeoutMs = 60_000L,
+                        silenceAutoStopMs = 3_500L,
                         onReadyForSpeech = {
                             mainHandler.post {
                                 if (isListening) {
@@ -953,8 +1147,13 @@ class FloatingCelOverlayService : Service() {
                     isListening = false
                     WakeWordService.setPaused(this@FloatingCelOverlayService, false)
                     res.onSuccess { txt ->
-                        consecutiveSilenceErrors = 0
-                        askCel(txt)
+                        if (txt.isNotBlank()) {
+                            consecutiveSilenceErrors = 0
+                            askCel(txt)
+                        } else {
+                            faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
+                            hideSpeechBubble()
+                        }
                     }.onFailure { err ->
                         faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                         if (handsFreeEnabled && (err.localizedMessage?.contains("No speech", true) == true)) {
@@ -1041,6 +1240,9 @@ class FloatingCelOverlayService : Service() {
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60000L)
                 }
                 sr.startListening(intent)
             }.onFailure {
@@ -1297,16 +1499,24 @@ class FloatingCelOverlayService : Service() {
         )
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        hideSideMenu()
+        hideAbyssDismissZone()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         _isRunning.value = false
         mainHandler.removeCallbacks(idleTickerRunnable)
         autoHideBubbleRunnable?.let { mainHandler.removeCallbacks(it) }
+        calmDownRunnable?.let { mainHandler.removeCallbacks(it) }
         cloudSttJob?.cancel()
         if (::celliumStt.isInitialized) celliumStt.requestStopRecording()
+        hideSideMenu()
         hideAbyssDismissZone()
         removeBottomChatBar()
-        faceContainer?.let { if (it.isAttachedToWindow) runCatching { wm.removeView(it) } }
-        bubbleView?.let { if (it.isAttachedToWindow) runCatching { wm.removeView(it) } }
+        faceContainer?.let { runCatching { wm.removeViewImmediate(it) }.onFailure { _ -> runCatching { wm.removeView(it) } } }
+        bubbleView?.let { runCatching { wm.removeViewImmediate(it) }.onFailure { _ -> runCatching { wm.removeView(it) } } }
         runCatching { speechRecognizer?.destroy() }
         if (::celliumTts.isInitialized) runCatching { celliumTts.release() }
         runCatching { mediaProjection?.stop() }
@@ -1319,15 +1529,24 @@ class FloatingCelOverlayService : Service() {
         private const val ACTION_STOP = "com.henny.cellium.FLOAT_STOP"
         private const val ACTION_SET_PROJECTION = "com.henny.cellium.FLOAT_PROJECTION"
         private const val EXTRA_AUTO_LISTEN = "auto_listen"
+        private const val EXTRA_HANDS_FREE = "hands_free"
+        private const val EXTRA_SCREEN_VISION = "screen_vision"
         private const val EXTRA_RESULT_CODE = "result_code"
         private const val EXTRA_RESULT_DATA = "result_data"
 
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
-        fun start(context: Context, autoListen: Boolean = false) {
+        fun start(
+            context: Context,
+            autoListen: Boolean = false,
+            enableHandsFree: Boolean = false,
+            requestScreenVision: Boolean = false,
+        ) {
             val intent = Intent(context, FloatingCelOverlayService::class.java).apply {
                 putExtra(EXTRA_AUTO_LISTEN, autoListen)
+                putExtra(EXTRA_HANDS_FREE, enableHandsFree)
+                putExtra(EXTRA_SCREEN_VISION, requestScreenVision)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)

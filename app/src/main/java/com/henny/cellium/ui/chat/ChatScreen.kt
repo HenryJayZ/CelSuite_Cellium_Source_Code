@@ -6,12 +6,17 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
+import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.MediaStore
+import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -99,8 +104,11 @@ import com.henny.cellium.ui.theme.CelTextSecondary
 import com.henny.cellium.ui.theme.JetBrainsMono
 import com.henny.cellium.ui.theme.LocalCelliumVisuals
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Locale
 
 @Composable
@@ -115,6 +123,8 @@ fun ChatScreen(
     val visuals = LocalCelliumVisuals.current
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
     val prefs by viewModel.preferences.collectAsStateWithLifecycle()
+    // Read initial draft once on mount; do NOT collect chatDraftText as Compose state or every keystroke recomposes the whole ChatScreen!
+    val initialChatDraft = remember { viewModel.chatDraftText.value }
 
     var pendingImages by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
     var pendingFile by remember { mutableStateOf<AttachedTextFile?>(null) }
@@ -125,66 +135,283 @@ fun ChatScreen(
     var showModifySheet by remember { mutableStateOf(false) }
     var showWorkspacePrompt by remember { mutableStateOf(false) }
     var configuringProvider by remember { mutableStateOf<ProviderProfileEntity?>(null) }
+    var viewingImagePath by remember { mutableStateOf<String?>(null) }
+    var saveAsSourcePath by remember { mutableStateOf<String?>(null) }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 
     val listState = rememberLazyListState()
     val starredModels = remember(prefs.starredModelsJson) {
         viewModel.prefsStore.decodeStarredModels(prefs.starredModelsJson)
     }
 
-    var isCloudSttListening by remember { mutableStateOf(false) }
+    var isRecordingVoice by remember { mutableStateOf(false) }
+    var isTranscribingVoice by remember { mutableStateOf(false) }
+    var recordingSeconds by remember { mutableStateOf(0) }
+    var recordingEngineLabel by remember { mutableStateOf("") }
+    var deviceRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
+    var deviceTimerJob by remember { mutableStateOf<Job?>(null) }
+    var deviceCapturedChunks by remember { mutableStateOf("") }
+    var deviceLivePartial by remember { mutableStateOf("") }
+    var deviceManualActive by remember { mutableStateOf(false) }
 
-    val startCloudStt: () -> Unit = {
+    DisposableEffect(Unit) {
+        onDispose {
+            deviceManualActive = false
+            deviceTimerJob?.cancel()
+            runCatching { deviceRecognizer?.destroy() }
+            deviceRecognizer = null
+        }
+    }
+
+    fun startDeviceInlineListening() {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            viewModel.showBanner("Device speech recognition service not available on this phone.")
+            return
+        }
+        runCatching { deviceRecognizer?.destroy() }
+        val sr = SpeechRecognizer.createSpeechRecognizer(context)
+        deviceRecognizer = sr
+        deviceCapturedChunks = ""
+        deviceLivePartial = ""
+        deviceManualActive = true
+        isRecordingVoice = true
+        isTranscribingVoice = false
+        recordingSeconds = 0
+        recordingEngineLabel = "Android Speech"
+        deviceTimerJob?.cancel()
+        deviceTimerJob = scope.launch {
+            while (deviceManualActive) {
+                delay(1000L)
+                if (deviceManualActive) recordingSeconds++
+            }
+        }
+
+        fun launchSingleDeviceListen() {
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 60_000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 60_000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60_000L)
+            }
+            runCatching { sr.startListening(intent) }
+        }
+
+        sr.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onPartialResults(partialResults: Bundle?) {
+                val p = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                if (p.isNotBlank()) deviceLivePartial = p
+            }
+            override fun onResults(results: Bundle?) {
+                val best = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty().trim()
+                if (best.isNotBlank()) {
+                    deviceCapturedChunks = listOf(deviceCapturedChunks, best).filter { it.isNotBlank() }.joinToString(" ")
+                }
+                deviceLivePartial = ""
+                if (deviceManualActive) {
+                    // User hasn't tapped Stop yet — keep listening seamlessly!
+                    launchSingleDeviceListen()
+                } else {
+                    val finalTxt = deviceCapturedChunks.trim()
+                    if (finalTxt.isNotBlank()) injectedComposerText = finalTxt
+                    isRecordingVoice = false
+                    isTranscribingVoice = false
+                }
+            }
+            override fun onError(error: Int) {
+                if (deviceManualActive && (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)) {
+                    launchSingleDeviceListen()
+                } else {
+                    val finalTxt = listOf(deviceCapturedChunks, deviceLivePartial).filter { it.isNotBlank() }.joinToString(" ").trim()
+                    deviceManualActive = false
+                    deviceTimerJob?.cancel()
+                    isRecordingVoice = false
+                    isTranscribingVoice = false
+                    if (finalTxt.isNotBlank()) injectedComposerText = finalTxt
+                }
+            }
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        launchSingleDeviceListen()
+    }
+
+    val startVoiceRecording: () -> Unit = {
         val engineId = prefs.sttEngine
-        val opt = CelliumSttEngine.ALL_ENGINES.firstOrNull { it.id == engineId }
-        val apiKey = viewModel.resolveSttApiKey(engineId)
-        if (opt?.requiresKey == true && apiKey.isBlank()) {
-            viewModel.showBanner("Add your ${opt.label} API key in Settings -> Voice & Audio first.")
+        if (engineId == CelliumSttEngine.ENGINE_DEVICE) {
+            startDeviceInlineListening()
         } else {
-            isCloudSttListening = true
-            viewModel.showBanner("Listening via ${opt?.label ?: engineId}... (tap mic to finish)")
-            scope.launch {
-                val res = viewModel.sttEngine.recordAndTranscribe(
-                    engineId = engineId,
-                    apiKey = apiKey,
-                    modelOverride = prefs.sttModel,
-                    onTranscribing = {
-                        viewModel.showBanner("Transcribing via ${opt?.label ?: engineId}...")
-                    },
-                )
-                isCloudSttListening = false
-                res.onSuccess { txt ->
-                    viewModel.clearBanner()
-                    injectedComposerText = txt
-                }.onFailure { err ->
-                    viewModel.showBanner("STT error: ${err.localizedMessage ?: "Failed"}")
+            val opt = CelliumSttEngine.ALL_ENGINES.firstOrNull { it.id == engineId }
+            val apiKey = viewModel.resolveSttApiKey(engineId)
+            if (opt?.requiresKey == true && apiKey.isBlank()) {
+                viewModel.showBanner("Add your ${opt.label} API key in Settings -> Voice & Audio first.")
+            } else {
+                isRecordingVoice = true
+                isTranscribingVoice = false
+                recordingSeconds = 0
+                recordingEngineLabel = opt?.label ?: engineId
+                scope.launch {
+                    val res = viewModel.sttEngine.recordAndTranscribe(
+                        engineId = engineId,
+                        apiKey = apiKey,
+                        modelOverride = prefs.sttModel,
+                        manualStopOnly = true,
+                        maxDurationMs = 180_000L,
+                        onElapsedSeconds = { sec -> recordingSeconds = sec },
+                        onTranscribing = {
+                            isRecordingVoice = false
+                            isTranscribingVoice = true
+                        },
+                        onModelAutoSelected = { picked ->
+                            viewModel.persistAutoSelectedSttModel(engineId, picked)
+                        },
+                    )
+                    isRecordingVoice = false
+                    isTranscribingVoice = false
+                    res.onSuccess { txt ->
+                        if (txt.isNotBlank()) injectedComposerText = txt
+                    }.onFailure { err ->
+                        val msg = err.localizedMessage.orEmpty()
+                        if (!msg.contains("cancelled", ignoreCase = true)) {
+                            viewModel.showBanner("STT error: ${msg.ifBlank { "Failed" }}")
+                        }
+                    }
                 }
             }
         }
     }
 
+    val stopVoiceRecording: () -> Unit = {
+        if (prefs.sttEngine == CelliumSttEngine.ENGINE_DEVICE && deviceManualActive) {
+            deviceManualActive = false
+            deviceTimerJob?.cancel()
+            runCatching { deviceRecognizer?.stopListening() }
+            val combined = listOf(deviceCapturedChunks, deviceLivePartial).filter { it.isNotBlank() }.joinToString(" ").trim()
+            if (combined.isNotBlank()) {
+                injectedComposerText = combined
+                deviceCapturedChunks = ""
+                deviceLivePartial = ""
+            }
+            isRecordingVoice = false
+            isTranscribingVoice = false
+        } else {
+            viewModel.sttEngine.requestStopRecording()
+        }
+    }
+
+    val cancelVoiceRecording: () -> Unit = {
+        if (prefs.sttEngine == CelliumSttEngine.ENGINE_DEVICE) {
+            deviceManualActive = false
+            deviceTimerJob?.cancel()
+            deviceCapturedChunks = ""
+            deviceLivePartial = ""
+            runCatching { deviceRecognizer?.cancel() }
+            isRecordingVoice = false
+            isTranscribingVoice = false
+        } else {
+            viewModel.sttEngine.cancelRecording()
+            isRecordingVoice = false
+            isTranscribingVoice = false
+        }
+    }
+
     val micPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) startCloudStt()
+        if (granted) startVoiceRecording()
         else viewModel.showBanner("Microphone permission required for voice input.")
+    }
+
+    val takePhotoLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val uri = pendingCameraUri
+        pendingCameraUri = null
+        if (success && uri != null) {
+            scope.launch {
+                val bmp = withContext(Dispatchers.IO) {
+                    runCatching {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, info, _ ->
+                                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                                val maxDim = maxOf(info.size.width, info.size.height)
+                                if (maxDim > 1280) {
+                                    val scale = 1280f / maxDim.toFloat()
+                                    decoder.setTargetSize(
+                                        (info.size.width * scale).toInt().coerceAtLeast(1),
+                                        (info.size.height * scale).toInt().coerceAtLeast(1),
+                                    )
+                                }
+                            }
+                        } else {
+                            @Suppress("DEPRECATION")
+                            MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+                        }
+                    }.getOrNull()
+                }
+                if (bmp != null) {
+                    viewModel.soundEngine.playPop()
+                    pendingImages = (pendingImages + bmp).take(5)
+                }
+            }
+        }
+    }
+
+    val launchCameraCapture: () -> Unit = {
+        runCatching {
+            val camDir = File(context.cacheDir, "camera").apply { mkdirs() }
+            val photoFile = File(camDir, "cel_cam_${System.currentTimeMillis()}.jpg")
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", photoFile)
+            pendingCameraUri = uri
+            takePhotoLauncher.launch(uri)
+        }.onFailure { err ->
+            viewModel.showBanner("Could not open camera: ${err.localizedMessage}")
+        }
+    }
+
+    val cameraPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) launchCameraCapture()
+        else viewModel.showBanner("Camera permission is required to take a photo.")
+    }
+
+    val saveAsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/*")) { uri ->
+        val src = saveAsSourcePath
+        saveAsSourcePath = null
+        if (uri != null && !src.isNullOrBlank()) {
+            viewModel.saveImageToUri(src, uri)
+        }
     }
 
     val multiPhotoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(maxItems = 5)
     ) { uris ->
         if (uris.isNotEmpty()) {
-            val decoded = uris.mapNotNull { uri ->
-                runCatching {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, _, _ ->
-                            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                        }
-                    } else {
-                        @Suppress("DEPRECATION")
-                        MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+            scope.launch {
+                val decoded = withContext(Dispatchers.IO) {
+                    uris.mapNotNull { uri ->
+                        runCatching {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                                ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, info, _ ->
+                                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                                    val maxDim = maxOf(info.size.width, info.size.height)
+                                    if (maxDim > 1280) {
+                                        val scale = 1280f / maxDim.toFloat()
+                                        decoder.setTargetSize(
+                                            (info.size.width * scale).toInt().coerceAtLeast(1),
+                                            (info.size.height * scale).toInt().coerceAtLeast(1),
+                                        )
+                                    }
+                                }
+                            } else {
+                                @Suppress("DEPRECATION")
+                                MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+                            }
+                        }.getOrNull()
                     }
-                }.getOrNull()
-            }
-            if (decoded.isNotEmpty()) {
-                pendingImages = (pendingImages + decoded).take(5)
+                }
+                if (decoded.isNotEmpty()) {
+                    pendingImages = (pendingImages + decoded).take(5)
+                }
             }
         }
     }
@@ -193,15 +420,6 @@ fun ChatScreen(
         if (uri != null) {
             viewModel.readAttachedTextFile(uri) { loaded ->
                 pendingFile = loaded
-            }
-        }
-    }
-
-    val speechLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val spoken = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
-            if (!spoken.isNullOrBlank()) {
-                injectedComposerText = spoken
             }
         }
     }
@@ -232,6 +450,7 @@ fun ChatScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            val visibleSessionCount = remember(ui.sessions) { ui.sessions.count { !it.archived && !it.isLocked } }
             GlassPill(
                 onClick = {
                     viewModel.soundEngine.playClick()
@@ -241,7 +460,7 @@ fun ChatScreen(
             ) {
                 Icon(Icons.Rounded.History, contentDescription = "Sessions", tint = CelLavender, modifier = Modifier.size(16.dp))
                 Text(
-                    text = "${ui.sessions.count { !it.archived }}",
+                    text = "$visibleSessionCount",
                     style = MaterialTheme.typography.labelMedium,
                     color = CelTextPrimary,
                     maxLines = 1,
@@ -441,6 +660,14 @@ fun ChatScreen(
                     onOpenArena = onOpenArena,
                 )
             } else {
+                val onSwitchBranchStable = remember(viewModel) { { id: String -> viewModel.switchBranch(id) } }
+                val onEditInPlaceStable = remember(viewModel) { { m: com.henny.cellium.data.local.MessageEntity, edited: String, regen: Boolean -> viewModel.editMessageInPlace(m, edited, regen) } }
+                val onEditAsBranchStable = remember(viewModel) { { m: com.henny.cellium.data.local.MessageEntity, edited: String, regen: Boolean -> viewModel.editMessageAsBranch(m, edited, regen) } }
+                val onRegenStable = remember(viewModel) { { m: com.henny.cellium.data.local.MessageEntity -> viewModel.regenerateAssistantMessage(m) } }
+                val onForkStable = remember(viewModel) { { m: com.henny.cellium.data.local.MessageEntity -> viewModel.forkSessionFromMessage(m) } }
+                val onSpeakStable = remember(viewModel) { { text: String -> viewModel.speakText(text) } }
+                val onDeleteStable = remember(viewModel) { { m: com.henny.cellium.data.local.MessageEntity -> viewModel.deleteMessage(m) } }
+                val onImageClickStable = remember { { path: String -> viewingImagePath = path } }
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
@@ -453,15 +680,14 @@ fun ChatScreen(
                             personaName = persona.name,
                             branchInfo = ui.branchInfoById[msg.id],
                             codeWordWrap = prefs.codeWordWrap,
-                            onSwitchBranch = { viewModel.switchBranch(it) },
-                            onEditInPlace = { m, edited, regen -> viewModel.editMessageInPlace(m, edited, regen) },
-                            onEditAsBranch = { m, edited, regen -> viewModel.editMessageAsBranch(m, edited, regen) },
-                            onRegenerate = { viewModel.regenerateAssistantMessage(it) },
-                            onForkSession = { viewModel.forkSessionFromMessage(it) },
-                            onSpeak = { text ->
-                                viewModel.speakText(text)
-                            },
-                            onDelete = { viewModel.deleteMessage(it) },
+                            onSwitchBranch = onSwitchBranchStable,
+                            onEditInPlace = onEditInPlaceStable,
+                            onEditAsBranch = onEditAsBranchStable,
+                            onRegenerate = onRegenStable,
+                            onForkSession = onForkStable,
+                            onSpeak = onSpeakStable,
+                            onDelete = onDeleteStable,
+                            onImageClick = onImageClickStable,
                         )
                     }
                     if (ui.isStreaming) {
@@ -473,6 +699,7 @@ fun ChatScreen(
                                 content = ui.streamingContent,
                                 retryStatusText = ui.retryStatusText,
                                 codeWordWrap = prefs.codeWordWrap,
+                                onImageClick = onImageClickStable,
                             )
                         }
                     }
@@ -522,24 +749,27 @@ fun ChatScreen(
                 onPickImage = {
                     multiPhotoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                 },
+                onTakePhoto = {
+                    val camOk = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                    if (camOk) launchCameraCapture()
+                    else cameraPermLauncher.launch(Manifest.permission.CAMERA)
+                },
                 onPickFile = {
                     filePicker.launch(arrayOf("*/*"))
                 },
                 onStartVoiceInput = {
-                    if (prefs.sttEngine == CelliumSttEngine.ENGINE_DEVICE) {
-                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to ${persona.name}")
-                        }
-                        runCatching { speechLauncher.launch(intent) }
-                    } else if (isCloudSttListening) {
-                        viewModel.sttEngine.requestStopRecording()
-                    } else {
-                        val micOk = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-                        if (micOk) startCloudStt()
-                        else micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                    }
+                    val micOk = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                    if (micOk) startVoiceRecording()
+                    else micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
                 },
+                onCancelVoiceInput = cancelVoiceRecording,
+                onStopVoiceInput = stopVoiceRecording,
+                isRecordingVoice = isRecordingVoice,
+                isTranscribingVoice = isTranscribingVoice,
+                recordingSeconds = recordingSeconds,
+                recordingEngineLabel = recordingEngineLabel,
+                initialDraft = initialChatDraft,
+                onDraftChanged = remember(viewModel) { { draft: String -> viewModel.updateChatDraftText(draft) } },
                 onOpenArena = onOpenArena,
                 onStopStreaming = { viewModel.stopStreaming() },
                 onSend = { text ->
@@ -691,6 +921,11 @@ fun ChatScreen(
                 }
             },
             onDismiss = { showSessionsSheet = false },
+            hasVaultPin = prefs.vaultPinHash.isNotBlank(),
+            onVerifyVaultPin = { viewModel.verifyVaultPin(it) },
+            onSetVaultPin = { viewModel.setVaultPin(it) },
+            onToggleLock = { viewModel.toggleLockSession(it) },
+            onWipeLockedChats = { viewModel.wipeLockedChatsAndResetPin() },
         )
     }
 
@@ -700,6 +935,19 @@ fun ChatScreen(
             customPersonas = ui.customPersonas,
             onSelect = { viewModel.selectPersona(it) },
             onDismiss = { showPersonaSheet = false },
+        )
+    }
+
+    viewingImagePath?.let { imgPath ->
+        FullscreenImageViewerDialog(
+            imagePath = imgPath,
+            onDismiss = { viewingImagePath = null },
+            onSaveToDownloads = { path -> viewModel.saveImageToDownloadsCellium(path) },
+            onSaveAs = { path ->
+                saveAsSourcePath = path
+                val ext = File(path).extension.ifBlank { "png" }
+                saveAsLauncher.launch("Cellium_${System.currentTimeMillis()}.$ext")
+            },
         )
     }
 }
@@ -712,6 +960,7 @@ private fun StreamingAssistantBubble(
     content: String,
     retryStatusText: String = "",
     codeWordWrap: Boolean = true,
+    onImageClick: (String) -> Unit = {},
 ) {
     val visuals = LocalCelliumVisuals.current
     Column(
@@ -745,7 +994,11 @@ private fun StreamingAssistantBubble(
         }
         if (thought.isNotBlank()) ThoughtAccordion(thought = thought)
         if (content.isNotBlank()) {
-            MarkdownMessageContent(text = content, defaultWordWrap = codeWordWrap)
+            InlineRichMessageContent(
+                text = content,
+                codeWordWrap = codeWordWrap,
+                onImageClick = onImageClick,
+            )
         } else if (retryStatusText.isBlank()) {
             Text("Thinking...", style = MaterialTheme.typography.bodySmall, color = CelTextSecondary)
         }

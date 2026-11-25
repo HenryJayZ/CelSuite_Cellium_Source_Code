@@ -9,14 +9,18 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.Coil
 import coil.ImageLoader
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.henny.cellium.core.CelliumNotificationManager
+import com.henny.cellium.core.CelliumPreferences
 import com.henny.cellium.ui.chat.CelliumViewModel
 import com.henny.cellium.ui.theme.CelliumTheme
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -33,8 +37,25 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         setContent {
-            val prefs by viewModel.preferences.collectAsStateWithLifecycle()
-            CelliumTheme(prefs = prefs) {
+            val visualPrefs by remember(viewModel) {
+                viewModel.preferences
+                    .map { p ->
+                        CelliumPreferences(
+                            themePresetId = p.themePresetId,
+                            customPrimaryHex = p.customPrimaryHex,
+                            customWallpaperUri = p.customWallpaperUri,
+                            wallpaperDim = p.wallpaperDim,
+                            glassOpacity = p.glassOpacity,
+                            borderGlow = p.borderGlow,
+                            particlesEnabled = p.particlesEnabled,
+                            particleDensity = p.particleDensity,
+                            highFpsMode = p.highFpsMode,
+                            fontScale = p.fontScale,
+                        )
+                    }
+                    .distinctUntilChanged()
+            }.collectAsStateWithLifecycle(initialValue = remember { CelliumPreferences() })
+            CelliumTheme(prefs = visualPrefs) {
                 CelliumApp(viewModel = viewModel)
             }
         }

@@ -98,10 +98,14 @@ class UniversalLlmClient {
         }
 
         if (contextConfig.includeIllumeInstructions) {
-            append("\n\n[Illume Built-In Image Generator — ACTIVE]\n")
-            append("You HAVE a real built-in image generator right inside this app! Whenever the user asks you to generate, draw, paint, create, make, or render an image, art, photo, wallpaper, or picture, you MUST emit this exact tag (no code fences around it):\n")
-            append("[ILLUME_GEN]\n<detailed visual description of the scene, style, lighting, colors>\n[/ILLUME_GEN]\n")
-            append("NEVER say you are text-only or cannot generate images. Just write a brief friendly line and include the [ILLUME_GEN]...[/ILLUME_GEN] block so Cellium automatically renders and attaches the image.")
+            append("\n\n[Illume Built-In Image Generator & Keyless Web Tools — ACTIVE]\n")
+            append("1. AI Image Generation: You HAVE a built-in image generator! Whenever the user asks you to generate, draw, paint, create, make, or render images/art/pictures, emit up to 5 separate blocks placed INLINE right where each image belongs in your explanation (no code fences):\n")
+            append("[ILLUME_GEN]\n<detailed visual prompt>\n[/ILLUME_GEN]\n")
+            append("NEVER claim you are text-only or cannot generate images.\n")
+            append("2. Real-Time Web Search (Free Keyless): If you need up-to-date news, facts, versions, or current info, output ONLY a single block and wait for results:\n")
+            append("[WEB_SEARCH]<concise search query>[/WEB_SEARCH]\n")
+            append("3. Real Web/Stock Photos (Free Keyless): ONLY when the user explicitly asks for real photographs or stock/web images (NOT AI art), you may embed up to 5 inline blocks:\n")
+            append("[WEB_IMAGE]<simple photo subject keywords>[/WEB_IMAGE]")
         }
 
         if (agentModeEnabled && contextConfig.includeAgentInstructions) {
@@ -109,13 +113,16 @@ class UniversalLlmClient {
             append("Project Workspace Directory: $agentWorkspacePath\n")
             append(
                 if (shizukuConnected) {
-                    "Shizuku shell IS CONNECTED. When the user asks to inspect the device, run diagnostics, manage files in the project workspace, check storage/RAM/battery, or execute shell commands:\n" +
+                    "Shizuku privileged shell IS CONNECTED (full ADB/system access + workspace files). When the user asks to inspect the device, run diagnostics, manage files in the workspace, check storage/RAM/battery, or execute shell commands:\n" +
                         "1. Output ONLY a single raw tool block and NOTHING ELSE (no intro sentence, no markdown ``` fences, no comments):\n" +
                         "[SHIZUKU_RUN]\n<single shell command>\n[/SHIZUKU_RUN]\n" +
                         "2. Cellium executes it immediately and sends stdout back to you so you can then give the final answer.\n" +
                         "3. For project files, work inside $agentWorkspacePath. Never emit destructive commands."
                 } else {
-                    "Shizuku is NOT connected right now. If the user asks to run a device or shell command, tell them concisely in 1-2 sentences to authorize Shizuku in Settings -> Agent & Shizuku. Do NOT output any [SHIZUKU_RUN] block while Shizuku is disconnected."
+                    "Local Android Shell IS ACTIVE (Shizuku is NOT connected, so privileged ADB commands like pm/am/dumpsys/settings are unavailable, but normal shell commands like ls, cat, pwd, mkdir, cp, mv, find, grep, wc, sed, head, tail, df, uname, date, sh scripts, and inspecting files inside the workspace work right away!).\n" +
+                        "1. To run a normal shell command, output ONLY a single raw tool block and NOTHING ELSE (no markdown ``` fences):\n" +
+                        "[SHIZUKU_RUN]\n<single shell command>\n[/SHIZUKU_RUN]\n" +
+                        "2. If the user specifically needs privileged Android system commands (pm, am, dumpsys, settings), tell them in 1 sentence to authorize Shizuku in Settings -> Agent & Shizuku."
                 }
             )
         }
@@ -440,7 +447,7 @@ class UniversalLlmClient {
             append(userPrompt)
         }.trim()
 
-        val limitedHistory = history.takeLast(historyLimit.coerceIn(2, 48))
+        val limitedHistory = if (historyLimit >= 200) history.takeLast(400) else history.takeLast(historyLimit.coerceIn(2, 400))
 
         if (resolvedProvider.protocol == "anthropic") {
             streamAnthropic(cleanBase, resolvedProvider, systemPrompt, limitedHistory, enrichedPrompt, allImages)
@@ -754,7 +761,7 @@ class UniversalLlmClient {
             )
         } else bitmap
         val out = ByteArrayOutputStream()
-        target.compress(Bitmap.CompressFormat.JPEG, 84, out)
+        target.compress(Bitmap.CompressFormat.JPEG, 80, out)
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
@@ -771,6 +778,76 @@ class UniversalLlmClient {
             """(?:```[a-zA-Z]*\s*)?\[(?:ILLUME_GEN|ILLUME|IMAGE_GEN)]([\s\S]+)$""",
             RegexOption.IGNORE_CASE,
         )
+        private val WEB_SEARCH_REGEX = Regex(
+            """(?:```[a-zA-Z]*\s*)?\[WEB_SEARCH]([\s\S]*?)\[/WEB_SEARCH](?:\s*```)?""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val WEB_IMAGE_REGEX = Regex(
+            """(?:```[a-zA-Z]*\s*)?\[WEB_IMAGE]([\s\S]*?)\[/WEB_IMAGE](?:\s*```)?""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        /**
+         * Extracts up to [maxCount] inline [ILLUME_GEN] prompts, replacing each one in-place with
+         * `[[CELLIUM_IMG_SLOT:<index>]]` so generated images render right where Cel placed them!
+         */
+        fun extractAllIllumeBlocks(
+            assistantBodyOnly: String,
+            maxCount: Int = 5,
+        ): Pair<List<String>, String> {
+            val prompts = mutableListOf<String>()
+            var working = ILLUME_BLOCK_REGEX.replace(assistantBodyOnly) { match ->
+                val p = match.groupValues[1].trim().trim('`', '"', '\'')
+                if (p.isNotBlank() && prompts.size < maxCount) {
+                    val idx = prompts.size
+                    prompts.add(p)
+                    "\n[[CELLIUM_IMG_SLOT:$idx]]\n"
+                } else ""
+            }
+            if (prompts.size < maxCount) {
+                working = ILLUME_INLINE_REGEX.replace(working) { match ->
+                    val p = match.groupValues[1].trim().trim('`', '"', '\'')
+                    if (p.isNotBlank() && prompts.size < maxCount) {
+                        val idx = prompts.size
+                        prompts.add(p)
+                        "\n[[CELLIUM_IMG_SLOT:$idx]]\n"
+                    } else ""
+                }
+            }
+            if (prompts.isEmpty()) {
+                ILLUME_UNCLOSED_REGEX.find(working)?.let { match ->
+                    val p = match.groupValues[1].replace("```", "").trim().trim('"', '\'')
+                    if (p.isNotBlank()) {
+                        prompts.add(p)
+                        working = working.replace(ILLUME_UNCLOSED_REGEX, "\n[[CELLIUM_IMG_SLOT:0]]\n")
+                    }
+                }
+            }
+            return prompts to working.trim()
+        }
+
+        fun extractWebSearchQuery(assistantBodyOnly: String): Pair<String?, String> {
+            val match = WEB_SEARCH_REGEX.find(assistantBodyOnly) ?: return null to assistantBodyOnly
+            val q = match.groupValues[1].trim().trim('`', '"', '\'')
+            val cleaned = assistantBodyOnly.replace(WEB_SEARCH_REGEX, "").trim()
+            return q.ifBlank { null } to cleaned
+        }
+
+        fun extractAllWebImageBlocks(
+            assistantBodyOnly: String,
+            maxCount: Int = 5,
+        ): Pair<List<String>, String> {
+            val queries = mutableListOf<String>()
+            val working = WEB_IMAGE_REGEX.replace(assistantBodyOnly) { match ->
+                val q = match.groupValues[1].trim().trim('`', '"', '\'')
+                if (q.isNotBlank() && queries.size < maxCount) {
+                    val idx = queries.size
+                    queries.add(q)
+                    "\n[[CELLIUM_WEBIMG_SLOT:$idx]]\n"
+                } else ""
+            }
+            return queries to working.trim()
+        }
 
         fun extractIllumePrompt(assistantBodyOnly: String): Pair<String?, String> {
             ILLUME_BLOCK_REGEX.find(assistantBodyOnly)?.let { match ->

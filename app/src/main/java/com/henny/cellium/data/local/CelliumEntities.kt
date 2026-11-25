@@ -32,6 +32,7 @@ data class SessionEntity(
     val modelName: String = "",
     val pinned: Boolean = false,
     val archived: Boolean = false,
+    val isLocked: Boolean = false,
     val isArena: Boolean = false,
     val arenaProviderA: String = "preset_pollinations_free",
     val arenaModelA: String = "openai-fast",

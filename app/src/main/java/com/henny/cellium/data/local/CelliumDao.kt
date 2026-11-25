@@ -49,6 +49,12 @@ interface CelliumDao {
     @Query("DELETE FROM sessions")
     suspend fun deleteAllSessions()
 
+    @Query("DELETE FROM messages WHERE sessionId IN (SELECT id FROM sessions WHERE isLocked = 1)")
+    suspend fun deleteMessagesForLockedSessions()
+
+    @Query("DELETE FROM sessions WHERE isLocked = 1")
+    suspend fun deleteLockedSessions()
+
     // ── Tree Messages ────────────────────────────────────────────────────
     @Query("SELECT * FROM messages WHERE sessionId = :sessionId ORDER BY createdAtMs ASC")
     fun observeMessagesForSession(sessionId: String): Flow<List<MessageEntity>>

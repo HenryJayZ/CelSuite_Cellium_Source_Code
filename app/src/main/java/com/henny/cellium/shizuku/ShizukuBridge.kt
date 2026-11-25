@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
+import java.io.File
+import java.util.concurrent.TimeUnit
 
 enum class ShizukuStatus {
     NOT_RUNNING,
@@ -187,6 +189,36 @@ class ShizukuBridge(private val context: Context) {
             out
         }.onFailure { err ->
             DevLogBuffer.add("ERROR", "ShizukuShell", err.localizedMessage ?: "Command failed")
+        }
+    }
+
+    /**
+     * Runs standard unprivileged Android shell commands (`ls`, `cat`, `mkdir`, `cp`, `grep`, `find`,
+     * `sh`, `df`, `uname`, etc.) directly inside [workDir] WITHOUT requiring Shizuku!
+     */
+    suspend fun runLocalShellCommand(
+        command: String,
+        workDir: File,
+        timeoutSec: Int = 20,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            workDir.mkdirs()
+            DevLogBuffer.add("INFO", "LocalShell", "$ $command")
+            val proc = ProcessBuilder("sh", "-c", command)
+                .directory(workDir)
+                .redirectErrorStream(true)
+                .start()
+            val finished = proc.waitFor(timeoutSec.toLong().coerceIn(3L, 60L), TimeUnit.SECONDS)
+            if (!finished) {
+                proc.destroyForcibly()
+                throw IllegalStateException("Command timed out after ${timeoutSec}s")
+            }
+            val output = proc.inputStream.bufferedReader().use { it.readText() }
+            val exitCode = proc.exitValue()
+            val header = if (exitCode == 0) "" else "[exit $exitCode]\n"
+            (header + output).trim().ifBlank { "(exit $exitCode, no output)" }.take(12_000)
+        }.onFailure { err ->
+            DevLogBuffer.add("ERROR", "LocalShell", err.localizedMessage ?: "Local shell failed")
         }
     }
 

@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,16 +17,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Backspace
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -35,6 +41,7 @@ import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Unarchive
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,6 +58,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,6 +74,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.henny.cellium.ai.ProviderCatalog
 import com.henny.cellium.ai.ProviderCatalogEntry
 import com.henny.cellium.ai.ProviderPresets
@@ -554,19 +565,30 @@ fun SessionsDrawerSheet(
     onExportMd: () -> Unit,
     onExportJson: () -> Unit,
     onDismiss: () -> Unit,
+    hasVaultPin: Boolean = false,
+    onVerifyVaultPin: (String) -> Boolean = { false },
+    onSetVaultPin: (String) -> Unit = {},
+    onToggleLock: (SessionEntity) -> Unit = {},
+    onWipeLockedChats: () -> Unit = {},
 ) {
     val visuals = LocalCelliumVisuals.current
     var search by remember { mutableStateOf("") }
     var showArchived by remember { mutableStateOf(false) }
     var contentMatchIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showVaultDialog by remember { mutableStateOf(false) }
+    var vaultCreatePinMode by remember { mutableStateOf(false) }
+    var pendingSessionToLock by remember { mutableStateOf<SessionEntity?>(null) }
 
     LaunchedEffect(search) {
         contentMatchIds = if (search.trim().length >= 2) onSearchContent(search) else emptySet()
     }
 
-    val filtered = remember(sessions, search, showArchived, contentMatchIds) {
+    val visiblePublicSessions = remember(sessions) { sessions.filter { !it.isLocked } }
+    val lockedSessions = remember(sessions) { sessions.filter { it.isLocked } }
+
+    val filtered = remember(visiblePublicSessions, search, showArchived, contentMatchIds) {
         val q = search.trim().lowercase()
-        sessions.filter { s ->
+        visiblePublicSessions.filter { s ->
             val archiveOk = if (showArchived) s.archived else !s.archived
             val queryOk = q.isEmpty() ||
                 s.title.lowercase().contains(q) ||
@@ -595,6 +617,21 @@ fun SessionsDrawerSheet(
                     modifier = Modifier.weight(1f),
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    IconButton(
+                        onClick = {
+                            vaultCreatePinMode = !hasVaultPin
+                            pendingSessionToLock = null
+                            showVaultDialog = true
+                        },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(visuals.primary.copy(alpha = 0.16f))
+                            .border(1.dp, visuals.activeBorder, RoundedCornerShape(10.dp))
+                            .testTag("drawer_vault_button"),
+                    ) {
+                        Icon(Icons.Rounded.Lock, contentDescription = "Locked Chats Vault", tint = CelLavender, modifier = Modifier.size(18.dp))
+                    }
                     OutlinedButton(
                         onClick = { onDismiss(); onOpenArena() },
                         modifier = Modifier.testTag("drawer_arena_button"),
@@ -631,12 +668,12 @@ fun SessionsDrawerSheet(
                     FilterChip(
                         selected = !showArchived,
                         onClick = { showArchived = false },
-                        label = { Text("Active (${sessions.count { !it.archived }})", maxLines = 1, softWrap = false) },
+                        label = { Text("Active (${visiblePublicSessions.count { !it.archived }})", maxLines = 1, softWrap = false) },
                     )
                     FilterChip(
                         selected = showArchived,
                         onClick = { showArchived = true },
-                        label = { Text("Archived (${sessions.count { it.archived }})", maxLines = 1, softWrap = false) },
+                        label = { Text("Archived (${visiblePublicSessions.count { it.archived }})", maxLines = 1, softWrap = false) },
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -702,30 +739,415 @@ fun SessionsDrawerSheet(
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        IconButton(onClick = { onTogglePin(s) }, modifier = Modifier.size(32.dp)) {
+                        IconButton(
+                            onClick = {
+                                if (hasVaultPin) {
+                                    onToggleLock(s)
+                                } else {
+                                    pendingSessionToLock = s
+                                    vaultCreatePinMode = true
+                                    showVaultDialog = true
+                                }
+                            },
+                            modifier = Modifier.size(30.dp),
+                        ) {
+                            Icon(Icons.Rounded.Lock, contentDescription = "Lock chat in Vault", tint = CelTextMuted, modifier = Modifier.size(15.dp))
+                        }
+                        IconButton(onClick = { onTogglePin(s) }, modifier = Modifier.size(30.dp)) {
                             Icon(
                                 Icons.Rounded.PushPin,
                                 contentDescription = "Pin",
                                 tint = if (s.pinned) visuals.primary else CelTextMuted,
-                                modifier = Modifier.size(16.dp),
+                                modifier = Modifier.size(15.dp),
                             )
                         }
-                        IconButton(onClick = { onToggleArchive(s) }, modifier = Modifier.size(32.dp)) {
+                        IconButton(onClick = { onToggleArchive(s) }, modifier = Modifier.size(30.dp)) {
                             Icon(
                                 if (s.archived) Icons.Rounded.Unarchive else Icons.Rounded.Archive,
                                 contentDescription = if (s.archived) "Unarchive" else "Archive",
                                 tint = CelTextMuted,
-                                modifier = Modifier.size(16.dp),
+                                modifier = Modifier.size(15.dp),
                             )
                         }
-                        IconButton(onClick = { onDelete(s.id) }, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = CelTextMuted, modifier = Modifier.size(16.dp))
+                        IconButton(onClick = { onDelete(s.id) }, modifier = Modifier.size(30.dp)) {
+                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete", tint = CelTextMuted, modifier = Modifier.size(15.dp))
                         }
                     }
                 }
             }
             Spacer(Modifier.height(14.dp))
         }
+    }
+
+    if (showVaultDialog) {
+        LockedChatsVaultDialog(
+            lockedSessions = lockedSessions,
+            hasVaultPin = hasVaultPin,
+            startInCreatePinMode = vaultCreatePinMode,
+            onVerifyPin = onVerifyVaultPin,
+            onSetPin = { digits ->
+                onSetVaultPin(digits)
+                pendingSessionToLock?.let { toLock ->
+                    onToggleLock(toLock)
+                    pendingSessionToLock = null
+                }
+            },
+            onOpenSession = { s ->
+                showVaultDialog = false
+                onDismiss()
+                if (s.isArena) onOpenArenaSession(s.id) else onSelect(s.id)
+            },
+            onUnlockSession = onToggleLock,
+            onDeleteSession = onDelete,
+            onWipeLockedChats = {
+                onWipeLockedChats()
+                showVaultDialog = false
+            },
+            onDismiss = {
+                showVaultDialog = false
+                pendingSessionToLock = null
+            },
+        )
+    }
+}
+
+/**
+ * Locked Chats Vault with floating circular translucent number keypad:
+ * - Zero PIN length leak (no fixed dots or length hints!)
+ * - Auto-unlocks the instant entered digits match the stored hash (no Enter key!)
+ * - Supports any custom PIN length chosen by the user
+ * - Forgot PIN permanently wipes all locked chats & resets the PIN upon confirmation
+ */
+@Composable
+private fun LockedChatsVaultDialog(
+    lockedSessions: List<SessionEntity>,
+    hasVaultPin: Boolean,
+    startInCreatePinMode: Boolean,
+    onVerifyPin: (String) -> Boolean,
+    onSetPin: (String) -> Unit,
+    onOpenSession: (SessionEntity) -> Unit,
+    onUnlockSession: (SessionEntity) -> Unit,
+    onDeleteSession: (String) -> Unit,
+    onWipeLockedChats: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val visuals = LocalCelliumVisuals.current
+    var isUnlocked by remember { mutableStateOf(false) }
+    var isCreatingPin by remember(startInCreatePinMode, hasVaultPin) {
+        mutableStateOf(startInCreatePinMode || !hasVaultPin)
+    }
+    var enteredDigits by remember { mutableStateOf("") }
+    var showForgotConfirm by remember { mutableStateOf(false) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .clip(RoundedCornerShape(26.dp))
+                .background(Color(0xEE0B0714))
+                .border(1.dp, visuals.activeBorder, RoundedCornerShape(26.dp))
+                .padding(20.dp),
+        ) {
+            if (isUnlocked && !isCreatingPin) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(Icons.Rounded.LockOpen, contentDescription = null, tint = CelEmeraldThought)
+                            Text("Locked Chats Vault", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
+                        }
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Rounded.Close, contentDescription = "Close Vault", tint = CelTextMuted)
+                        }
+                    }
+
+                    if (lockedSessions.isEmpty()) {
+                        Text(
+                            text = "No locked chats yet. Tap the lock icon on any chat in Sessions to move it privately into your Vault.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = CelTextSecondary,
+                            modifier = Modifier.padding(vertical = 12.dp),
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items(lockedSessions, key = { it.id }) { s ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(visuals.glassSurface)
+                                        .border(1.dp, visuals.subtleBorder, RoundedCornerShape(14.dp))
+                                        .clickable { onOpenSession(s) }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = s.title,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = CelTextPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            text = "${s.messageCount} msgs · Private",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                                            color = CelTextMuted,
+                                        )
+                                    }
+                                    IconButton(onClick = { onUnlockSession(s) }, modifier = Modifier.size(32.dp)) {
+                                        Icon(Icons.Rounded.LockOpen, contentDescription = "Unlock chat", tint = CelEmeraldThought, modifier = Modifier.size(16.dp))
+                                    }
+                                    IconButton(onClick = { onDeleteSession(s.id) }, modifier = Modifier.size(32.dp)) {
+                                        Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete chat", tint = CelDangerRed, modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        OutlinedButton(onClick = {
+                            enteredDigits = ""
+                            isCreatingPin = true
+                        }) {
+                            Text("Change PIN", maxLines = 1, softWrap = false)
+                        }
+                        Button(
+                            onClick = onDismiss,
+                            colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
+                        ) {
+                            Text("Lock & Close", maxLines = 1, softWrap = false)
+                        }
+                    }
+                }
+            } else {
+                // Floating Number Keypad (Create PIN or Instant Auto-Unlock)
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(Icons.Rounded.Lock, contentDescription = null, tint = visuals.primary)
+                            Text(
+                                text = if (isCreatingPin) "Set Vault PIN" else "Enter Vault PIN",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = CelTextPrimary,
+                            )
+                        }
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Rounded.Close, contentDescription = "Close", tint = CelTextMuted)
+                        }
+                    }
+
+                    Text(
+                        text = if (isCreatingPin) {
+                            "Choose any PIN length you like. Your vault unlocks automatically without revealing length."
+                        } else {
+                            "Unlocks automatically once matched."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CelTextSecondary,
+                    )
+
+                    // Dynamic entered dots ONLY — zero fixed slots, zero length hint!
+                    Row(
+                        modifier = Modifier.height(26.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (enteredDigits.isEmpty()) {
+                            Text(
+                                text = "· · ·",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = CelTextMuted.copy(alpha = 0.45f),
+                            )
+                        } else {
+                            val visibleCount = enteredDigits.length.coerceAtMost(14)
+                            repeat(visibleCount) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(11.dp)
+                                        .clip(CircleShape)
+                                        .background(visuals.primary),
+                                )
+                            }
+                        }
+                    }
+
+                    val appendDigit: (String) -> Unit = { d ->
+                        if (enteredDigits.length < 24) {
+                            val next = enteredDigits + d
+                            enteredDigits = next
+                            if (!isCreatingPin && onVerifyPin(next)) {
+                                enteredDigits = ""
+                                isUnlocked = true
+                            }
+                        }
+                    }
+
+                    val keypadRows = listOf(
+                        listOf("1", "2", "3"),
+                        listOf("4", "5", "6"),
+                        listOf("7", "8", "9"),
+                    )
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        keypadRows.forEach { row ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                                row.forEach { digit ->
+                                    VaultFloatingKey(label = digit, onClick = { appendDigit(digit) })
+                                }
+                            }
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(18.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(modifier = Modifier.size(64.dp), contentAlignment = Alignment.Center) {
+                                if (!isCreatingPin) {
+                                    TextButton(
+                                        onClick = { enteredDigits = "" },
+                                        enabled = enteredDigits.isNotEmpty(),
+                                    ) {
+                                        Text("CLR", style = MaterialTheme.typography.labelSmall, color = CelTextMuted)
+                                    }
+                                }
+                            }
+                            VaultFloatingKey(label = "0", onClick = { appendDigit("0") })
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0x22FFFFFF))
+                                    .border(1.dp, Color(0x33FFFFFF), CircleShape)
+                                    .clickable {
+                                        if (enteredDigits.isNotEmpty()) {
+                                            enteredDigits = enteredDigits.dropLast(1)
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Rounded.Backspace,
+                                    contentDescription = "Backspace",
+                                    tint = CelTextPrimary,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    if (isCreatingPin) {
+                        Button(
+                            onClick = {
+                                if (enteredDigits.isNotEmpty()) {
+                                    onSetPin(enteredDigits)
+                                    enteredDigits = ""
+                                    isCreatingPin = false
+                                    isUnlocked = true
+                                }
+                            },
+                            enabled = enteredDigits.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Save PIN (${enteredDigits.length} digits)", maxLines = 1, softWrap = false)
+                        }
+                    } else {
+                        TextButton(onClick = { showForgotConfirm = true }) {
+                            Text("Forgot PIN?", color = CelDangerRed, style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showForgotConfirm) {
+        AlertDialog(
+            onDismissRequest = { showForgotConfirm = false },
+            containerColor = Color(0xFF140D26),
+            title = { Text("Erase All Locked Chats?", color = CelDangerRed) },
+            text = {
+                Text(
+                    text = "Resetting your Vault PIN will permanently delete ALL locked chats (${lockedSessions.size}) so nobody can bypass your privacy lock. Continue?",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = CelTextSecondary,
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showForgotConfirm = false
+                        onWipeLockedChats()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CelDangerRed),
+                ) {
+                    Text("Erase & Reset PIN", maxLines = 1, softWrap = false)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showForgotConfirm = false }) {
+                    Text("Cancel", maxLines = 1, softWrap = false)
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun VaultFloatingKey(
+    label: String,
+    onClick: () -> Unit,
+) {
+    val visuals = LocalCelliumVisuals.current
+    Box(
+        modifier = Modifier
+            .size(64.dp)
+            .clip(CircleShape)
+            .background(Color(0x28FFFFFF))
+            .border(1.dp, visuals.activeBorder.copy(alpha = 0.55f), CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleLarge.copy(
+                fontFamily = JetBrainsMono,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 22.sp,
+            ),
+            color = CelTextPrimary,
+        )
     }
 }
 
@@ -871,11 +1293,15 @@ fun ContextModifySheet(
                 draft = draft.copy(includeMoodInstructions = it)
             }
 
-            Text("History Turns Sent: ${draft.historyLimit}", style = MaterialTheme.typography.labelSmall, color = CelLavender)
+            Text(
+                text = if (draft.historyLimit >= 200) "History Messages Sent: Full History (up to 400)" else "History Messages Sent: ${draft.historyLimit}",
+                style = MaterialTheme.typography.labelSmall,
+                color = CelLavender,
+            )
             Slider(
-                value = draft.historyLimit.toFloat(),
+                value = draft.historyLimit.coerceIn(4, 200).toFloat(),
                 onValueChange = { draft = draft.copy(historyLimit = it.toInt()) },
-                valueRange = 2f..64f,
+                valueRange = 4f..200f,
             )
 
             HorizontalDivider(color = visuals.subtleBorder)

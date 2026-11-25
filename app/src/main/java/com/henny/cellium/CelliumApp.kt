@@ -72,6 +72,8 @@ import com.henny.cellium.ui.theme.CelTextMuted
 import com.henny.cellium.ui.theme.CelTextPrimary
 import com.henny.cellium.ui.theme.CelTextSecondary
 import com.henny.cellium.ui.theme.LocalCelliumVisuals
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
@@ -104,7 +106,9 @@ fun CelliumApp(viewModel: CelliumViewModel) {
 
     val prefs by viewModel.preferences.collectAsStateWithLifecycle()
     val prefsLoaded by viewModel.preferencesLoaded.collectAsStateWithLifecycle()
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val pendingSyncConflict by remember(viewModel) {
+        viewModel.uiState.map { it.pendingSyncConflict }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = false)
     val authManager = remember { AuthManager() }
     val currentUser by authManager.currentUserFlow.collectAsStateWithLifecycle(initialValue = authManager.currentUser)
 
@@ -151,8 +155,11 @@ fun CelliumApp(viewModel: CelliumViewModel) {
     }
 
     if (!prefs.onboardingCompleted) {
+        val onboardingProviders by remember(viewModel) {
+            viewModel.uiState.map { it.providers }.distinctUntilChanged()
+        }.collectAsStateWithLifecycle(initialValue = emptyList())
         OnboardingScreen(
-            providers = uiState.providers,
+            providers = onboardingProviders,
             initialTermsAccepted = prefs.termsAccepted,
             googleAuthBusy = googleBusy,
             googleAuthError = googleErr,
@@ -182,6 +189,17 @@ fun CelliumApp(viewModel: CelliumViewModel) {
             else -> "sub"
         }
         viewModel.setCurrentVisibleTab(tabKey)
+    }
+
+    // Immersive full-bleed Pure OLED Black Live Mode (no wallpaper, no bottom nav bar)
+    if (currentTab == CelliumTab.LIVE && subOverlay == SubOverlay.None) {
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            LiveModeScreen(
+                viewModel = viewModel,
+                onClose = { currentTab = CelliumTab.CHAT },
+            )
+        }
+        return
     }
 
     CelliumBackground {
@@ -338,8 +356,11 @@ fun CelliumApp(viewModel: CelliumViewModel) {
 
             // Fallback in-app floating face if system overlay permission is not granted yet
             if (prefs.floatingMiniCel && !Settings.canDrawOverlays(context) && !scrollCaptureActive) {
+                val currentMood by remember(viewModel) {
+                    viewModel.uiState.map { it.currentMood }.distinctUntilChanged()
+                }.collectAsStateWithLifecycle(initialValue = "idle")
                 FloatingMiniCelOverlay(
-                    mood = uiState.currentMood,
+                    mood = currentMood,
                     avatarGender = prefs.avatarGender,
                     highFps = prefs.highFpsMode,
                     onHeadpat = { viewModel.soundEngine.playAnimalesePurr() },
@@ -351,7 +372,7 @@ fun CelliumApp(viewModel: CelliumViewModel) {
     }
 
     // 3-Option Guest -> Google Sign-In Conflict Resolution Dialog (#19)
-    if (uiState.pendingSyncConflict) {
+    if (pendingSyncConflict) {
         AlertDialog(
             onDismissRequest = { viewModel.dismissSyncConflict() },
             containerColor = Color(0xFF140D26),

@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
+import android.util.LruCache
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -61,6 +62,7 @@ import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -214,35 +216,36 @@ private fun AmbientParticlesOverlay(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    var tickMs by remember { mutableLongStateOf(0L) }
-    val frameStepMs = if (highFpsMode) 33L else 55L
+    val tickState = remember { mutableLongStateOf(0L) }
+    val frameStepMs = if (highFpsMode) 42L else 66L
     LaunchedEffect(frameStepMs, isResumed) {
         if (!isResumed) return@LaunchedEffect
-        var lastMs = 0L
         while (true) {
+            delay(frameStepMs)
             withFrameMillis { now ->
-                if (now - lastMs >= frameStepMs) {
-                    lastMs = now
-                    tickMs = now
-                }
+                tickState.longValue = now
             }
         }
     }
 
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        val t = tickMs * 0.001f
-        for (m in motes) {
-            val y = ((m.yFrac - t * m.speed) % 1f + 1f) % 1f
-            val x = m.xFrac + sin(t * 0.7f + m.phase) * 0.025f
-            val alpha = (0.16f + 0.22f * (0.5f + 0.5f * sin(t * 1.4f + m.phase))).coerceIn(0.06f, 0.45f)
-            val color = if (m.magenta) secondary else primary
-            drawCircle(
-                color = color.copy(alpha = alpha),
-                radius = m.radius * density,
-                center = Offset(x * size.width, y * size.height),
-            )
-        }
-    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .drawBehind {
+                val t = tickState.longValue * 0.001f
+                for (m in motes) {
+                    val y = ((m.yFrac - t * m.speed) % 1f + 1f) % 1f
+                    val x = m.xFrac + sin(t * 0.7f + m.phase) * 0.025f
+                    val alpha = (0.16f + 0.22f * (0.5f + 0.5f * sin(t * 1.4f + m.phase))).coerceIn(0.06f, 0.45f)
+                    val color = if (m.magenta) secondary else primary
+                    drawCircle(
+                        color = color.copy(alpha = alpha),
+                        radius = m.radius * density,
+                        center = Offset(x * size.width, y * size.height),
+                    )
+                }
+            },
+    )
 }
 
 @Composable
@@ -256,10 +259,12 @@ fun GlassCard(
 ) {
     val visuals = LocalCelliumVisuals.current
     val bg = backgroundColor ?: visuals.glassSurface
-    val borderBrush = if (highlighted) {
-        Brush.linearGradient(listOf(visuals.activeBorder, visuals.secondary.copy(alpha = 0.75f)))
-    } else {
-        Brush.linearGradient(listOf(visuals.activeBorder.copy(alpha = 0.55f), visuals.subtleBorder))
+    val borderBrush = remember(highlighted, visuals.activeBorder, visuals.secondary, visuals.subtleBorder) {
+        if (highlighted) {
+            Brush.linearGradient(listOf(visuals.activeBorder, visuals.secondary.copy(alpha = 0.75f)))
+        } else {
+            Brush.linearGradient(listOf(visuals.activeBorder.copy(alpha = 0.55f), visuals.subtleBorder))
+        }
     }
     Column(
         modifier = modifier
@@ -480,22 +485,33 @@ private sealed interface CompiledMdBlock {
     data class Code(val language: String, val code: String) : CompiledMdBlock
 }
 
+private val MARKDOWN_BLOCK_CACHE = object : LruCache<String, List<CompiledMdBlock>>(256) {}
+
+private fun getCachedMarkdownBlocks(text: String): List<CompiledMdBlock> {
+    if (text.length <= 24_000) {
+        MARKDOWN_BLOCK_CACHE.get(text)?.let { return it }
+    }
+    val compiled = parseMarkdownBlocks(text).map { block ->
+        when (block) {
+            is MdBlock.Heading -> CompiledMdBlock.Heading(block.level, formatInlineMarkdown(block.text))
+            is MdBlock.Bullet -> CompiledMdBlock.Bullet(formatInlineMarkdown(block.text))
+            is MdBlock.Paragraph -> CompiledMdBlock.Paragraph(formatInlineMarkdown(block.text))
+            is MdBlock.Code -> CompiledMdBlock.Code(block.language, block.code)
+        }
+    }
+    if (text.length <= 24_000) {
+        MARKDOWN_BLOCK_CACHE.put(text, compiled)
+    }
+    return compiled
+}
+
 @Composable
 fun MarkdownMessageContent(
     text: String,
     defaultWordWrap: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
-    val compiledBlocks = remember(text) {
-        parseMarkdownBlocks(text).map { block ->
-            when (block) {
-                is MdBlock.Heading -> CompiledMdBlock.Heading(block.level, formatInlineMarkdown(block.text))
-                is MdBlock.Bullet -> CompiledMdBlock.Bullet(formatInlineMarkdown(block.text))
-                is MdBlock.Paragraph -> CompiledMdBlock.Paragraph(formatInlineMarkdown(block.text))
-                is MdBlock.Code -> CompiledMdBlock.Code(block.language, block.code)
-            }
-        }
-    }
+    val compiledBlocks = remember(text) { getCachedMarkdownBlocks(text) }
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(8.dp),

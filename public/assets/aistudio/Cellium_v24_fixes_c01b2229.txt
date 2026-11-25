@@ -1,0 +1,77 @@
+1. okay so this is weird I tried signing in with Google and it worked, but when I clicked sync, It showed me the three options and the first one was to merge my online data with the local. So, of course, I picked the recommended merging, but after 20 seconds, I still saw the old data in the cloud because I was still seeing two chats in the cloud when I have 22 chats already on my phone. So, maybe it's a visual glitch, maybe the thing actually saved, but I'm not sure 🤔... is sync just broken or...?
+
+(also tell me how much storage I have in total for all users signing in with Google cuz when I saw 100KB storage, I got really curious how much I had)
+
+2. I noticed there is no preview for voices in the settings, I'm forced to come back to live mode and ask it a question to hear the voice I selected... So make it say random voice lines from 30+ voice lines so evey single one is unique 🤭 
+
+3. Hmm, I'm glad Default Assistant works now 😍🤩🎉,But!, The navigation bar thing!, It's behind my navigation buttons at the bottom so it's hard to click the chat box
+3b. I noticed the sound effect for bringing it up is the old 2018 sound effect 🥱, Boring, Can't we change it to be more heavenly and Cel vibes? 🔥✨🤩
+...
+3c. Add a "Go live" button cuz I sometimes want her to keep seeing my screen...
+
+
+4. Annoying fixes; First you know when I held cel, I was hoping it stays on conversation live mode while floating but instead it brought a text bar at the bottom.... hmm... I mean I don't mind it, but I want that "x" on the text bar to mean close the text bar, not close Cel entirely...
+Also when I enable screen record and said "what's on my screen", It made me feel a .mp4 was being sent to it cuz it was taking forever thinking... Just make it only take a screenshot when user finishes talking, and low quality 80% .jpeg 👀 
+
+5. In live mode, doesn't it have it's own microphone?, cuz it got annoying that after 3 seconds of silence it ended the microphone listening... Like can't it wait like 60 seconds like how Google Gemini does it?...
+
+5b. I noticed when she is talking, The emojis get said out loud 😬 
+
+5c. OKAY THIS IS VERY ANNOYING, THE MICROPHONE, I WAS TALKING AND THEN THE MICROPHONE ENDED MIDWAY 😮‍💨😤... like Omg Wait until you hear a full speech or 3.5 seconds of silence after talking 
+
+
+6. I set Cel to be the Phone assistant, but when I enabled "Okay Cel" speech, it didn't respond...
+And I saw my Microphone active on the top right with a green dot, But when Google Gemini was assistant, there was no green microphone permanent dot on the top right 🥺... search the deep web how they do it!, cuz that looks like a battery drainer and not the actual way to do voice assistance with openwake word
+
+7a. Omg in the "+" menu, 😹 we forgot to add "camera", Lmao
+7b. an image I uploaded, make it so I can tap it to see it in the bubble and with an "x" to close it (Also the image Cel has generated, I can't view it in full, and add a "save" .svg button to immediately send it to "Downloads/Cellium" and also a "save as" button too).. 
+7c. also is there a android/data folder for Cellium?, so I can manually explore the files for myself...
+7d. Make sure after the image has been sent to the AI once (whether my image or their generated image) and successfully responded (when it generates an image, and I send a message, then when I send a second message it wouldn't send again you get?), the image is not sent again!, unless Agent mode is on and they can read it themselves with terminal commands or Shizuku ... and yes if Agent mode is enabled, the image is copied to the selected project folder for the agent to see it as many times as it wanted 
+7d. Speaking of Shizuku, is it possible to let them run Normal commands without Shizuku? but Shizuku will still be available, cuz I can remember Termux can run multiple commands without needing Shizuku every second, so why can't our app? 👀... so the AI won't be so addicted with Shizuku running 
+
+8. Weird Voice bug, So it was on Melodii, So I picked animal crossing... so after like 40 words of it talking, it switched back to melodii 🤔, Weird?
+8b. Also rename those two to something else, I don't want people thinking it's the ACTUAL Scratching melodii/Animal Crossing that we used ©®™😨
+
+9. Shizuku was not On And I clicked "Free RAM", but the app never complained, meaning it never cleaned the RAM of my phone too 👀, and it only did the app itself 🥺  (also rename it to "Free Phone's RAM" 
+
+10. In the account section, instead of "0.01% Spark" which doxxes my Firebase Google plan 😹, let it be "0.01% Used"
+
+11. Don't let images sync with their cloud since it would fill up immediately, instead let there be a premium always locked "sync images" and I will add "Cellium+" later which is a subscription for some stuffs we will add in the app 👀 
+
+12. Also allow us to adjust the pitch of the animal crossing/ scratching melodii sounds, cuz I want mine darker...
+
+13. in the setup screen for new users, Recommend the user to use Gemini models as a tiny text at the bottom as it was tested the most with Gemini models 🔥 
+
+14a. When I type text, but not send it, and go to settings, when I come back to chat, the text disappears...
+14b. I found in settings, the "Test Shizuku" button does nothing 💀... no visual errors or success anything ------ wait, I just realized it shows in the chat at the top.... wow 😹, Move it to that settings window instead 
+
+15. When I press the microphone button on the chat bar, It is confusing cuz I don't know THERE IS NO VISUAL GUI .svg INDICATOR when it starts or stops recording, and it should wait for me to hit the stop recording so it can send the .opus/.mp3 or whatever to groq (or whatever the user picks), cuz I hate hate it when microphones stop when I'm not done
+
+16. add a new option for the melodii/animal voice to be either word by word (default) or letter by letter
+
+17. Allow the AI model to generate more than one image, so I can be like two images and it does two "[/Illume]" blocks seperate.... max 5 images... which brings me to my new feature 👇 
+17b. Make it so that when the AI starts typing the image generation "[Illume" in the chat, that's where the images for the specific generation Will appear instead of the top of the bubble, so it looks slick when Cel is explaining things and needs images organized into sections....
+17c. Is it possible to add a very good free api no key needed web search for Cel?, so she can put stock images if explicitly asked for web images... and can search the web for the latest information (Agentic)
+
+18. When I'm chatting with Cel (I never compacted yet), why does it feel like it forgets the beginning of the chat? 🤔... and I asked it what was the top of the chat and it said something just 7 back2back Prompts away... hmmmmmm.... 🤔 
+
+19. Add a Locked chats vault so I can hide chats from public and lock it behind a pin of my own length, and to enter it would have the floating numbers to enter, and it would unlock without pressing enter, and nobody can know the length, but if I click forgot password, it can delete all the chats and change your password if they confirm
+
+20. In the floating window, first there is a glitch where the bottom hell would not disappear at all cuz of a quick tap or something, and even when I drag her face there, she will disappear but the "release to-" hell would remain 🤔, weird glitch .... and I closed the app in the background if that helps 😲 
+20b. I give up, lets make the tapping on her face to show a mini side menu, and one of them is "auto" so we can disable or enable the back to back chat... and below it is "say something", and those other options can be added to the context menu 
+20c. Add Haptic Feedback 
+
+
+21. 
+
+
+
+
+
+
+
+
+
+
+
+

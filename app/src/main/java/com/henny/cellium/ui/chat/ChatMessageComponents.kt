@@ -5,17 +5,23 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -23,13 +29,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.SaveAs
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Terminal
@@ -38,6 +48,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -49,13 +60,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -63,6 +78,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.henny.cellium.data.local.MessageEntity
 import com.henny.cellium.shizuku.CommandSafetyTier
@@ -97,6 +114,7 @@ fun ChatMessageBubble(
     onForkSession: (MessageEntity) -> Unit,
     onSpeak: (String) -> Unit,
     onDelete: (MessageEntity) -> Unit,
+    onImageClick: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val visuals = LocalCelliumVisuals.current
@@ -139,12 +157,15 @@ fun ChatMessageBubble(
     }
 
     val attachedImageFiles = remember(message.attachmentPath) {
-        message.attachmentPath
-            .split("\n")
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .map { File(it) }
-            .filter { it.exists() }
+        if (message.attachmentPath.isBlank()) {
+            emptyList()
+        } else {
+            message.attachmentPath
+                .split("\n")
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .map { File(it) }
+        }
     }
 
     val bubbleBg = when {
@@ -293,14 +314,16 @@ fun ChatMessageBubble(
             }
 
             if (attachedImageFiles.size == 1) {
+                val imgFile = attachedImageFiles.first()
                 AsyncImage(
-                    model = attachedImageFiles.first(),
-                    contentDescription = "Attached image",
+                    model = imgFile,
+                    contentDescription = "Attached image (tap to expand)",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 220.dp)
-                        .clip(RoundedCornerShape(12.dp)),
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onImageClick(imgFile.absolutePath) },
                 )
             } else if (attachedImageFiles.size > 1) {
                 Row(
@@ -317,7 +340,8 @@ fun ChatMessageBubble(
                             modifier = Modifier
                                 .size(155.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .border(1.dp, visuals.subtleBorder, RoundedCornerShape(12.dp)),
+                                .border(1.dp, visuals.subtleBorder, RoundedCornerShape(12.dp))
+                                .clickable { onImageClick(file.absolutePath) },
                         )
                     }
                 }
@@ -334,9 +358,10 @@ fun ChatMessageBubble(
                     color = CelTextPrimary,
                 )
             } else {
-                MarkdownMessageContent(
+                InlineRichMessageContent(
                     text = message.content,
-                    defaultWordWrap = codeWordWrap,
+                    codeWordWrap = codeWordWrap,
+                    onImageClick = onImageClick,
                 )
             }
 
@@ -599,7 +624,7 @@ private fun ToolExecutionCard(message: MessageEntity) {
             ) {
                 Icon(Icons.Rounded.Terminal, contentDescription = null, tint = badgeColor, modifier = Modifier.size(16.dp))
                 Text(
-                    text = "SHIZUKU AGENT · ${message.toolStatus.uppercase()}",
+                    text = "${message.providerName.ifBlank { "AGENT SHELL" }.uppercase()} · ${message.toolStatus.uppercase()}",
                     style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
                     color = badgeColor,
                     maxLines = 1,
@@ -657,7 +682,7 @@ fun AgentCommandGuardDialog(
         onDismissRequest = onDeny,
         containerColor = Color(0xFF140D26),
         icon = { Icon(Icons.Rounded.Security, contentDescription = null, tint = tierColor) },
-        title = { Text("Shizuku Command Guard · ${tier.name}", color = CelTextPrimary) },
+        title = { Text("Agent Command Guard · ${tier.name}", color = CelTextPrimary) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(pending.assessment.reason, style = MaterialTheme.typography.bodySmall, color = CelTextSecondary)
@@ -675,7 +700,7 @@ fun AgentCommandGuardDialog(
                 Button(
                     onClick = { onApprove(editableCmd) },
                     colors = ButtonDefaults.buttonColors(containerColor = tierColor),
-                ) { Text("Run via Shizuku", color = Color.Black, maxLines = 1, softWrap = false) }
+                ) { Text("Run Command", color = Color.Black, maxLines = 1, softWrap = false) }
             }
         },
         dismissButton = {
@@ -684,4 +709,237 @@ fun AgentCommandGuardDialog(
             }
         },
     )
+}
+
+private sealed class InlineContentSegment {
+    data class Markdown(val text: String) : InlineContentSegment()
+    data class Image(val path: String) : InlineContentSegment()
+    data class Loading(val label: String) : InlineContentSegment()
+}
+
+private val INLINE_MARKER_REGEX = Regex("""\[\[CELLIUM_IMG(_LOADING)?:([^\]]+)]]""")
+
+private fun parseInlineSegments(raw: String): List<InlineContentSegment> {
+    if (!raw.contains("[[CELLIUM_IMG")) {
+        return listOf(InlineContentSegment.Markdown(raw))
+    }
+    val segments = mutableListOf<InlineContentSegment>()
+    var cursor = 0
+    for (match in INLINE_MARKER_REGEX.findAll(raw)) {
+        val before = raw.substring(cursor, match.range.first).trim()
+        if (before.isNotEmpty()) {
+            segments.add(InlineContentSegment.Markdown(before))
+        }
+        val isLoading = match.groupValues[1].isNotEmpty()
+        val payload = match.groupValues[2].trim()
+        if (isLoading) {
+            segments.add(InlineContentSegment.Loading(payload))
+        } else if (payload.isNotEmpty()) {
+            segments.add(InlineContentSegment.Image(payload))
+        }
+        cursor = match.range.last + 1
+    }
+    if (cursor < raw.length) {
+        val tail = raw.substring(cursor).trim()
+        if (tail.isNotEmpty()) {
+            segments.add(InlineContentSegment.Markdown(tail))
+        }
+    }
+    return segments
+}
+
+/**
+ * Renders assistant markdown with inline [[CELLIUM_IMG:<path>]] and [[CELLIUM_IMG_LOADING:<label>]]
+ * markers right at the exact position where Cel placed each Illume or Web photo.
+ */
+@Composable
+fun InlineRichMessageContent(
+    text: String,
+    codeWordWrap: Boolean,
+    onImageClick: (String) -> Unit = {},
+) {
+    val visuals = LocalCelliumVisuals.current
+    val segments = remember(text) { parseInlineSegments(text) }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        segments.forEach { seg ->
+            when (seg) {
+                is InlineContentSegment.Markdown -> {
+                    MarkdownMessageContent(text = seg.text, defaultWordWrap = codeWordWrap)
+                }
+                is InlineContentSegment.Loading -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(visuals.primary.copy(alpha = 0.14f))
+                            .border(1.dp, visuals.activeBorder, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = visuals.primary,
+                        )
+                        Icon(Icons.Rounded.Palette, contentDescription = null, tint = CelLavender, modifier = Modifier.size(16.dp))
+                        Text(
+                            text = seg.label.ifBlank { "Generating inline image..." },
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                            color = CelTextPrimary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                is InlineContentSegment.Image -> {
+                    val file = remember(seg.path) { File(seg.path) }
+                    if (file.exists()) {
+                        AsyncImage(
+                            model = file,
+                            contentDescription = "Inline image (tap to expand)",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 260.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .border(1.dp, visuals.activeBorder, RoundedCornerShape(14.dp))
+                                .clickable { onImageClick(file.absolutePath) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Pure OLED black fullscreen image viewer with pinch-to-zoom, pan, double-tap zoom,
+ * instant Save to Downloads/Cellium, Save As document picker, and X close button.
+ */
+@Composable
+fun FullscreenImageViewerDialog(
+    imagePath: String,
+    onDismiss: () -> Unit,
+    onSaveToDownloads: (String) -> Unit,
+    onSaveAs: (String) -> Unit,
+) {
+    val visuals = LocalCelliumVisuals.current
+    val file = remember(imagePath) { File(imagePath) }
+    var scale by remember(imagePath) { mutableFloatStateOf(1f) }
+    var offset by remember(imagePath) { mutableStateOf(Offset.Zero) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = true),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(imagePath) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                if (scale > 1.2f) {
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                } else {
+                                    scale = 2.5f
+                                }
+                            },
+                        )
+                    }
+                    .pointerInput(imagePath) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            val nextScale = (scale * zoom).coerceIn(1f, 5f)
+                            scale = nextScale
+                            offset = if (nextScale <= 1.02f) {
+                                Offset.Zero
+                            } else {
+                                offset + pan
+                            }
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                AsyncImage(
+                    model = file,
+                    contentDescription = "Fullscreen image preview",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offset.x,
+                            translationY = offset.y,
+                        ),
+                )
+            }
+
+            // Floating Top Action Bar: Save (Downloads/Cellium), Save As, Close (X)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .background(Color(0x99000000))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = visuals.primary.copy(alpha = 0.28f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, visuals.activeBorder),
+                        modifier = Modifier
+                            .clickable { onSaveToDownloads(imagePath) }
+                            .testTag("viewer_save_downloads_btn"),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(Icons.Rounded.Download, contentDescription = "Save to Downloads/Cellium", tint = Color.White, modifier = Modifier.size(17.dp))
+                            Text("Save", style = MaterialTheme.typography.labelMedium, color = Color.White, maxLines = 1, softWrap = false)
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = Color(0x33FFFFFF),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x55FFFFFF)),
+                        modifier = Modifier
+                            .clickable { onSaveAs(imagePath) }
+                            .testTag("viewer_save_as_btn"),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(Icons.Rounded.SaveAs, contentDescription = "Save As", tint = Color.White, modifier = Modifier.size(17.dp))
+                            Text("Save As", style = MaterialTheme.typography.labelMedium, color = Color.White, maxLines = 1, softWrap = false)
+                        }
+                    }
+                }
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x55FFFFFF))
+                        .testTag("viewer_close_btn"),
+                ) {
+                    Icon(Icons.Rounded.Close, contentDescription = "Close fullscreen viewer", tint = Color.White)
+                }
+            }
+        }
+    }
 }

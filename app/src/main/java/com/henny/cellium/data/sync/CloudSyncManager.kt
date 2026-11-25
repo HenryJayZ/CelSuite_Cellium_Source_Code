@@ -279,9 +279,8 @@ class CloudSyncManager(
                     val remoteUpdated = remoteDoc?.getLong("updatedAtMs") ?: -1L
                     val remoteKey = remoteDoc?.getString("apiKey").orEmpty()
                     if (shouldUpload && (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD || remoteDoc == null || lp.updatedAtMs > remoteUpdated || (remoteKey.isBlank() && lp.apiKey.isNotBlank()))) {
-                        // Trim cachedModelsJson to fit within 0.01% Spark quota cleanly
-                        val trimmedModels = lp.cachedModelsJson.take(4096)
-                        val estSize = 320L + lp.apiKey.length + trimmedModels.length
+                        // Never upload bulky cachedModelsJson to cloud (models are fetched live), saving ~20+ KB for chats!
+                        val estSize = 240L + lp.apiKey.length
                         if (byteBudgetRemaining < estSize) continue
                         byteBudgetRemaining -= estSize
                         val payload = mapOf(
@@ -292,7 +291,7 @@ class CloudSyncManager(
                             "baseUrl" to lp.baseUrl,
                             "apiKey" to lp.apiKey,
                             "selectedModel" to lp.selectedModel,
-                            "cachedModelsJson" to trimmedModels,
+                            "cachedModelsJson" to "[]",
                             "temperature" to lp.temperature.toDouble(),
                             "topP" to lp.topP.toDouble(),
                             "maxTokens" to lp.maxTokens,
@@ -316,7 +315,11 @@ class CloudSyncManager(
 
             val accountRef = userDoc.collection("account").document("profile_state")
             val remoteAccount = runCatching { accountRef.get().await() }.getOrNull()
-            if (allowDownload && remoteAccount != null && remoteAccount.exists()) {
+            val remoteAccountUpdatedMs = remoteAccount?.getLong("updatedAtMs") ?: 0L
+            val shouldApplyRemotePrefs = mode == CloudSyncMode.KEEP_CLOUD_REPLACE_LOCAL ||
+                currentPrefs.prefsUpdatedAtMs == 0L ||
+                remoteAccountUpdatedMs > currentPrefs.prefsUpdatedAtMs
+            if (allowDownload && remoteAccount != null && remoteAccount.exists() && shouldApplyRemotePrefs) {
                 @Suppress("UNCHECKED_CAST")
                 val remoteHidden = (remoteAccount.get("hiddenProviderIds") as? List<*>)
                     ?.mapNotNull { it as? String }?.toSet()
@@ -354,6 +357,8 @@ class CloudSyncManager(
                     hiddenProviderIds = mergedHidden,
                     moodMethod = remoteAccount.getString("moodMethod"),
                     typingSoundStyle = remoteAccount.getString("typingSoundStyle"),
+                    typingSoundPitch = remoteAccount.getDouble("typingSoundPitch")?.toFloat(),
+                    typingSoundCadence = remoteAccount.getString("typingSoundCadence"),
                     typingSpeed = remoteAccount.getString("typingSpeed"),
                     ttsEngine = remoteAccount.getString("ttsEngine"),
                     ttsVoiceName = remoteAccount.getString("ttsVoiceName"),
@@ -368,10 +373,12 @@ class CloudSyncManager(
                     arenaPersonaB = remoteAccount.getString("arenaPersonaB"),
                     maxAutoRetries = remoteAccount.getLong("maxAutoRetries")?.toInt(),
                     codeWordWrap = remoteAccount.getBoolean("codeWordWrap"),
+                    remoteUpdatedAtMs = remoteAccountUpdatedMs,
                 )
             }
 
             if (allowUpload) {
+                val uploadUpdatedMs = maxOf(System.currentTimeMillis(), currentPrefs.prefsUpdatedAtMs)
                 val accountPayload = mapOf(
                     "userId" to uid,
                     "email" to (user.email ?: ""),
@@ -393,10 +400,12 @@ class CloudSyncManager(
                     "animaleseEnabled" to currentPrefs.animaleseEnabled,
                     "hapticsEnabled" to currentPrefs.hapticsEnabled,
                     "notificationsEnabled" to currentPrefs.notificationsEnabled,
-                    "starredModelsJson" to currentPrefs.starredModelsJson.take(8192),
+                    "starredModelsJson" to currentPrefs.starredModelsJson.take(4096),
                     "hiddenProviderIds" to currentPrefs.hiddenProviderIds.toList(),
                     "moodMethod" to currentPrefs.moodMethod,
                     "typingSoundStyle" to currentPrefs.typingSoundStyle,
+                    "typingSoundPitch" to currentPrefs.typingSoundPitch.toDouble(),
+                    "typingSoundCadence" to currentPrefs.typingSoundCadence,
                     "typingSpeed" to currentPrefs.typingSpeed,
                     "ttsEngine" to currentPrefs.ttsEngine,
                     "ttsVoiceName" to currentPrefs.ttsVoiceName,
@@ -415,14 +424,15 @@ class CloudSyncManager(
                     "totalMessages" to maxOf(allMessages.size.toLong(), remoteAccount?.getLong("totalMessages") ?: 0L),
                     "totalTokens" to maxOf(localTotalTokens, remoteAccount?.getLong("totalTokens") ?: 0L),
                     "totalEstimatedCostUsd" to maxOf(localTotalCost, remoteAccount?.getDouble("totalEstimatedCostUsd") ?: 0.0),
-                    "updatedAtMs" to System.currentTimeMillis(),
+                    "updatedAtMs" to uploadUpdatedMs,
                     "syncedAt" to FieldValue.serverTimestamp(),
                 )
                 accountRef.set(accountPayload, SetOptions.merge()).await()
-                byteBudgetRemaining = (byteBudgetRemaining - 2048L).coerceAtLeast(0L)
+                byteBudgetRemaining = (byteBudgetRemaining - 1536L).coerceAtLeast(0L)
             }
 
-            // 3. Personas
+            // 3. Personas (only upload custom personas so built-in defaults don't waste cloud chat quota!)
+            val builtInPersonaIds = setOf("default", "celysia", "celeste", "coder", "researcher", "writer", "coach", "anime", "roaster")
             var syncedPersonas = 0
             val localPersonas = dao.getAllPersonasOnce().associateBy { it.id }
             val remotePersonasSnap = userDoc.collection("personas").get().await()
@@ -447,9 +457,10 @@ class CloudSyncManager(
             }
             if (allowUpload) {
                 for (lp in localPersonas.values) {
+                    if (lp.id in builtInPersonaIds) continue
                     if (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD || lp.id !in remotePersonaIds) {
-                        val est = 256L + lp.systemPrompt.take(4000).length
-                        if (byteBudgetRemaining < est) break
+                        val est = 220L + lp.systemPrompt.take(2000).length
+                        if (byteBudgetRemaining < est + 65_000L) break
                         byteBudgetRemaining -= est
                         userDoc.collection("personas").document(lp.id).set(
                             mapOf(
@@ -457,7 +468,7 @@ class CloudSyncManager(
                                 "name" to lp.name.take(80),
                                 "iconKey" to lp.iconKey,
                                 "tagline" to lp.tagline.take(200),
-                                "systemPrompt" to lp.systemPrompt.take(4000),
+                                "systemPrompt" to lp.systemPrompt.take(2000),
                                 "accentHex" to lp.accentHex,
                                 "createdAtMs" to lp.createdAtMs,
                             ),
@@ -574,6 +585,7 @@ class CloudSyncManager(
                                 modelName = doc.getString("modelName").orEmpty(),
                                 pinned = doc.getBoolean("pinned") ?: false,
                                 archived = doc.getBoolean("archived") ?: false,
+                                isLocked = local?.isLocked ?: false,
                                 isArena = doc.getBoolean("isArena") ?: false,
                                 arenaProviderA = doc.getString("arenaProviderA") ?: local?.arenaProviderA ?: "preset_pollinations_free",
                                 arenaModelA = doc.getString("arenaModelA") ?: local?.arenaModelA ?: "openai-fast",
@@ -621,69 +633,99 @@ class CloudSyncManager(
             }
 
             if (allowUpload) {
-                for (ls in allSessions.take(20)) {
-                    if (ls.messageCount <= 0) continue
+                // Two-Pass Fair Budget Sync:
+                // Never upload locked vault sessions or images.
+                // Pass 1 uploads ALL non-locked session headers (up to 50) first so every chat appears in Cloud!
+                // Pass 2 distributes remaining byte budget round-robin across all synced sessions (newest messages first)
+                // so 1-2 massive chats NEVER starve the other 20+ chats out of the quota!
+                val candidateSessions = allSessions
+                    .filter { !it.isLocked && it.messageCount > 0 }
+                    .sortedByDescending { it.updatedAtMs }
+                    .take(50)
+
+                val sessionsToSyncMessages = mutableListOf<Pair<SessionEntity, List<MessageEntity>>>()
+
+                for (ls in candidateSessions) {
                     val remoteDoc = remoteSessionsById[ls.id]
                     val remoteUpdated = remoteDoc?.getLong("updatedAtMs") ?: -1L
-                    if (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD || remoteDoc == null || ls.updatedAtMs > remoteUpdated) {
-                        if (byteBudgetRemaining < 512L) break
+                    val needsUpload = mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD ||
+                        remoteDoc == null ||
+                        ls.updatedAtMs > remoteUpdated
+                    if (!needsUpload) continue
+                    if (byteBudgetRemaining < 320L) break
+
+                    val sessRef = userDoc.collection("sessions").document(ls.id)
+                    sessRef.set(
+                        mapOf(
+                            "userId" to uid,
+                            "title" to ls.title.take(140),
+                            "personaId" to ls.personaId,
+                            "providerId" to ls.providerId,
+                            "modelName" to ls.modelName,
+                            "pinned" to ls.pinned,
+                            "archived" to ls.archived,
+                            "isArena" to ls.isArena,
+                            "arenaProviderA" to ls.arenaProviderA,
+                            "arenaModelA" to ls.arenaModelA,
+                            "arenaPersonaA" to ls.arenaPersonaA,
+                            "arenaProviderB" to ls.arenaProviderB,
+                            "arenaModelB" to ls.arenaModelB,
+                            "arenaPersonaB" to ls.arenaPersonaB,
+                            "activeLeafId" to ls.activeLeafId,
+                            "messageCount" to ls.messageCount,
+                            "tokenCount" to ls.tokenCount,
+                            "lastMessagePreview" to ls.lastMessagePreview.take(160),
+                            "createdAtMs" to ls.createdAtMs,
+                            "updatedAtMs" to ls.updatedAtMs,
+                        ),
+                        SetOptions.merge(),
+                    ).await()
+                    byteBudgetRemaining -= 280L
+                    uploaded++
+                    val msgsNewestFirst = dao.getMessagesForSessionOnce(ls.id).takeLast(14).reversed()
+                    if (msgsNewestFirst.isNotEmpty()) {
+                        sessionsToSyncMessages.add(ls to msgsNewestFirst)
+                    }
+                }
+
+                // Pass 2: round-robin messages across all uploaded sessions until byte budget is spent
+                var depth = 0
+                var madeProgress = true
+                while (madeProgress && byteBudgetRemaining >= 260L && depth < 14) {
+                    madeProgress = false
+                    for ((ls, msgs) in sessionsToSyncMessages) {
+                        if (depth >= msgs.size) continue
+                        val m = msgs[depth]
+                        val contentSnippet = m.content.take(1100)
+                        val thoughtSnippet = m.thought.take(240)
+                        val est = 220L + contentSnippet.length + thoughtSnippet.length
+                        if (byteBudgetRemaining < est) continue
+                        byteBudgetRemaining -= est
+                        madeProgress = true
                         val sessRef = userDoc.collection("sessions").document(ls.id)
-                        sessRef.set(
+                        sessRef.collection("messages").document(m.id).set(
                             mapOf(
                                 "userId" to uid,
-                                "title" to ls.title.take(160),
-                                "personaId" to ls.personaId,
-                                "providerId" to ls.providerId,
-                                "modelName" to ls.modelName,
-                                "pinned" to ls.pinned,
-                                "archived" to ls.archived,
-                                "isArena" to ls.isArena,
-                                "arenaProviderA" to ls.arenaProviderA,
-                                "arenaModelA" to ls.arenaModelA,
-                                "arenaPersonaA" to ls.arenaPersonaA,
-                                "arenaProviderB" to ls.arenaProviderB,
-                                "arenaModelB" to ls.arenaModelB,
-                                "arenaPersonaB" to ls.arenaPersonaB,
-                                "activeLeafId" to ls.activeLeafId,
-                                "messageCount" to ls.messageCount,
-                                "tokenCount" to ls.tokenCount,
-                                "lastMessagePreview" to ls.lastMessagePreview.take(200),
-                                "createdAtMs" to ls.createdAtMs,
-                                "updatedAtMs" to ls.updatedAtMs,
+                                "sessionId" to ls.id,
+                                "parentId" to m.parentId,
+                                "role" to m.role,
+                                "speakerLabel" to m.speakerLabel,
+                                "content" to contentSnippet,
+                                "thought" to thoughtSnippet,
+                                "mood" to m.mood,
+                                "providerName" to m.providerName,
+                                "modelName" to m.modelName,
+                                "tokenEstimate" to m.tokenEstimate,
+                                "latencyMs" to m.latencyMs,
+                                "tokensPerSec" to m.tokensPerSec.toDouble(),
+                                "estimatedCostUsd" to m.estimatedCostUsd,
+                                "isCompactSummary" to m.isCompactSummary,
+                                "createdAtMs" to m.createdAtMs,
                             ),
                             SetOptions.merge(),
                         ).await()
-                        byteBudgetRemaining -= 384L
-                        val msgs = dao.getMessagesForSessionOnce(ls.id).takeLast(24)
-                        for (m in msgs) {
-                            val contentSnippet = m.content.take(2500)
-                            val est = 256L + contentSnippet.length
-                            if (byteBudgetRemaining < est) break
-                            byteBudgetRemaining -= est
-                            sessRef.collection("messages").document(m.id).set(
-                                mapOf(
-                                    "userId" to uid,
-                                    "sessionId" to ls.id,
-                                    "parentId" to m.parentId,
-                                    "role" to m.role,
-                                    "speakerLabel" to m.speakerLabel,
-                                    "content" to contentSnippet,
-                                    "thought" to m.thought.take(600),
-                                    "mood" to m.mood,
-                                    "providerName" to m.providerName,
-                                    "modelName" to m.modelName,
-                                    "tokenEstimate" to m.tokenEstimate,
-                                    "latencyMs" to m.latencyMs,
-                                    "tokensPerSec" to m.tokensPerSec.toDouble(),
-                                    "estimatedCostUsd" to m.estimatedCostUsd,
-                                    "isCompactSummary" to m.isCompactSummary,
-                                    "createdAtMs" to m.createdAtMs,
-                                ),
-                                SetOptions.merge(),
-                            ).await()
-                        }
-                        uploaded++
                     }
+                    depth++
                 }
             }
 

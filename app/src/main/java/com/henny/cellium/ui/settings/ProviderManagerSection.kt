@@ -611,7 +611,7 @@ fun OnDeviceModelManagerCard(
             ) {
                 Icon(Icons.Rounded.CleaningServices, contentDescription = null, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(4.dp))
-                Text("Free RAM", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
+                Text("Free Phone's RAM", style = MaterialTheme.typography.labelSmall, maxLines = 1, softWrap = false)
             }
         }
 

@@ -18,12 +18,30 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import kotlinx.coroutines.delay
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.random.Random
+
+private val EXTRA_EDGE_KEYWORDS = arrayOf("annoyed", "smug", "suspicious", "sus", "focused", "sad", "doomer", "shy")
+private val LAUGH_KEYWORDS = arrayOf("laugh", "chibi joy", "pepelaugh")
+private val SOB_KEYWORDS = arrayOf("sob", "crying", "copium", "doomer")
+private val ANGRY_DUST_KEYWORDS = arrayOf("angry", "annoyed", "rage", "baka", "menacing", "tsundere")
+private val SLEEPY_DUST_KEYWORDS = arrayOf("sleepy", "tired", "waking")
+
+private class AvatarSimState {
+    var blinkActive: Boolean = false
+    var blinkHoldUntilMs: Long = 0L
+    var blinkOffset: Float = 0f
+    var dirtCounter: Float = 0f
+    var touchCanonX: Float = -9999f
+    var touchCanonY: Float = -9999f
+    var touchActiveUntilMs: Long = 0L
+    var lastPetCallbackMs: Long = 0L
+}
 
 private val NO_BLINK_EXPRS = setOf(
     "sleepy", "sleepy (local)", "dead", "dizzy", "flustered", "blank",
@@ -80,16 +98,8 @@ fun DotMatrixAvatarCanvas(
     onTapped: (() -> Unit)? = null,
 ) {
     val particles = remember { mutableListOf<DotParticle>() }
-    var frameTick by remember { mutableLongStateOf(0L) }
-    var blinkActive by remember { mutableStateOf(false) }
-    var blinkHoldUntilMs by remember { mutableLongStateOf(0L) }
-    var blinkOffset by remember { mutableFloatStateOf(0f) }
-    var dirtCounter by remember { mutableFloatStateOf(0f) }
-
-    var touchCanonX by remember { mutableFloatStateOf(-9999f) }
-    var touchCanonY by remember { mutableFloatStateOf(-9999f) }
-    var touchActiveUntilMs by remember { mutableLongStateOf(0L) }
-    var lastPetCallbackMs by remember { mutableLongStateOf(0L) }
+    val frameTickState = remember { mutableLongStateOf(0L) }
+    val sim = remember { AvatarSimState() }
 
     // Plain array avoids triggering Compose MutableState writes inside Canvas draw lambda
     val canvasDims = remember { floatArrayOf(600f, 400f) }
@@ -111,9 +121,9 @@ fun DotMatrixAvatarCanvas(
     // Manual blink trigger
     LaunchedEffect(blinkTrigger) {
         if (blinkTrigger > 0) {
-            blinkActive = true
-            blinkHoldUntilMs = System.currentTimeMillis() + 170L
-            dirtCounter = 0f
+            sim.blinkActive = true
+            sim.blinkHoldUntilMs = System.currentTimeMillis() + 170L
+            sim.dirtCounter = 0f
         }
     }
 
@@ -150,71 +160,75 @@ fun DotMatrixAvatarCanvas(
         }
     }
 
-    // Continuous 60fps / 30fps physics simulation loop (paused automatically in background)
+    // Smooth physics simulation loop (zero per-frame heap allocations, zero Choreographer 120Hz spin)
     LaunchedEffect(expression, highFps, isResumed) {
         if (!isResumed) return@LaunchedEffect
+        val expr = expression ?: return@LaunchedEffect
+        val bl = expr.baseName.lowercase()
+        val canBlink = expr.blinkEnabled && bl !in NO_BLINK_EXPRS
+        val isTired = "tired" in bl
+        val extraEdge = when {
+            isTired -> 45f
+            EXTRA_EDGE_KEYWORDS.any { it in bl } -> 30f
+            else -> 0f
+        }
+        val intense = INTENSE_SHAKE_EXPRS.any { it in bl }
+        val isLaugh = LAUGH_KEYWORDS.any { it in bl }
+        val isSob = SOB_KEYWORDS.any { it in bl }
+        val dizzySpin = "dizzy" in bl || "hypnotized" in bl
+        val angryDust = ANGRY_DUST_KEYWORDS.any { it in bl }
+        val sleepyDust = SLEEPY_DUST_KEYWORDS.any { it in bl }
+        val blinkLerp = if (isTired) 0.07f else 0.35f
+        val jitterAmp = if (intense) 2.8f else 0.55f
+        val pts = expr.points
+
         var lastFrameMs = 0L
         var passiveAccumMs = 0f
-        val minStepMs = if (highFps) 20L else 36L
+        val minStepMs = if (highFps) 24L else 42L
         val rng = Random(System.nanoTime())
 
         while (true) {
+            delay(minStepMs)
             withFrameMillis { nowMs ->
-                if (nowMs - lastFrameMs < minStepMs) return@withFrameMillis
-                val dtMs = (if (lastFrameMs == 0L) 16f else (nowMs - lastFrameMs).toFloat()).coerceIn(1f, 80f)
+                val dtMs = (if (lastFrameMs == 0L) minStepMs.toFloat() else (nowMs - lastFrameMs).toFloat()).coerceIn(1f, 80f)
                 lastFrameMs = nowMs
-
-                val expr = expression ?: return@withFrameMillis
-                val bl = expr.baseName.lowercase()
                 val tSec = nowMs * 0.001f
-                val canBlink = expr.blinkEnabled && bl !in NO_BLINK_EXPRS
+                val wallNow = System.currentTimeMillis()
 
                 // Part 2: "Dirt in the eye" passive blink accumulator
                 if (canBlink) {
                     passiveAccumMs += dtMs
                     if (passiveAccumMs >= 1000f) {
                         passiveAccumMs -= 1000f
-                        dirtCounter += rng.nextFloat() * 2f + 1.2f
+                        sim.dirtCounter += rng.nextFloat() * 2f + 1.2f
                     }
-                    if (!blinkActive && dirtCounter >= 14f) {
-                        blinkActive = true
-                        blinkHoldUntilMs = System.currentTimeMillis() + 150L
-                        dirtCounter = 0f
+                    if (!sim.blinkActive && sim.dirtCounter >= 14f) {
+                        sim.blinkActive = true
+                        sim.blinkHoldUntilMs = wallNow + 150L
+                        sim.dirtCounter = 0f
                     }
                 }
-                if (blinkActive && System.currentTimeMillis() >= blinkHoldUntilMs) {
-                    blinkActive = false
-                    dirtCounter = 0f
+                if (sim.blinkActive && wallNow >= sim.blinkHoldUntilMs) {
+                    sim.blinkActive = false
+                    sim.dirtCounter = 0f
                 }
 
                 // Part 3: Smooth blink offset & eyelid fade-mask edge
-                val targetBlink = if (blinkActive) 160f else 0f
-                val blinkLerp = if ("tired" in bl) 0.07f else 0.35f
-                blinkOffset += (targetBlink - blinkOffset) * blinkLerp
-                if (blinkOffset < 0.3f && targetBlink == 0f) blinkOffset = 0f
-
-                val extraEdge = when {
-                    "tired" in bl -> 45f
-                    listOf("annoyed", "smug", "suspicious", "sus", "focused", "sad", "doomer", "shy").any { it in bl } -> 30f
-                    else -> 0f
-                }
-                val eyelidEdge = 150f + extraEdge + blinkOffset
+                val targetBlink = if (sim.blinkActive) 160f else 0f
+                sim.blinkOffset += (targetBlink - sim.blinkOffset) * blinkLerp
+                if (sim.blinkOffset < 0.3f && targetBlink == 0f) sim.blinkOffset = 0f
+                val eyelidEdge = 150f + extraEdge + sim.blinkOffset
 
                 // Part 1: Breathing float, laugh/sob bouts & micro-jitter
                 val breathY = sin(nowMs * 0.003f) * 8f
-                val intense = INTENSE_SHAKE_EXPRS.any { it in bl }
-                val jitterAmp = if (intense) 2.8f else 0.55f
                 val boutDy = when {
-                    listOf("laugh", "chibi joy", "pepelaugh").any { it in bl } ->
-                        -sampleBout(LAUGH_BOUT, tSec, 1.35f) * 6.5f
-                    listOf("sob", "crying", "copium", "doomer").any { it in bl } ->
-                        sampleBout(SOB_BOUT, tSec, 1.70f) * 5.0f
+                    isLaugh -> -sampleBout(LAUGH_BOUT, tSec, 1.35f) * 6.5f
+                    isSob -> sampleBout(SOB_BOUT, tSec, 1.70f) * 5.0f
                     else -> 0f
                 }
-                val dizzySpin = "dizzy" in bl || "hypnotized" in bl
-                val touchActive = System.currentTimeMillis() <= touchActiveUntilMs
-                val pts = expr.points
+                val touchActive = wallNow <= sim.touchActiveUntilMs
                 val mouth = mouthOpenness.coerceIn(0f, 1f)
+                val morphLerp = (1f - (1f - 0.085f).pow(dtMs / 16.67f)).coerceIn(0.03f, 0.14f)
 
                 for (i in particles.indices) {
                     val p = particles[i]
@@ -223,12 +237,11 @@ fun DotMatrixAvatarCanvas(
                         p.ty = pts[i].y
                     }
                     val sideBlinks = if (p.left) expr.blinkLeft else expr.blinkRight
-                    val effBlink = if (sideBlinks) blinkOffset else 0f
+                    val effBlink = if (sideBlinks) sim.blinkOffset else 0f
 
                     var tx = p.tx
                     var ty = p.ty + breathY + boutDy
 
-                    // Live Mode audio-reactive mouth openness
                     if (mouth > 0.01f) {
                         when {
                             p.kind == AvatarKind.STEM && !p.left -> ty += mouth * 13f
@@ -239,7 +252,6 @@ fun DotMatrixAvatarCanvas(
 
                     val restingTy = ty
 
-                    // Dizzy / Hypnotized 360-degree spin
                     if (dizzySpin && (p.kind == AvatarKind.EYELID || p.kind == AvatarKind.STEM)) {
                         val eyeCx = if (p.left) 200f else 400f
                         val eyeCy = 215f + breathY
@@ -252,7 +264,6 @@ fun DotMatrixAvatarCanvas(
                         ty = eyeCy + dx0 * sa + dy0 * ca
                     }
 
-                    // Prop animations (tears, sweat, rising anger steam / Zzz dust)
                     val seed = p.idx * 0.37f
                     when (p.kind) {
                         AvatarKind.TEAR -> {
@@ -263,11 +274,11 @@ fun DotMatrixAvatarCanvas(
                             ty += min(1f, ph * 1.45f).pow(1.6f) * 22f
                         }
                         AvatarKind.DUST -> {
-                            if (listOf("angry", "annoyed", "rage", "baka", "menacing", "tsundere").any { it in bl }) {
+                            if (angryDust) {
                                 val puff = (tSec * 38f + (if (p.left) 0f else 14f) + seed * 3f) % 32f
                                 ty -= puff
                                 tx += (if (p.left) -1f else 1f) * (puff * 0.45f)
-                            } else if (listOf("sleepy", "tired", "waking").any { it in bl }) {
+                            } else if (sleepyDust) {
                                 val zf = (tSec * 22f) % 26f
                                 tx += zf * 0.55f
                                 ty -= zf
@@ -276,7 +287,6 @@ fun DotMatrixAvatarCanvas(
                         else -> Unit
                     }
 
-                    // Eyelid descent + top-to-bottom fade-mask
                     when (p.kind) {
                         AvatarKind.EYELID -> {
                             ty = min(300f, ty + effBlink)
@@ -303,7 +313,6 @@ fun DotMatrixAvatarCanvas(
                             p.alpha = 255f
                         }
                         AvatarKind.BLUSH, AvatarKind.PERM_BLUSH -> {
-                            // Subtle cheek-lift / squint response synchronized with her blink
                             ty -= effBlink * 0.075f
                             tx += (if (p.left) 1f else -1f) * (effBlink * 0.025f)
                             p.alpha = 255f
@@ -311,23 +320,20 @@ fun DotMatrixAvatarCanvas(
                         else -> p.alpha = 255f
                     }
 
-                    // Touch cursor repulsion (60px canonical radius)
                     if (touchActive) {
-                        val dist = hypot(touchCanonX - p.cx, touchCanonY - p.cy)
+                        val dist = hypot(sim.touchCanonX - p.cx, sim.touchCanonY - p.cy)
                         if (dist < 62f) {
-                            p.cx -= (touchCanonX - p.cx) * 0.36f
-                            ty -= (touchCanonY - ty) * 0.36f
+                            p.cx -= (sim.touchCanonX - p.cx) * 0.36f
+                            ty -= (sim.touchCanonY - ty) * 0.36f
                         }
                     }
 
-                    // Smooth frame-rate-normalized morphing with velocity cap so pixels glide gracefully
-                    val morphLerp = (1f - (1f - 0.085f).pow(dtMs / 16.67f)).coerceIn(0.03f, 0.14f)
                     val stepX = ((tx - p.cx) * morphLerp).coerceIn(-16f, 16f)
                     val stepY = ((ty - p.cy) * morphLerp).coerceIn(-16f, 16f)
                     p.cx += stepX + sin(tSec * 7.3f + seed) * jitterAmp
                     p.cy += stepY + cos(tSec * 5.9f + seed * 1.31f) * jitterAmp
                 }
-                frameTick = nowMs
+                frameTickState.longValue = nowMs
             }
         }
     }
@@ -336,9 +342,9 @@ fun DotMatrixAvatarCanvas(
         modifier = modifier
             .pointerInput(scale) {
                 detectTapGestures {
-                    blinkActive = true
-                    blinkHoldUntilMs = System.currentTimeMillis() + 170L
-                    dirtCounter = 0f
+                    sim.blinkActive = true
+                    sim.blinkHoldUntilMs = System.currentTimeMillis() + 170L
+                    sim.dirtCounter = 0f
                     onTapped?.invoke()
                 }
             }
@@ -351,12 +357,12 @@ fun DotMatrixAvatarCanvas(
                         if (s > 0.001f) {
                             val ox = (cw - 600f * s) * 0.5f
                             val oy = (ch - 400f * s) * 0.5f
-                            touchCanonX = (change.position.x - ox) / s
-                            touchCanonY = (change.position.y - oy) / s
-                            touchActiveUntilMs = System.currentTimeMillis() + 180L
+                            sim.touchCanonX = (change.position.x - ox) / s
+                            sim.touchCanonY = (change.position.y - oy) / s
+                            sim.touchActiveUntilMs = System.currentTimeMillis() + 180L
                             val now = System.currentTimeMillis()
-                            if (now - lastPetCallbackMs > 420L) {
-                                lastPetCallbackMs = now
+                            if (now - sim.lastPetCallbackMs > 420L) {
+                                sim.lastPetCallbackMs = now
                                 onPetted?.invoke()
                             }
                         }
@@ -364,8 +370,8 @@ fun DotMatrixAvatarCanvas(
                 )
             },
     ) {
-        // Read frameTick so Canvas invalidates cleanly each physics frame
-        val unusedTick = frameTick
+        // Read frameTick ONLY in draw phase so DotMatrixAvatarCanvas never recomposes per frame
+        val unusedTick = frameTickState.longValue
         if (unusedTick < 0L) return@Canvas
 
         canvasDims[0] = size.width

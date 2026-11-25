@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -41,7 +42,7 @@ data class ContextModifyConfig(
     val includeIllumeInstructions: Boolean = true,
     val includeAgentInstructions: Boolean = true,
     val includeMoodInstructions: Boolean = true,
-    val historyLimit: Int = 12,
+    val historyLimit: Int = 120,
     val ggufContextLength: Int = 1024,
     val ggufMaxTokens: Int = 512,
     val ggufTemperature: Float = 0.7f,
@@ -100,7 +101,9 @@ data class CelliumPreferences(
     // Voice, TTS, STT, Typing Speed, SFX, Haptics & Wake Word
     val soundsEnabled: Boolean = true,
     val animaleseEnabled: Boolean = true,
-    val typingSoundStyle: String = "animal_crossing", // "animal_crossing" or "scratchin_melodii"
+    val typingSoundStyle: String = "animal_crossing", // "animal_crossing" (Cozy Chatter) or "scratchin_melodii" (Groove Synth)
+    val typingSoundPitch: Float = 1.0f, // 0.55f..1.45f
+    val typingSoundCadence: String = "word", // "word" or "letter"
     val typingSpeed: String = "medium", // "super_slow", "slow", "medium", "fast", "very_fast", "instant"
     val hapticsEnabled: Boolean = true,
     val sfxVolume: Float = 0.80f,
@@ -115,7 +118,11 @@ data class CelliumPreferences(
     val liveHandsFreeLoop: Boolean = true,
     val wakeWordEnabled: Boolean = false,
     val wakeWordCustomPath: String = "",
-    val wakeWordSensitivity: Float = 0.55f,
+    val wakeWordSensitivity: Float = 0.38f,
+
+    // Locked Chats Vault & Sync Timestamp
+    val vaultPinHash: String = "",
+    val prefsUpdatedAtMs: Long = 0L,
 
     // Arena Mode Remembered Slots (synced with Cloud)
     val arenaProviderA: String = "preset_pollinations_free",
@@ -195,6 +202,8 @@ class PreferencesStore(context: Context) {
         val SOUNDS_ENABLED = booleanPreferencesKey("sounds_enabled")
         val ANIMALESE_ENABLED = booleanPreferencesKey("animalese_enabled")
         val TYPING_SOUND_STYLE = stringPreferencesKey("typing_sound_style")
+        val TYPING_SOUND_PITCH = floatPreferencesKey("typing_sound_pitch")
+        val TYPING_SOUND_CADENCE = stringPreferencesKey("typing_sound_cadence")
         val TYPING_SPEED = stringPreferencesKey("typing_speed")
         val HAPTICS_ENABLED = booleanPreferencesKey("haptics_enabled")
         val SFX_VOLUME = floatPreferencesKey("sfx_volume")
@@ -210,6 +219,8 @@ class PreferencesStore(context: Context) {
         val WAKE_WORD_ENABLED = booleanPreferencesKey("wake_word_enabled")
         val WAKE_WORD_CUSTOM_PATH = stringPreferencesKey("wake_word_custom_path")
         val WAKE_WORD_SENSITIVITY = floatPreferencesKey("wake_word_sensitivity")
+        val VAULT_PIN_HASH = stringPreferencesKey("vault_pin_hash")
+        val PREFS_UPDATED_AT_MS = longPreferencesKey("prefs_updated_at_ms")
         val FLOATING_TIPS_SHOWN = booleanPreferencesKey("floating_tips_shown")
         val ARENA_PROVIDER_A = stringPreferencesKey("arena_provider_a")
         val ARENA_MODEL_A = stringPreferencesKey("arena_model_a")
@@ -238,6 +249,7 @@ class PreferencesStore(context: Context) {
         val CTX_AGENT = booleanPreferencesKey("ctx_agent")
         val CTX_MOOD = booleanPreferencesKey("ctx_mood")
         val CTX_HISTORY_LIMIT = intPreferencesKey("ctx_history_limit")
+        val CTX_HISTORY_V25_SET = booleanPreferencesKey("ctx_history_v25_set")
         val GGUF_CTX_LEN = intPreferencesKey("gguf_ctx_len")
         val GGUF_MAX_TOKENS = intPreferencesKey("gguf_max_tokens")
         val GGUF_TEMP = floatPreferencesKey("gguf_temp")
@@ -301,6 +313,8 @@ class PreferencesStore(context: Context) {
             soundsEnabled = p[Keys.SOUNDS_ENABLED] ?: true,
             animaleseEnabled = p[Keys.ANIMALESE_ENABLED] ?: true,
             typingSoundStyle = p[Keys.TYPING_SOUND_STYLE] ?: "animal_crossing",
+            typingSoundPitch = (p[Keys.TYPING_SOUND_PITCH] ?: 1.0f).coerceIn(0.55f, 1.45f),
+            typingSoundCadence = p[Keys.TYPING_SOUND_CADENCE] ?: "word",
             typingSpeed = p[Keys.TYPING_SPEED] ?: "medium",
             hapticsEnabled = p[Keys.HAPTICS_ENABLED] ?: true,
             sfxVolume = p[Keys.SFX_VOLUME] ?: 0.80f,
@@ -315,7 +329,9 @@ class PreferencesStore(context: Context) {
             liveHandsFreeLoop = p[Keys.LIVE_HANDS_FREE] ?: true,
             wakeWordEnabled = p[Keys.WAKE_WORD_ENABLED] ?: false,
             wakeWordCustomPath = p[Keys.WAKE_WORD_CUSTOM_PATH] ?: "",
-            wakeWordSensitivity = p[Keys.WAKE_WORD_SENSITIVITY] ?: 0.55f,
+            wakeWordSensitivity = (p[Keys.WAKE_WORD_SENSITIVITY] ?: 0.38f).coerceIn(0.15f, 0.90f),
+            vaultPinHash = p[Keys.VAULT_PIN_HASH] ?: "",
+            prefsUpdatedAtMs = p[Keys.PREFS_UPDATED_AT_MS] ?: 0L,
             arenaProviderA = p[Keys.ARENA_PROVIDER_A] ?: "preset_pollinations_free",
             arenaModelA = p[Keys.ARENA_MODEL_A] ?: "openai-fast",
             arenaPersonaA = p[Keys.ARENA_PERSONA_A] ?: "default",
@@ -341,7 +357,13 @@ class PreferencesStore(context: Context) {
                 includeIllumeInstructions = p[Keys.CTX_ILLUME] ?: true,
                 includeAgentInstructions = p[Keys.CTX_AGENT] ?: true,
                 includeMoodInstructions = p[Keys.CTX_MOOD] ?: true,
-                historyLimit = (p[Keys.CTX_HISTORY_LIMIT] ?: 12).coerceIn(2, 64),
+                historyLimit = run {
+                    val saved = p[Keys.CTX_HISTORY_LIMIT]
+                    val v25Set = p[Keys.CTX_HISTORY_V25_SET] ?: false
+                    // Auto-upgrade legacy v24 untouched default (12 msgs = 6 turns) to 120 msgs so Cel remembers full chats!
+                    val effective = if (!v25Set && (saved == null || saved == 12)) 120 else (saved ?: 120)
+                    effective.coerceIn(2, 200)
+                },
                 ggufContextLength = (p[Keys.GGUF_CTX_LEN] ?: 1024).coerceIn(256, 32768),
                 ggufMaxTokens = (p[Keys.GGUF_MAX_TOKENS] ?: 512).coerceIn(64, 16384),
                 ggufTemperature = (p[Keys.GGUF_TEMP] ?: 0.7f).coerceIn(0f, 2f),
@@ -395,9 +417,17 @@ class PreferencesStore(context: Context) {
     }
     suspend fun updateThemePreset(id: String) {
         bootCache.edit().putString("theme_preset", id).apply()
-        dataStore.edit { it[Keys.THEME_PRESET] = id }
+        dataStore.edit {
+            it[Keys.THEME_PRESET] = id
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
     }
-    suspend fun updateCustomPrimaryHex(hex: String) { dataStore.edit { it[Keys.CUSTOM_PRIMARY_HEX] = hex } }
+    suspend fun updateCustomPrimaryHex(hex: String) {
+        dataStore.edit {
+            it[Keys.CUSTOM_PRIMARY_HEX] = hex
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
     suspend fun updateCustomWallpaperUri(uri: String) { dataStore.edit { it[Keys.CUSTOM_WALLPAPER_URI] = uri } }
     suspend fun updateGlassVisuals(dim: Float, opacity: Float, glow: Float, density: Int, fontScale: Float) {
         dataStore.edit {
@@ -411,11 +441,36 @@ class PreferencesStore(context: Context) {
     suspend fun updateParticlesEnabled(enabled: Boolean) { dataStore.edit { it[Keys.PARTICLES_ENABLED] = enabled } }
     suspend fun updateHighFpsMode(enabled: Boolean) { dataStore.edit { it[Keys.HIGH_FPS] = enabled } }
     suspend fun updateFloatingMiniCel(enabled: Boolean) { dataStore.edit { it[Keys.FLOATING_MINI_CEL] = enabled } }
-    suspend fun updateCodeWordWrap(enabled: Boolean) { dataStore.edit { it[Keys.CODE_WORD_WRAP] = enabled } }
-    suspend fun updateMoodMethod(method: String) { dataStore.edit { it[Keys.MOOD_METHOD] = method } }
-    suspend fun updateMaxAutoRetries(count: Int) { dataStore.edit { it[Keys.MAX_AUTO_RETRIES] = count.coerceIn(0, 15) } }
-    suspend fun updateHiddenProviderIds(ids: Set<String>) { dataStore.edit { it[Keys.HIDDEN_PROVIDER_IDS] = ids } }
-    suspend fun updateStarredModelsJson(rawJson: String) { dataStore.edit { it[Keys.STARRED_MODELS_JSON] = rawJson } }
+    suspend fun updateCodeWordWrap(enabled: Boolean) {
+        dataStore.edit {
+            it[Keys.CODE_WORD_WRAP] = enabled
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
+    suspend fun updateMoodMethod(method: String) {
+        dataStore.edit {
+            it[Keys.MOOD_METHOD] = method
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
+    suspend fun updateMaxAutoRetries(count: Int) {
+        dataStore.edit {
+            it[Keys.MAX_AUTO_RETRIES] = count.coerceIn(0, 15)
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
+    suspend fun updateHiddenProviderIds(ids: Set<String>) {
+        dataStore.edit {
+            it[Keys.HIDDEN_PROVIDER_IDS] = ids
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
+    suspend fun updateStarredModelsJson(rawJson: String) {
+        dataStore.edit {
+            it[Keys.STARRED_MODELS_JSON] = rawJson
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
     suspend fun updateRegisteredLocalModelsJson(rawJson: String) { dataStore.edit { it[Keys.REGISTERED_LOCAL_MODELS] = rawJson } }
     suspend fun updateAgentWorkspace(path: String, prompted: Boolean = true) {
         dataStore.edit {
@@ -430,7 +485,8 @@ class PreferencesStore(context: Context) {
             it[Keys.CTX_ILLUME] = cfg.includeIllumeInstructions
             it[Keys.CTX_AGENT] = cfg.includeAgentInstructions
             it[Keys.CTX_MOOD] = cfg.includeMoodInstructions
-            it[Keys.CTX_HISTORY_LIMIT] = cfg.historyLimit.coerceIn(2, 64)
+            it[Keys.CTX_HISTORY_LIMIT] = cfg.historyLimit.coerceIn(2, 200)
+            it[Keys.CTX_HISTORY_V25_SET] = true
             it[Keys.GGUF_CTX_LEN] = cfg.ggufContextLength.coerceIn(256, 32768)
             it[Keys.GGUF_MAX_TOKENS] = cfg.ggufMaxTokens.coerceIn(64, 16384)
             it[Keys.GGUF_TEMP] = cfg.ggufTemperature.coerceIn(0f, 2f)
@@ -452,14 +508,26 @@ class PreferencesStore(context: Context) {
     }
     suspend fun updateAgentMode(enabled: Boolean) { dataStore.edit { it[Keys.AGENT_MODE] = enabled } }
     suspend fun updateWebSearchAuto(enabled: Boolean) { dataStore.edit { it[Keys.WEB_SEARCH_AUTO] = enabled } }
-    suspend fun updateNotificationsEnabled(enabled: Boolean) { dataStore.edit { it[Keys.NOTIFICATIONS_ENABLED] = enabled } }
-    suspend fun updateTypingSpeed(speed: String) { dataStore.edit { it[Keys.TYPING_SPEED] = speed } }
+    suspend fun updateNotificationsEnabled(enabled: Boolean) {
+        dataStore.edit {
+            it[Keys.NOTIFICATIONS_ENABLED] = enabled
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
+    suspend fun updateTypingSpeed(speed: String) {
+        dataStore.edit {
+            it[Keys.TYPING_SPEED] = speed
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
     suspend fun updateAudioSettings(
         sounds: Boolean,
         animalese: Boolean,
         haptics: Boolean,
         volume: Float,
         typingStyle: String? = null,
+        typingPitch: Float? = null,
+        typingCadence: String? = null,
     ) {
         dataStore.edit {
             it[Keys.SOUNDS_ENABLED] = sounds
@@ -467,13 +535,19 @@ class PreferencesStore(context: Context) {
             it[Keys.HAPTICS_ENABLED] = haptics
             it[Keys.SFX_VOLUME] = volume.coerceIn(0f, 1f)
             if (typingStyle != null) it[Keys.TYPING_SOUND_STYLE] = typingStyle
+            if (typingPitch != null) it[Keys.TYPING_SOUND_PITCH] = typingPitch.coerceIn(0.55f, 1.45f)
+            if (typingCadence != null) it[Keys.TYPING_SOUND_CADENCE] = typingCadence
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
         }
+    }
+    suspend fun updateVaultPinHash(hash: String) {
+        dataStore.edit { it[Keys.VAULT_PIN_HASH] = hash }
     }
     suspend fun updateWakeWordSettings(enabled: Boolean, customPath: String? = null, sensitivity: Float? = null) {
         dataStore.edit {
             it[Keys.WAKE_WORD_ENABLED] = enabled
             if (customPath != null) it[Keys.WAKE_WORD_CUSTOM_PATH] = customPath
-            if (sensitivity != null) it[Keys.WAKE_WORD_SENSITIVITY] = sensitivity.coerceIn(0.20f, 0.95f)
+            if (sensitivity != null) it[Keys.WAKE_WORD_SENSITIVITY] = sensitivity.coerceIn(0.15f, 0.90f)
         }
     }
     suspend fun updateVoiceSettings(
@@ -491,6 +565,7 @@ class PreferencesStore(context: Context) {
             it[Keys.TTS_RATE] = rate.coerceIn(0.65f, 1.65f)
             it[Keys.AUTO_READ] = autoRead
             it[Keys.LIVE_HANDS_FREE] = handsFree
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
         }
     }
     suspend fun updateSttSettings(engine: String, apiKey: String? = null, model: String? = null) {
@@ -498,6 +573,7 @@ class PreferencesStore(context: Context) {
             it[Keys.STT_ENGINE] = engine
             if (apiKey != null) it[Keys.STT_API_KEY] = apiKey.trim()
             if (model != null) it[Keys.STT_MODEL] = model.trim()
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
         }
     }
     suspend fun updateArenaDefaults(
@@ -567,6 +643,8 @@ class PreferencesStore(context: Context) {
         hiddenProviderIds: Set<String>? = null,
         moodMethod: String? = null,
         typingSoundStyle: String? = null,
+        typingSoundPitch: Float? = null,
+        typingSoundCadence: String? = null,
         typingSpeed: String? = null,
         ttsEngine: String? = null,
         ttsVoiceName: String? = null,
@@ -581,6 +659,7 @@ class PreferencesStore(context: Context) {
         arenaPersonaB: String? = null,
         maxAutoRetries: Int? = null,
         codeWordWrap: Boolean? = null,
+        remoteUpdatedAtMs: Long? = null,
     ) {
         if (!activeProviderId.isNullOrBlank()) {
             bootCache.edit().putString("active_provider_id", activeProviderId).apply()
@@ -610,6 +689,8 @@ class PreferencesStore(context: Context) {
             if (hiddenProviderIds != null) p[Keys.HIDDEN_PROVIDER_IDS] = hiddenProviderIds
             if (!moodMethod.isNullOrBlank()) p[Keys.MOOD_METHOD] = moodMethod
             if (!typingSoundStyle.isNullOrBlank()) p[Keys.TYPING_SOUND_STYLE] = typingSoundStyle
+            if (typingSoundPitch != null) p[Keys.TYPING_SOUND_PITCH] = typingSoundPitch.coerceIn(0.55f, 1.45f)
+            if (!typingSoundCadence.isNullOrBlank()) p[Keys.TYPING_SOUND_CADENCE] = typingSoundCadence
             if (!typingSpeed.isNullOrBlank()) p[Keys.TYPING_SPEED] = typingSpeed
             if (!ttsEngine.isNullOrBlank()) p[Keys.TTS_ENGINE] = ttsEngine
             if (!ttsVoiceName.isNullOrBlank()) p[Keys.TTS_VOICE] = ttsVoiceName
@@ -624,6 +705,7 @@ class PreferencesStore(context: Context) {
             if (!arenaPersonaB.isNullOrBlank()) p[Keys.ARENA_PERSONA_B] = arenaPersonaB
             if (maxAutoRetries != null) p[Keys.MAX_AUTO_RETRIES] = maxAutoRetries.coerceIn(0, 15)
             if (codeWordWrap != null) p[Keys.CODE_WORD_WRAP] = codeWordWrap
+            if (remoteUpdatedAtMs != null && remoteUpdatedAtMs > 0L) p[Keys.PREFS_UPDATED_AT_MS] = remoteUpdatedAtMs
         }
     }
 }

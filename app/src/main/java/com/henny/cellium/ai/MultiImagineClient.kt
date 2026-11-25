@@ -69,7 +69,7 @@ class MultiImagineClient(private val context: Context) {
         .build()
 
     fun galleryDir(): File {
-        val dir = File(appContext.filesDir, "gallery")
+        val dir = appContext.getExternalFilesDir("artworks") ?: File(appContext.filesDir, "gallery")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }

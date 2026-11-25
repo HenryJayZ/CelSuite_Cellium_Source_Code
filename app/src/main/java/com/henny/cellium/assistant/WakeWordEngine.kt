@@ -106,6 +106,8 @@ class WakeWordEngine(
         // 2. Run melspectrogram stage -> 5 frames of 32 mel bins
         mel.run(melInput, melOutput)
         val newFrames = melOutput[0][0]
+        var maxScore = 0f
+
         for (f in 0 until 5) {
             // Shift melRing left by 1
             val recycled = melRing[0]
@@ -117,44 +119,47 @@ class WakeWordEngine(
             }
             melFramesAccumulated = (melFramesAccumulated + 1).coerceAtMost(76)
             melFramesSinceLastEmb++
-        }
 
-        if (melFramesAccumulated < 76 || melFramesSinceLastEmb < 8) {
-            return 0f
-        }
-        melFramesSinceLastEmb = 0
+            // Frame-exact 8-frame sliding stride matching openWakeWord reference implementation!
+            if (melFramesAccumulated >= 76 && melFramesSinceLastEmb >= 8) {
+                melFramesSinceLastEmb -= 8
 
-        // 3. Run speech embedding stage -> 96-dim feature vector
-        val embIn = embInput[0]
-        for (t in 0 until 76) {
-            val row = melRing[t]
-            val dst = embIn[t]
-            for (b in 0 until 32) {
-                dst[b][0] = row[b]
+                // 3. Run speech embedding stage -> 96-dim feature vector
+                val embIn = embInput[0]
+                for (t in 0 until 76) {
+                    val row = melRing[t]
+                    val dst = embIn[t]
+                    for (b in 0 until 32) {
+                        dst[b][0] = row[b]
+                    }
+                }
+                emb.run(embInput, embOutput)
+                val vec = embOutput[0][0][0]
+
+                // Shift embRing left by 1
+                val recycledEmb = embRing[0]
+                System.arraycopy(embRing, 1, embRing, 0, wakeInputFrames - 1)
+                embRing[wakeInputFrames - 1] = recycledEmb
+                val copyLen = minOf(vec.size, recycledEmb.size)
+                System.arraycopy(vec, 0, recycledEmb, 0, copyLen)
+                embFramesFilled = (embFramesFilled + 1).coerceAtMost(wakeInputFrames)
+
+                if (embFramesFilled >= wakeInputFrames) {
+                    // 4. Run wake word classifier
+                    val wIn = wakeInput[0]
+                    for (t in 0 until wakeInputFrames) {
+                        System.arraycopy(embRing[t], 0, wIn[t], 0, embRing[t].size)
+                    }
+                    wakeOutput[0][0] = 0f
+                    wake.run(wakeInput, wakeOutput)
+                    val score = wakeOutput[0][0]
+                    if (score.isFinite() && score > maxScore) {
+                        maxScore = score.coerceIn(0f, 1f)
+                    }
+                }
             }
         }
-        emb.run(embInput, embOutput)
-        val vec = embOutput[0][0][0]
-
-        // Shift embRing left by 1
-        val recycledEmb = embRing[0]
-        System.arraycopy(embRing, 1, embRing, 0, wakeInputFrames - 1)
-        embRing[wakeInputFrames - 1] = recycledEmb
-        val copyLen = minOf(vec.size, recycledEmb.size)
-        System.arraycopy(vec, 0, recycledEmb, 0, copyLen)
-        embFramesFilled = (embFramesFilled + 1).coerceAtMost(wakeInputFrames)
-
-        if (embFramesFilled < wakeInputFrames) return 0f
-
-        // 4. Run wake word classifier
-        val wIn = wakeInput[0]
-        for (t in 0 until wakeInputFrames) {
-            System.arraycopy(embRing[t], 0, wIn[t], 0, embRing[t].size)
-        }
-        wakeOutput[0][0] = 0f
-        wake.run(wakeInput, wakeOutput)
-        val score = wakeOutput[0][0]
-        return if (score.isFinite()) score.coerceIn(0f, 1f) else 0f
+        return maxScore
     }
 
     fun close() {

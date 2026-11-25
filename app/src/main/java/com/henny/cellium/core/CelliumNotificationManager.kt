@@ -184,10 +184,14 @@ object CelliumNotificationManager {
             .setAutoCancel(true)
             .build()
 
-        runCatching {
+        try {
             val nm = NotificationManagerCompat.from(context)
             nm.notify(notifId, childNotif)
             nm.notify(SUMMARY_NOTIFICATION_ID, summaryNotif)
+        } catch (_: SecurityException) {
+            // Permission revoked concurrently
+        } catch (_: Exception) {
+            // Ignore notification errors
         }
     }
 

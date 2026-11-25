@@ -8,7 +8,6 @@ import android.media.MediaRecorder
 import android.util.Base64
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -27,6 +26,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.math.sqrt
 
@@ -41,13 +41,10 @@ data class SttEngineOption(
 /**
  * Multi-Engine Speech-to-Text (STT) recorder & transcriber for Cel.Cellium:
  *  - "device": Android built-in SpeechRecognizer (handled natively in caller)
- *  - "groq_whisper": Groq Cloud Whisper-large-v3-turbo (BYOK, free tier, ultra-fast & super accurate!)
- *  - "pollinations_audio": Pollinations Free Keyless Audio Transcription (no API key needed!)
- *  - "openai_whisper": OpenAI Whisper / gpt-4o-mini-transcribe (BYOK)
- *  - "huggingface_whisper": HuggingFace Inference Whisper-large-v3-turbo (BYOK, free tier)
- *
- * Uses crisp 16kHz 16-bit mono PCM WAV recording with real-time RMS level callbacks and
- * smart Voice Activity Detection (auto-stops cleanly ~1.35s after you finish speaking, or on manual stop!).
+ *  - "groq_whisper": Groq Cloud Whisper (BYOK, free tier, live API key model discovery + self-healing fallback)
+ *  - "pollinations_audio": Pollinations Free Keyless Audio Transcription
+ *  - "openai_whisper": OpenAI Whisper / gpt-4o-mini-transcribe (BYOK, live model discovery)
+ *  - "huggingface_whisper": HuggingFace Inference Whisper (BYOK, free tier)
  */
 class CelliumSttEngine(context: Context) {
     @Suppress("unused")
@@ -60,6 +57,14 @@ class CelliumSttEngine(context: Context) {
         .build()
 
     @Volatile private var manualStopRequested = false
+    @Volatile private var cancelRequested = false
+
+    private data class CachedModelList(
+        val fetchedAtMs: Long,
+        val models: List<String>,
+    )
+
+    private val discoveredModelsCache = ConcurrentHashMap<String, CachedModelList>()
 
     companion object {
         const val ENGINE_DEVICE = "device"
@@ -67,6 +72,8 @@ class CelliumSttEngine(context: Context) {
         const val ENGINE_POLLINATIONS = "pollinations_audio"
         const val ENGINE_OPENAI = "openai_whisper"
         const val ENGINE_HUGGINGFACE = "huggingface_whisper"
+
+        private const val MODEL_CACHE_TTL_MS = 10 * 60 * 1000L
 
         val ALL_ENGINES: List<SttEngineOption> = listOf(
             SttEngineOption(
@@ -79,7 +86,7 @@ class CelliumSttEngine(context: Context) {
             SttEngineOption(
                 id = ENGINE_GROQ,
                 label = "Groq Whisper (BYOK)",
-                subtitle = "Ultra-accurate & blazing fast · Free Groq tier · Auto-uses Groq provider key",
+                subtitle = "Ultra-accurate & blazing fast · Auto-detects live Whisper models from your Groq key",
                 defaultModel = "whisper-large-v3-turbo",
                 requiresKey = true,
             ),
@@ -93,22 +100,192 @@ class CelliumSttEngine(context: Context) {
             SttEngineOption(
                 id = ENGINE_OPENAI,
                 label = "OpenAI Whisper (BYOK)",
-                subtitle = "Studio accuracy · Auto-uses OpenAI provider key",
+                subtitle = "Studio accuracy · Auto-detects live transcription models from your OpenAI key",
                 defaultModel = "whisper-1",
                 requiresKey = true,
             ),
             SttEngineOption(
                 id = ENGINE_HUGGINGFACE,
                 label = "HuggingFace Whisper (BYOK)",
-                subtitle = "Free HF Inference tier · Auto-uses HuggingFace key",
+                subtitle = "Free HF Inference tier · Auto-uses HuggingFace token",
                 defaultModel = "openai/whisper-large-v3-turbo",
                 requiresKey = true,
             ),
+        )
+
+        val KNOWN_MODELS_BY_ENGINE: Map<String, List<String>> = mapOf(
+            ENGINE_GROQ to listOf(
+                "whisper-large-v3-turbo",
+                "whisper-large-v3",
+                "distil-whisper-large-v3-en",
+            ),
+            ENGINE_OPENAI to listOf(
+                "gpt-4o-mini-transcribe",
+                "gpt-4o-transcribe",
+                "whisper-1",
+            ),
+            ENGINE_HUGGINGFACE to listOf(
+                "openai/whisper-large-v3-turbo",
+                "openai/whisper-large-v3",
+                "distil-whisper/distil-large-v3",
+                "openai/whisper-medium",
+            ),
+            ENGINE_POLLINATIONS to listOf("openai-audio"),
         )
     }
 
     fun requestStopRecording() {
         manualStopRequested = true
+    }
+
+    fun cancelRecording() {
+        cancelRequested = true
+        manualStopRequested = true
+    }
+
+    /**
+     * Pings the selected STT provider's live `/models` endpoint with the user's API key
+     * and returns the available speech-to-text / Whisper model IDs sorted by speed & quality.
+     */
+    suspend fun fetchAvailableSttModels(
+        engineId: String,
+        apiKey: String,
+        forceRefresh: Boolean = true,
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
+        fetchAvailableSttModelsSync(engineId, apiKey.trim(), forceRefresh)
+    }
+
+    private fun fetchAvailableSttModelsSync(
+        engineId: String,
+        apiKey: String,
+        forceRefresh: Boolean,
+    ): Result<List<String>> = runCatching {
+        if (apiKey.isBlank()) {
+            throw IllegalStateException("No API key found for $engineId.")
+        }
+        val cacheKey = "$engineId:${apiKey.hashCode()}"
+        if (!forceRefresh) {
+            val cached = discoveredModelsCache[cacheKey]
+            if (cached != null && (System.currentTimeMillis() - cached.fetchedAtMs) < MODEL_CACHE_TTL_MS) {
+                return@runCatching cached.models
+            }
+        }
+
+        val models = when (engineId) {
+            ENGINE_GROQ -> fetchOpenAiCompatibleAudioModels(
+                url = "https://api.groq.com/openai/v1/models",
+                apiKey = apiKey,
+                preferredOrder = listOf(
+                    "whisper-large-v3-turbo",
+                    "whisper-large-v3",
+                    "distil-whisper-large-v3-en",
+                ),
+            )
+            ENGINE_OPENAI -> fetchOpenAiCompatibleAudioModels(
+                url = "https://api.openai.com/v1/models",
+                apiKey = apiKey,
+                preferredOrder = listOf(
+                    "gpt-4o-mini-transcribe",
+                    "gpt-4o-transcribe",
+                    "whisper-1",
+                ),
+            )
+            ENGINE_HUGGINGFACE -> {
+                val req = Request.Builder()
+                    .url("https://huggingface.co/api/whoami-v2")
+                    .header("Authorization", "Bearer $apiKey")
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        throw IllegalStateException("HuggingFace key check failed (HTTP ${resp.code}).")
+                    }
+                }
+                KNOWN_MODELS_BY_ENGINE[ENGINE_HUGGINGFACE].orEmpty()
+            }
+            else -> KNOWN_MODELS_BY_ENGINE[engineId].orEmpty()
+        }
+
+        discoveredModelsCache[cacheKey] = CachedModelList(System.currentTimeMillis(), models)
+        models
+    }
+
+    private fun fetchOpenAiCompatibleAudioModels(
+        url: String,
+        apiKey: String,
+        preferredOrder: List<String>,
+    ): List<String> {
+        val req = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $apiKey")
+            .get()
+            .build()
+        httpClient.newCall(req).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw IllegalStateException("Key check HTTP ${resp.code}: ${raw.take(160)}")
+            }
+            val root = json.parseToJsonElement(raw).jsonObject
+            val data = root["data"]?.jsonArray.orEmpty()
+            val allIds = data.mapNotNull { el ->
+                el.jsonObject["id"]?.jsonPrimitive?.content?.trim()?.takeIf { it.isNotBlank() }
+            }
+            val audioIds = allIds.filter { id ->
+                val low = id.lowercase()
+                val looksStt = low.contains("whisper") ||
+                    low.contains("transcrib") ||
+                    low.contains("stt") ||
+                    low.contains("asr")
+                val looksTtsOnly = low.contains("tts") || low.contains("orpheus") || low.contains("playai")
+                looksStt && !looksTtsOnly
+            }.distinct()
+
+            return audioIds.sortedWith(
+                compareBy<String> { id ->
+                    val idx = preferredOrder.indexOfFirst { it.equals(id, ignoreCase = true) }
+                    if (idx >= 0) idx else 100
+                }.thenBy { it }
+            )
+        }
+    }
+
+    private fun sanitizeModelForEngine(engineId: String, rawModel: String): String {
+        val trimmed = rawModel.trim()
+        if (trimmed.isBlank()) return ""
+        return when (engineId) {
+            ENGINE_GROQ -> {
+                if (trimmed.equals("system", true) ||
+                    trimmed.equals("openai-audio", true) ||
+                    trimmed.contains("/")
+                ) "" else trimmed
+            }
+            ENGINE_OPENAI -> {
+                if (trimmed.equals("system", true) ||
+                    trimmed.equals("openai-audio", true) ||
+                    trimmed.contains("/")
+                ) "" else trimmed
+            }
+            ENGINE_HUGGINGFACE -> {
+                if (trimmed.equals("system", true) ||
+                    trimmed.equals("openai-audio", true)
+                ) "" else trimmed
+            }
+            else -> trimmed
+        }
+    }
+
+    private fun isModelNotFoundError(msg: String): Boolean {
+        val low = msg.lowercase()
+        return low.contains("model") && (
+            low.contains("does not exist") ||
+                low.contains("not_found") ||
+                low.contains("not found") ||
+                low.contains("decommissioned") ||
+                low.contains("not supported") ||
+                low.contains("invalid") ||
+                low.contains("http 404") ||
+                low.contains("http 400")
+            )
     }
 
     /**
@@ -120,13 +297,18 @@ class CelliumSttEngine(context: Context) {
         engineId: String,
         apiKey: String,
         modelOverride: String = "",
-        maxDurationMs: Long = 22_000L,
-        silenceAutoStopMs: Long = 1_350L,
+        maxDurationMs: Long = 180_000L,
+        preSpeechTimeoutMs: Long = 60_000L,
+        silenceAutoStopMs: Long = 3_500L,
+        manualStopOnly: Boolean = false,
         onReadyForSpeech: () -> Unit = {},
         onRmsLevel: (Float) -> Unit = {},
+        onElapsedSeconds: (Int) -> Unit = {},
         onTranscribing: () -> Unit = {},
+        onModelAutoSelected: (String) -> Unit = {},
     ): Result<String> = withContext(Dispatchers.IO) {
         manualStopRequested = false
+        cancelRequested = false
         val sampleRate = 16000
         val minBuf = AudioRecord.getMinBufferSize(
             sampleRate,
@@ -156,12 +338,19 @@ class CelliumSttEngine(context: Context) {
         var speechDetected = false
         var lastSpeechMs = System.currentTimeMillis()
         val startMs = System.currentTimeMillis()
+        var lastReportedSec = -1
+
+        var ambientRms = 180f
+        var calibratedFrames = 0
 
         try {
             recorder.startRecording()
-            withContext(Dispatchers.Main) { onReadyForSpeech() }
+            withContext(Dispatchers.Main) {
+                onReadyForSpeech()
+                onElapsedSeconds(0)
+            }
 
-            while (currentCoroutineContext().isActive && !manualStopRequested) {
+            while (currentCoroutineContext().isActive && !manualStopRequested && !cancelRequested) {
                 val read = recorder.read(buf, 0, buf.size)
                 if (read > 0) {
                     var sumSq = 0.0
@@ -175,21 +364,47 @@ class CelliumSttEngine(context: Context) {
                     pcmOut.write(bytes)
 
                     val rms = sqrt(sumSq / read).toFloat()
-                    val normLevel = ((rms - 180f) / 3600f).coerceIn(0.05f, 0.95f)
+                    val now = System.currentTimeMillis()
+                    val elapsedSec = ((now - startMs) / 1000L).toInt()
+                    if (elapsedSec != lastReportedSec) {
+                        lastReportedSec = elapsedSec
+                        withContext(Dispatchers.Main) { onElapsedSeconds(elapsedSec) }
+                    }
+
+                    val normLevel = ((rms - (ambientRms * 0.7f)) / 3200f).coerceIn(0.05f, 0.98f)
                     withContext(Dispatchers.Main) { onRmsLevel(normLevel) }
 
-                    val now = System.currentTimeMillis()
-                    if (rms > 580f) {
-                        speechDetected = true
-                        lastSpeechMs = now
+                    if (!manualStopOnly) {
+                        if (calibratedFrames < 7) {
+                            ambientRms = if (calibratedFrames == 0) rms.coerceIn(60f, 650f)
+                            else (ambientRms * 0.72f + rms.coerceIn(60f, 650f) * 0.28f)
+                            calibratedFrames++
+                        } else if (!speechDetected && rms < ambientRms * 1.45f) {
+                            ambientRms = (ambientRms * 0.96f + rms.coerceIn(60f, 650f) * 0.04f)
+                        }
+
+                        val onsetThreshold = maxOf(310f, ambientRms * 2.10f)
+                        val holdThreshold = maxOf(195f, ambientRms * 1.42f)
+
+                        if (!speechDetected) {
+                            if (rms >= onsetThreshold) {
+                                speechDetected = true
+                                lastSpeechMs = now
+                            } else if (now - startMs >= preSpeechTimeoutMs) {
+                                break
+                            }
+                        } else {
+                            if (rms >= holdThreshold) {
+                                lastSpeechMs = now
+                            }
+                            if (now - lastSpeechMs >= silenceAutoStopMs) {
+                                break
+                            }
+                        }
                     }
-                    if (speechDetected && now - lastSpeechMs >= silenceAutoStopMs) {
-                        break
-                    }
-                    if (!speechDetected && now - startMs >= 7_500L) {
-                        break
-                    }
-                    if (now - startMs >= maxDurationMs) {
+
+                    val effectiveMaxMs = if (manualStopOnly) maxOf(maxDurationMs, 300_000L) else maxDurationMs
+                    if (now - startMs >= effectiveMaxMs) {
                         break
                     }
                 }
@@ -201,14 +416,18 @@ class CelliumSttEngine(context: Context) {
             runCatching { recorder.release() }
         }
 
+        if (cancelRequested) {
+            return@withContext Result.success("")
+        }
+
         val pcmBytes = pcmOut.toByteArray()
-        if (pcmBytes.size < 4000 || (!speechDetected && !manualStopRequested)) {
+        if (pcmBytes.size < 4000 || (!manualStopOnly && !speechDetected && !manualStopRequested)) {
             return@withContext Result.success("")
         }
 
         withContext(Dispatchers.Main) { onTranscribing() }
         val wavBytes = wrapPcmAsWav(pcmBytes, sampleRate)
-        transcribeWav(engineId, apiKey.trim(), modelOverride.trim(), wavBytes)
+        transcribeWav(engineId, apiKey.trim(), modelOverride.trim(), wavBytes, onModelAutoSelected)
     }
 
     private fun transcribeWav(
@@ -216,37 +435,43 @@ class CelliumSttEngine(context: Context) {
         apiKey: String,
         modelOverride: String,
         wavBytes: ByteArray,
+        onModelAutoSelected: (String) -> Unit,
     ): Result<String> = runCatching {
         when (engineId) {
             ENGINE_GROQ -> {
                 if (apiKey.isBlank()) {
                     throw IllegalStateException("Groq Whisper needs a Groq API key. Add it in Providers (Groq) or Voice Settings.")
                 }
-                val model = modelOverride.ifBlank { "whisper-large-v3-turbo" }
-                transcribeOpenAiCompatible(
-                    url = "https://api.groq.com/openai/v1/audio/transcriptions",
+                transcribeWithDiscoveryRetry(
+                    engineId = ENGINE_GROQ,
+                    endpointUrl = "https://api.groq.com/openai/v1/audio/transcriptions",
                     apiKey = apiKey,
-                    model = model,
+                    rawModelOverride = modelOverride,
+                    fallbackDefault = "whisper-large-v3-turbo",
                     wavBytes = wavBytes,
+                    onModelAutoSelected = onModelAutoSelected,
                 )
             }
             ENGINE_OPENAI -> {
                 if (apiKey.isBlank()) {
                     throw IllegalStateException("OpenAI Whisper needs an OpenAI API key. Add it in Providers (OpenAI) or Voice Settings.")
                 }
-                val model = modelOverride.ifBlank { "whisper-1" }
-                transcribeOpenAiCompatible(
-                    url = "https://api.openai.com/v1/audio/transcriptions",
+                transcribeWithDiscoveryRetry(
+                    engineId = ENGINE_OPENAI,
+                    endpointUrl = "https://api.openai.com/v1/audio/transcriptions",
                     apiKey = apiKey,
-                    model = model,
+                    rawModelOverride = modelOverride,
+                    fallbackDefault = "whisper-1",
                     wavBytes = wavBytes,
+                    onModelAutoSelected = onModelAutoSelected,
                 )
             }
             ENGINE_HUGGINGFACE -> {
                 if (apiKey.isBlank()) {
                     throw IllegalStateException("HuggingFace Whisper needs a HuggingFace token. Add it in Providers or Voice Settings.")
                 }
-                val model = modelOverride.ifBlank { "openai/whisper-large-v3-turbo" }
+                val model = sanitizeModelForEngine(ENGINE_HUGGINGFACE, modelOverride)
+                    .ifBlank { "openai/whisper-large-v3-turbo" }
                 val req = Request.Builder()
                     .url("https://router.huggingface.co/hf-inference/models/$model")
                     .header("Authorization", "Bearer $apiKey")
@@ -303,6 +528,44 @@ class CelliumSttEngine(context: Context) {
                 }
             }
             else -> ""
+        }
+    }
+
+    private fun transcribeWithDiscoveryRetry(
+        engineId: String,
+        endpointUrl: String,
+        apiKey: String,
+        rawModelOverride: String,
+        fallbackDefault: String,
+        wavBytes: ByteArray,
+        onModelAutoSelected: (String) -> Unit,
+    ): String {
+        val sanitized = sanitizeModelForEngine(engineId, rawModelOverride)
+        var chosenModel = sanitized
+        if (chosenModel.isBlank()) {
+            val discovered = fetchAvailableSttModelsSync(engineId, apiKey, forceRefresh = false).getOrNull().orEmpty()
+            chosenModel = discovered.firstOrNull() ?: fallbackDefault
+            if (discovered.isNotEmpty()) {
+                onModelAutoSelected(chosenModel)
+            }
+        }
+
+        return try {
+            transcribeOpenAiCompatible(endpointUrl, apiKey, chosenModel, wavBytes)
+        } catch (firstErr: Exception) {
+            val msg = firstErr.message.orEmpty()
+            if (!isModelNotFoundError(msg)) throw firstErr
+
+            // Self-heal: ping the API key live to find an enabled speech model and retry once
+            val freshModels = fetchAvailableSttModelsSync(engineId, apiKey, forceRefresh = true).getOrNull().orEmpty()
+            val candidate = freshModels.firstOrNull { !it.equals(chosenModel, ignoreCase = true) }
+                ?: KNOWN_MODELS_BY_ENGINE[engineId].orEmpty().firstOrNull { !it.equals(chosenModel, ignoreCase = true) }
+                ?: throw firstErr
+
+            DevLogBuffer.add("INFO", "STT", "Model '$chosenModel' unavailable on key; auto-switching to '$candidate'")
+            val result = transcribeOpenAiCompatible(endpointUrl, apiKey, candidate, wavBytes)
+            onModelAutoSelected(candidate)
+            result
         }
     }
 

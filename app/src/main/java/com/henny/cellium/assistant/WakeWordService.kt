@@ -120,7 +120,7 @@ class WakeWordService : Service() {
         listenJob?.cancel()
         listenJob = serviceScope.launch {
             val prefs = PreferencesStore(applicationContext).preferencesFlow.first()
-            val sensitivity = prefs.wakeWordSensitivity.coerceIn(0.20f, 0.95f)
+            val sensitivity = prefs.wakeWordSensitivity.coerceIn(0.15f, 0.90f)
             val wakeEngine = WakeWordEngine(applicationContext, prefs.wakeWordCustomPath)
             engine = wakeEngine
             if (!wakeEngine.initialize()) {
@@ -135,30 +135,56 @@ class WakeWordService : Service() {
                 AudioFormat.ENCODING_PCM_16BIT,
             ).coerceAtLeast(CHUNK_SAMPLES * 4)
 
-            val recorder = runCatching {
-                AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    minBuf,
-                )
-            }.getOrNull()
+            fun openRecorder(source: Int): AudioRecord? {
+                if (ContextCompat.checkSelfPermission(
+                        this@WakeWordService,
+                        Manifest.permission.RECORD_AUDIO,
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    return null
+                }
+                return try {
+                    val r = AudioRecord(
+                        source,
+                        SAMPLE_RATE,
+                        AudioFormat.CHANNEL_IN_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        minBuf,
+                    )
+                    if (r.state == AudioRecord.STATE_INITIALIZED) r else {
+                        r.release()
+                        null
+                    }
+                } catch (_: SecurityException) {
+                    null
+                } catch (_: Throwable) {
+                    null
+                }
+            }
 
-            if (recorder == null || recorder.state != AudioRecord.STATE_INITIALIZED) {
-                DevLogBuffer.add("ERROR", "WakeWord", "AudioRecord failed to initialize.")
-                recorder?.release()
+            val recorder = openRecorder(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                ?: openRecorder(MediaRecorder.AudioSource.MIC)
+
+            if (recorder == null) {
+                DevLogBuffer.add("ERROR", "WakeWord", "AudioRecord failed to initialize on both VOICE_RECOGNITION and MIC.")
                 stopSelf()
                 return@launch
             }
 
             val pcm = ShortArray(CHUNK_SAMPLES)
+            // Keep 6-chunk (480ms) pre-roll ring buffer so waking from silence NEVER clips "Okay..."!
+            val preRollSize = 6
+            val preRoll = Array(preRollSize) { ShortArray(CHUNK_SAMPLES) }
+            var preRollIdx = 0
+            var preRollCount = 0
+            var sleeping = false
             var lastTriggerMs = 0L
             var silentChunks = 0
+            var lastPeakLogMs = 0L
 
             try {
                 recorder.startRecording()
-                DevLogBuffer.add("INFO", "WakeWord", "Listening for 'Okay Cel' (threshold=$sensitivity)")
+                DevLogBuffer.add("INFO", "WakeWord", "Listening for 'Okay Cel' (threshold=${"%.2f".format(sensitivity)})")
                 while (isActive) {
                     if (pausedForSession) {
                         delay(250L)
@@ -175,25 +201,42 @@ class WakeWordService : Service() {
                         continue
                     }
 
-                    // Energy pre-gate: compute RMS to skip inference during dead silence
+                    // Energy check with generous pre-roll preservation
                     var sumSq = 0.0
                     for (i in 0 until CHUNK_SAMPLES) {
                         val v = pcm[i].toDouble()
                         sumSq += v * v
                     }
                     val rms = sqrt(sumSq / CHUNK_SAMPLES.toDouble())
-                    if (rms < 140.0) {
+                    if (rms < 75.0) {
                         silentChunks++
-                        if (silentChunks > 18) {
-                            // Skip inference after ~1.4s of silence
+                        if (silentChunks > 30) {
+                            // Store into pre-roll ring while sleeping to save CPU
+                            System.arraycopy(pcm, 0, preRoll[preRollIdx], 0, CHUNK_SAMPLES)
+                            preRollIdx = (preRollIdx + 1) % preRollSize
+                            preRollCount = (preRollCount + 1).coerceAtMost(preRollSize)
+                            sleeping = true
                             continue
                         }
                     } else {
                         silentChunks = 0
+                        if (sleeping && preRollCount > 0) {
+                            // Flush the 480ms pre-roll right before the speech onset!
+                            val startIdx = (preRollIdx - preRollCount + preRollSize) % preRollSize
+                            for (k in 0 until preRollCount) {
+                                wakeEngine.processChunk(preRoll[(startIdx + k) % preRollSize])
+                            }
+                            preRollCount = 0
+                            sleeping = false
+                        }
                     }
 
                     val score = wakeEngine.processChunk(pcm)
                     val now = System.currentTimeMillis()
+                    if (score >= 0.14f && now - lastPeakLogMs > 1800L) {
+                        lastPeakLogMs = now
+                        DevLogBuffer.add("INFO", "WakeWord", "Peak score=${"%.2f".format(score)} (threshold=${"%.2f".format(sensitivity)}, rms=${rms.toInt()})")
+                    }
                     if (score >= sensitivity && now - lastTriggerMs > 2500L) {
                         lastTriggerMs = now
                         wakeEngine.resetState()

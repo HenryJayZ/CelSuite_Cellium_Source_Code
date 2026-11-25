@@ -59,6 +59,31 @@ private val ORB_POSES = mapOf(
 
 private val PLAYFUL_MOODS = listOf("calm", "happy", "curious", "wink", "surprised", "flustered")
 
+private class OrbSimState(initial: OrbPose) {
+    var clock: Float = 0f
+    var bounce: Float = 0f
+    var ring: Float = 1f
+    var annoy: Float = 0f
+    var mood: String = "happy"
+    var blinkT: Float = -1f
+    var flashT: Float = -1f
+    var gazeX: Float = 0f
+    var gazeY: Float = 0f
+
+    var browL: Float = initial.browL
+    var browR: Float = initial.browR
+    var angL: Float = initial.angL
+    var angR: Float = initial.angR
+    var eyeRy: Float = initial.eyeRy
+    var pupil: Float = initial.pupil
+    var eyeL: Float = initial.eyeL
+    var eyeR: Float = initial.eyeR
+    var smile: Float = initial.smile
+    var open: Float = initial.open
+    var blush: Float = initial.blush
+    var tilt: Float = initial.tilt
+}
+
 /**
  * Faithful Compose Canvas port of Cellium's AnimatedFaceOrb (widgets/welcome.py):
  * glossy neon-violet companion sphere, pulsing forehead diamond gem, gem-cut eyes with catchlights,
@@ -70,19 +95,8 @@ fun WelcomeFaceOrb(
     blushEnabled: Boolean = true,
     onTapFeedback: ((mood: String, angry: Boolean) -> Unit)? = null,
 ) {
-    var clock by remember { mutableFloatStateOf(0f) }
-    var bounce by remember { mutableFloatStateOf(0f) }
-    var ring by remember { mutableFloatStateOf(1f) }
-    var annoy by remember { mutableFloatStateOf(0f) }
-    var mood by remember { mutableStateOf("happy") }
-    var blinkT by remember { mutableFloatStateOf(-1f) }
-    var flashT by remember { mutableFloatStateOf(-1f) }
-    var gazeX by remember { mutableFloatStateOf(0f) }
-    var gazeY by remember { mutableFloatStateOf(0f) }
-    var frameTick by remember { mutableLongStateOf(0L) }
-
-    // Smoothly interpolated live pose
-    var livePose by remember { mutableStateOf(ORB_POSES["happy"]!!) }
+    val sim = remember { OrbSimState(ORB_POSES["happy"]!!) }
+    val frameTickState = remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(Unit) {
         var lastMs = 0L
@@ -95,32 +109,33 @@ fun WelcomeFaceOrb(
         val rng = Random(System.nanoTime())
 
         while (true) {
+            kotlinx.coroutines.delay(24L)
             withFrameMillis { nowMs ->
-                val dt = if (lastMs == 0L) 0.016f else ((nowMs - lastMs) / 1000f).coerceIn(0.001f, 0.06f)
+                val dt = if (lastMs == 0L) 0.024f else ((nowMs - lastMs) / 1000f).coerceIn(0.001f, 0.08f)
                 lastMs = nowMs
-                clock += dt
-                bounce = (bounce - dt * 2.6f).coerceAtLeast(0f)
-                ring = (ring + dt * 1.9f).coerceAtMost(1f)
-                annoy = (annoy - dt * 0.22f).coerceAtLeast(0f)
+                sim.clock += dt
+                sim.bounce = (sim.bounce - dt * 2.6f).coerceAtLeast(0f)
+                sim.ring = (sim.ring + dt * 1.9f).coerceAtMost(1f)
+                sim.annoy = (sim.annoy - dt * 0.22f).coerceAtLeast(0f)
 
-                if (blinkT < 0f) {
+                if (sim.blinkT < 0f) {
                     blinkWait -= dt
-                    if (blinkWait <= 0f) blinkT = 0f
+                    if (blinkWait <= 0f) sim.blinkT = 0f
                 } else {
-                    blinkT += dt
-                    if (blinkT >= 0.25f) {
-                        blinkT = -1f
+                    sim.blinkT += dt
+                    if (sim.blinkT >= 0.25f) {
+                        sim.blinkT = -1f
                         blinkWait = if (rng.nextFloat() < 0.22f) 0.18f else 2.2f + rng.nextFloat() * 3.0f
                     }
                 }
 
-                if (flashT < 0f) {
+                if (sim.flashT < 0f) {
                     flashWait -= dt
-                    if (flashWait <= 0f) flashT = 0f
+                    if (flashWait <= 0f) sim.flashT = 0f
                 } else {
-                    flashT += dt
-                    if (flashT >= 0.38f) {
-                        flashT = -1f
+                    sim.flashT += dt
+                    if (sim.flashT >= 0.38f) {
+                        sim.flashT = -1f
                         flashWait = 3.0f + rng.nextFloat() * 4.5f
                     }
                 }
@@ -131,33 +146,30 @@ fun WelcomeFaceOrb(
                     targetGazeY = (rng.nextFloat() * 2f - 1f) * 2.0f
                     wanderWait = 1.5f + rng.nextFloat() * 2.2f
                 }
-                gazeX += (targetGazeX - gazeX) * (dt * 7f).coerceAtMost(1f)
-                gazeY += (targetGazeY - gazeY) * (dt * 7f).coerceAtMost(1f)
+                sim.gazeX += (targetGazeX - sim.gazeX) * (dt * 7f).coerceAtMost(1f)
+                sim.gazeY += (targetGazeY - sim.gazeY) * (dt * 7f).coerceAtMost(1f)
 
                 moodLeft -= dt
                 if (moodLeft <= 0f) {
-                    mood = if (annoy > 0.55f) "angry" else PLAYFUL_MOODS.filter { it != mood }.random(rng)
-                    moodLeft = if (annoy > 0.55f) 2.0f else 6.0f + rng.nextFloat() * 4.5f
+                    sim.mood = if (sim.annoy > 0.55f) "angry" else PLAYFUL_MOODS.filter { it != sim.mood }.random(rng)
+                    moodLeft = if (sim.annoy > 0.55f) 2.0f else 6.0f + rng.nextFloat() * 4.5f
                 }
 
-                val target = ORB_POSES[mood] ?: ORB_POSES["happy"]!!
+                val target = ORB_POSES[sim.mood] ?: ORB_POSES["happy"]!!
                 val r = (dt * 8.5f).coerceAtMost(1f)
-                fun lp(a: Float, b: Float) = a + (b - a) * r
-                livePose = OrbPose(
-                    browL = lp(livePose.browL, target.browL),
-                    browR = lp(livePose.browR, target.browR),
-                    angL = lp(livePose.angL, target.angL),
-                    angR = lp(livePose.angR, target.angR),
-                    eyeRy = lp(livePose.eyeRy, target.eyeRy),
-                    pupil = lp(livePose.pupil, target.pupil),
-                    eyeL = lp(livePose.eyeL, target.eyeL),
-                    eyeR = lp(livePose.eyeR, target.eyeR),
-                    smile = lp(livePose.smile, target.smile),
-                    open = lp(livePose.open, target.open),
-                    blush = lp(livePose.blush, target.blush),
-                    tilt = lp(livePose.tilt, target.tilt),
-                )
-                frameTick = nowMs
+                sim.browL += (target.browL - sim.browL) * r
+                sim.browR += (target.browR - sim.browR) * r
+                sim.angL += (target.angL - sim.angL) * r
+                sim.angR += (target.angR - sim.angR) * r
+                sim.eyeRy += (target.eyeRy - sim.eyeRy) * r
+                sim.pupil += (target.pupil - sim.pupil) * r
+                sim.eyeL += (target.eyeL - sim.eyeL) * r
+                sim.eyeR += (target.eyeR - sim.eyeR) * r
+                sim.smile += (target.smile - sim.smile) * r
+                sim.open += (target.open - sim.open) * r
+                sim.blush += (target.blush - sim.blush) * r
+                sim.tilt += (target.tilt - sim.tilt) * r
+                frameTickState.longValue = nowMs
             }
         }
     }
@@ -165,20 +177,28 @@ fun WelcomeFaceOrb(
     Canvas(
         modifier = modifier.pointerInput(Unit) {
             detectTapGestures {
-                bounce = 1f
-                ring = 0f
-                annoy = (annoy + 0.34f).coerceAtMost(2.2f)
-                val isAngry = annoy >= 1.0f
-                mood = if (isAngry) {
+                sim.bounce = 1f
+                sim.ring = 0f
+                sim.annoy = (sim.annoy + 0.34f).coerceAtMost(2.2f)
+                val isAngry = sim.annoy >= 1.0f
+                sim.mood = if (isAngry) {
                     "angry"
                 } else {
-                    PLAYFUL_MOODS.filter { it != mood }.random()
+                    PLAYFUL_MOODS.filter { it != sim.mood }.random()
                 }
-                onTapFeedback?.invoke(mood, isAngry)
+                onTapFeedback?.invoke(sim.mood, isAngry)
             }
         }
     ) {
-        if (frameTick < 0L) return@Canvas
+        if (frameTickState.longValue < 0L) return@Canvas
+        val clock = sim.clock
+        val bounce = sim.bounce
+        val ring = sim.ring
+        val annoy = sim.annoy
+        val blinkT = sim.blinkT
+        val flashT = sim.flashT
+        val gazeX = sim.gazeX
+        val gazeY = sim.gazeY
         val base = min(size.width, size.height) * 0.36f
         val rage = annoy.coerceIn(0f, 1f)
         val floatY = sin(clock * 1.45f) * base * 0.045f
@@ -214,7 +234,7 @@ fun WelcomeFaceOrb(
         )
 
         translate(left = cx, top = cy) {
-            rotate(degrees = livePose.tilt) {
+            rotate(degrees = sim.tilt) {
                 scale(scaleX = sx, scaleY = sy, pivot = Offset.Zero) {
                     // Devil horns fade in during rage
                     if (rage > 0.15f) {
@@ -253,7 +273,7 @@ fun WelcomeFaceOrb(
                     drawForeheadGem(base, clock, rage)
 
                     // Blush cheeks
-                    val effectiveBlush = if (blushEnabled) (livePose.blush * (1f - rage)) else 0f
+                    val effectiveBlush = if (blushEnabled) (sim.blush * (1f - rage)) else 0f
                     if (effectiveBlush > 0.03f) {
                         for (side in listOf(-1f, 1f)) {
                             val bx = side * base * 0.42f
@@ -284,17 +304,17 @@ fun WelcomeFaceOrb(
                     // Eyes
                     val eyeY = -base * 0.06f
                     val eyeRx = base * 0.155f
-                    val eyeRy = base * 0.195f * livePose.eyeRy
-                    drawOrbEye(base, -base * 0.30f, eyeY, eyeRx, eyeRy, blinkOpen * livePose.eyeL, gazeX, gazeY, -1f, livePose.pupil, rage)
-                    drawOrbEye(base, base * 0.30f, eyeY, eyeRx, eyeRy, blinkOpen * livePose.eyeR, gazeX, gazeY, 1f, livePose.pupil, rage)
+                    val eyeRy = base * 0.195f * sim.eyeRy
+                    drawOrbEye(base, -base * 0.30f, eyeY, eyeRx, eyeRy, blinkOpen * sim.eyeL, gazeX, gazeY, -1f, sim.pupil, rage)
+                    drawOrbEye(base, base * 0.30f, eyeY, eyeRx, eyeRy, blinkOpen * sim.eyeR, gazeX, gazeY, 1f, sim.pupil, rage)
 
                     // Eyebrows
                     val flash = if (flashT >= 0f) sin(PI.toFloat() * (flashT / 0.38f).coerceIn(0f, 1f)).pow(1.5f) else 0f
-                    drawOrbBrow(base, -1f, livePose.browL, livePose.angL, eyeY - eyeRy - base * 0.055f, flash, clock)
-                    drawOrbBrow(base, 1f, livePose.browR, livePose.angR, eyeY - eyeRy - base * 0.055f, flash, clock)
+                    drawOrbBrow(base, -1f, sim.browL, sim.angL, eyeY - eyeRy - base * 0.055f, flash, clock)
+                    drawOrbBrow(base, 1f, sim.browR, sim.angR, eyeY - eyeRy - base * 0.055f, flash, clock)
 
                     // Mouth
-                    drawOrbMouth(base, livePose.smile, livePose.open)
+                    drawOrbMouth(base, sim.smile, sim.open)
 
                     // Comic anger vein when boiling
                     if (rage > 0.65f) {

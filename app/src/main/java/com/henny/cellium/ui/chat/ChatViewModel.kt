@@ -1,11 +1,16 @@
 package com.henny.cellium.ui.chat
 
 import android.app.Application
+import android.content.ContentValues
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import java.security.MessageDigest
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.henny.cellium.ai.CuratedLocalModel
@@ -116,6 +121,8 @@ data class CelliumUiState(
     val cloudStorageLoading: Boolean = false,
     val bannerMessage: String? = null,
     val errorMessage: String? = null,
+    val settingsFeedbackMessage: String? = null,
+    val settingsFeedbackIsError: Boolean = false,
 ) {
     val activeSession: SessionEntity?
         get() = sessions.firstOrNull { it.id == activeSessionId }
@@ -185,6 +192,15 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
     private val _processRamMb = MutableStateFlow(0)
     val processRamMb: StateFlow<Int> = _processRamMb.asStateFlow()
 
+    private val _chatDraftText = MutableStateFlow("")
+    val chatDraftText: StateFlow<String> = _chatDraftText.asStateFlow()
+
+    fun updateChatDraftText(text: String) {
+        if (_chatDraftText.value != text) {
+            _chatDraftText.value = text
+        }
+    }
+
     private val _activeSessionId = MutableStateFlow<String?>(null)
     private val _selectedLeafBySession = MutableStateFlow<Map<String, String>>(emptyMap())
     private val _streamingParentId = MutableStateFlow<String?>(null)
@@ -236,6 +252,29 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         )
     }
 
+    fun speakPreviewWithVoice(
+        engine: String,
+        voiceId: String,
+        pitch: Float,
+        rate: Float,
+        text: String,
+    ) {
+        ttsEngine.speak(
+            rawText = text,
+            engine = engine,
+            voiceName = voiceId,
+            pitch = pitch,
+            speechRate = rate,
+            onFallback = { notice ->
+                showSettingsFeedback(notice, isError = true)
+            },
+        )
+    }
+
+    fun notifyPrefsChangedForSync() {
+        scheduleBackgroundCloudSync()
+    }
+
     fun resolveSttApiKey(engineId: String = preferences.value.sttEngine): String {
         val explicit = preferences.value.sttApiKey.trim()
         if (explicit.isNotBlank()) return explicit
@@ -251,6 +290,30 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    suspend fun discoverSttModels(
+        engineId: String,
+        explicitKeyOverride: String = "",
+        forceRefresh: Boolean = true,
+    ): Result<List<String>> {
+        val key = explicitKeyOverride.trim().ifBlank { resolveSttApiKey(engineId) }
+        return sttEngine.fetchAvailableSttModels(engineId, key, forceRefresh)
+    }
+
+    fun persistAutoSelectedSttModel(engineId: String, model: String) {
+        val trimmed = model.trim()
+        if (trimmed.isBlank()) return
+        val cur = preferences.value
+        if (cur.sttEngine == engineId && cur.sttModel == trimmed) return
+        viewModelScope.launch {
+            prefsStore.updateSttSettings(
+                engine = engineId,
+                apiKey = cur.sttApiKey,
+                model = trimmed,
+            )
+            notifyPrefsChangedForSync()
+        }
+    }
+
     private var streamJob: Job? = null
     private var liveStreamJob: Job? = null
     private var autoSyncJob: Job? = null
@@ -262,6 +325,9 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         observeCoreFlows()
         observeDirectReplies()
         startRamWatchdog()
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { com.henny.cellium.avatar.AvatarLibrary.load(appContext) }
+        }
     }
 
     fun setAppInForeground(foreground: Boolean) {
@@ -383,6 +449,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 soundEngine.hapticsEnabled = p.hapticsEnabled
                 soundEngine.masterVolume = p.sfxVolume
                 soundEngine.typingSoundStyle = p.typingSoundStyle
+                soundEngine.typingSoundPitch = p.typingSoundPitch
 
                 if (p.activeProviderId != lastActiveProviderId) {
                     lastActiveProviderId = p.activeProviderId
@@ -417,7 +484,8 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 val nextId = if (currentId != null && sessions.any { it.id == currentId }) {
                     currentId
                 } else {
-                    regular.firstOrNull { !it.archived }?.id ?: regular.firstOrNull()?.id
+                    regular.firstOrNull { !it.archived && !it.isLocked }?.id
+                        ?: regular.firstOrNull { !it.isLocked }?.id
                 }
                 if (nextId != currentId) _activeSessionId.value = nextId
                 val activeSess = sessions.firstOrNull { it.id == nextId }
@@ -567,6 +635,62 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch { dao.upsertSession(session.copy(archived = !session.archived)) }
     }
 
+    // ── Locked Chats Vault (Variable-Length PIN, Zero Length Leak) ──────
+
+    private fun hashVaultPin(digits: String): String {
+        val salted = "cel_cellium_vault_pin_v1:$digits"
+        val digest = MessageDigest.getInstance("SHA-256").digest(salted.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    fun setVaultPin(digits: String) {
+        val clean = digits.filter { it.isDigit() }
+        if (clean.isEmpty()) return
+        soundEngine.playPop()
+        viewModelScope.launch {
+            prefsStore.updateVaultPinHash(hashVaultPin(clean))
+            showBanner("Vault PIN updated.")
+        }
+    }
+
+    fun verifyVaultPin(digits: String): Boolean {
+        val stored = preferences.value.vaultPinHash
+        if (stored.isBlank() || digits.isBlank()) return false
+        return hashVaultPin(digits) == stored
+    }
+
+    fun toggleLockSession(session: SessionEntity) {
+        soundEngine.playClick()
+        val nextLocked = !session.isLocked
+        viewModelScope.launch {
+            dao.upsertSession(session.copy(isLocked = nextLocked, updatedAtMs = System.currentTimeMillis()))
+            if (nextLocked && _activeSessionId.value == session.id) {
+                val fallback = _uiState.value.sessions.firstOrNull {
+                    it.id != session.id && !it.isArena && !it.isLocked && !it.archived
+                } ?: _uiState.value.sessions.firstOrNull {
+                    it.id != session.id && !it.isArena && !it.isLocked
+                }
+                _activeSessionId.value = fallback?.id
+            }
+            showBanner(if (nextLocked) "Chat moved to Locked Vault." else "Chat unlocked.")
+        }
+    }
+
+    fun wipeLockedChatsAndResetPin() {
+        soundEngine.playClick()
+        viewModelScope.launch {
+            val activeLocked = _uiState.value.activeSession?.isLocked == true
+            dao.deleteMessagesForLockedSessions()
+            dao.deleteLockedSessions()
+            prefsStore.updateVaultPinHash("")
+            if (activeLocked) {
+                val fallback = _uiState.value.sessions.firstOrNull { !it.isArena && !it.isLocked && !it.archived }
+                _activeSessionId.value = fallback?.id
+            }
+            showBanner("All locked chats erased and Vault PIN reset.")
+        }
+    }
+
     suspend fun searchSessionIdsByContent(query: String): Set<String> = withContext(Dispatchers.IO) {
         val q = query.trim()
         if (q.isEmpty()) emptySet() else dao.searchSessionIdsByMessageContent(q).toSet()
@@ -578,7 +702,9 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             dao.deleteMessagesForSession(sessionId)
             dao.deleteSession(sessionId)
             if (_activeSessionId.value == sessionId) {
-                _activeSessionId.value = _uiState.value.sessions.firstOrNull { it.id != sessionId && !it.isArena }?.id
+                _activeSessionId.value = _uiState.value.sessions.firstOrNull {
+                    it.id != sessionId && !it.isArena && !it.isLocked
+                }?.id
             }
         }
     }
@@ -1051,9 +1177,14 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val fallbackTitle = attachedFile?.fileName ?: if (attachmentBitmaps.size > 1) "${attachmentBitmaps.size} Images" else "Image Analysis"
             val sid = sessionIdOverride ?: ensureActiveSession(prompt.ifBlank { fallbackTitle })
-            val attachPaths = attachmentBitmaps.mapNotNull { bmp ->
+            val savedPaths = attachmentBitmaps.mapNotNull { bmp ->
                 saveAttachmentLocally(bmp).takeIf { it.isNotBlank() }
-            }.joinToString("\n")
+            }
+            val attachPaths = savedPaths.joinToString("\n")
+            val agentCopiedPaths = if (preferences.value.agentModeEnabled && savedPaths.isNotEmpty()) {
+                savedPaths.mapNotNull { copyImageToAgentWorkspace(File(it)) }
+            } else emptyList()
+
             val userMsgId = UUID.randomUUID().toString()
             val allBefore = dao.getMessagesForSessionOnce(sid)
             val historyBefore = ChatTreeHelper.buildAncestorPath(allBefore, explicitParentId)
@@ -1080,11 +1211,15 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             _selectedLeafBySession.value = _selectedLeafBySession.value + (sid to userMsgId)
             refreshSessionStats(sid, firstPromptHint = displayContent)
 
+            val promptForModel = if (agentCopiedPaths.isNotEmpty()) {
+                "$displayContent\n\n[Agent Mode Note: The attached image(s) have been copied to your project workspace for inspection anytime: ${agentCopiedPaths.joinToString(", ")}]"
+            } else displayContent
+
             runAssistantGeneration(
                 sessionId = sid,
                 parentMessageId = userMsgId,
                 historyBeforePrompt = historyBefore,
-                promptText = displayContent,
+                promptText = promptForModel,
                 attachmentBitmaps = attachmentBitmaps,
                 attachedFile = attachedFile,
             )
@@ -1150,8 +1285,10 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             var chirpCounter = 0
             var lastUiFlushMs = 0L
 
-            // Decoupled typewriter reveal pacing so Animal Crossing / Scratchin' Melodii chirps shine!
+            // Decoupled typewriter reveal pacing with Word-by-Word (default) or Letter-by-Letter cadence
             val typingSpeed = prefs.typingSpeed
+            val typingCadence = prefs.typingSoundCadence
+            val isWordCadence = typingCadence != "letter"
             val isInstantTyping = typingSpeed == "instant"
             val charsPerTick = when (typingSpeed) {
                 "super_slow" -> 1
@@ -1179,6 +1316,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             var revealJob: Job? = null
             if (!isInstantTyping) {
                 revealJob = viewModelScope.launch {
+                    var inWord = false
                     while (!networkDone.get() || displayedLength < targetBodyText.get().length) {
                         val full = targetBodyText.get()
                         val thoughtSnap = targetThoughtText.get()
@@ -1187,10 +1325,23 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                             val nextLen = (displayedLength + charsPerTick).coerceAtMost(full.length)
                             val newlyRevealed = full.substring(displayedLength, nextLen)
                             displayedLength = nextLen
-                            val speakableChar = newlyRevealed.firstOrNull { it.isLetterOrDigit() }
-                            if (speakableChar != null) {
+                            var chirpSeed: Int? = null
+                            for (ch in newlyRevealed) {
+                                val isWordChar = ch.isLetterOrDigit()
+                                if (isWordCadence) {
+                                    if (isWordChar && !inWord && chirpSeed == null) {
+                                        chirpSeed = ch.code
+                                    }
+                                    inWord = isWordChar
+                                } else {
+                                    if (isWordChar && chirpSeed == null) {
+                                        chirpSeed = ch.code
+                                    }
+                                }
+                            }
+                            if (chirpSeed != null) {
                                 soundEngine.playAnimaleseChirp(
-                                    speakableChar.code,
+                                    chirpSeed,
                                     isQuestion = full.endsWith("?"),
                                 )
                             }
@@ -1211,7 +1362,13 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
 
-            try {
+            suspend fun streamSinglePass(
+                passHistory: List<MessageEntity>,
+                passPrompt: String,
+                passBitmaps: List<Bitmap>,
+                passFile: AttachedTextFile?,
+                resetDisplay: Boolean,
+            ) {
                 val maxRetries = if (prov.protocol == "on_device") 0 else prefs.maxAutoRetries.coerceIn(0, 15)
                 var attempt = 0
                 var lastErr: Exception? = null
@@ -1219,27 +1376,29 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 while (attempt <= maxRetries) {
                     rawContent.clear()
                     rawThought.clear()
-                    targetBodyText.set("")
-                    targetThoughtText.set("")
-                    displayedLength = 0
+                    if (resetDisplay) {
+                        targetBodyText.set("")
+                        targetThoughtText.set("")
+                        displayedLength = 0
+                    }
                     lastUiFlushMs = 0L
                     try {
                         val flow = if (prov.protocol == "on_device") {
                             onDeviceEngine.streamReply(
                                 systemPrompt = systemPrompt,
-                                history = effectiveHistory,
-                                userPrompt = promptText,
+                                history = passHistory,
+                                userPrompt = passPrompt,
                                 historyLimit = ctxCfg.historyLimit,
                             )
                         } else {
                             llmClient.streamChat(
                                 provider = prov,
                                 systemPrompt = systemPrompt,
-                                history = effectiveHistory,
-                                userPrompt = promptText,
-                                imageBitmaps = attachmentBitmaps,
-                                attachedFileName = attachedFile?.fileName.orEmpty(),
-                                attachedFileContent = attachedFile?.content.orEmpty(),
+                                history = passHistory,
+                                userPrompt = passPrompt,
+                                imageBitmaps = passBitmaps,
+                                attachedFileName = passFile?.fileName.orEmpty(),
+                                attachedFileContent = passFile?.content.orEmpty(),
                                 historyLimit = ctxCfg.historyLimit,
                             )
                         }
@@ -1249,7 +1408,11 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                                 rawContent.append(chunk.contentDelta)
                                 if (isInstantTyping) {
                                     chirpCounter++
-                                    if (chirpCounter % 5 == 0) soundEngine.playAnimaleseChirp(chirpCounter)
+                                    val stride = if (isWordCadence) 6 else 3
+                                    if (chirpCounter % stride == 0) {
+                                        val seed = chunk.contentDelta.firstOrNull { it.isLetterOrDigit() }?.code ?: chirpCounter
+                                        soundEngine.playAnimaleseChirp(seed)
+                                    }
                                 }
                             }
                             val now = System.currentTimeMillis()
@@ -1300,35 +1463,155 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     revealJob?.cancel()
                     throw lastErr
                 }
+            }
 
-                val (inlineThought, cleanBody) = ProviderPresets.parseThoughts(rawContent.toString())
-                val (inlineMood, bodyNoMood) = MoodDetector.extractInlineMoodTag(cleanBody)
-                val mergedThought = listOf(rawThought.toString().trim(), inlineThought)
+            try {
+                streamSinglePass(
+                    passHistory = effectiveHistory,
+                    passPrompt = promptText,
+                    passBitmaps = attachmentBitmaps,
+                    passFile = attachedFile,
+                    resetDisplay = true,
+                )
+
+                var parsedThoughtAndBody = ProviderPresets.parseThoughts(rawContent.toString())
+                var parsedMoodAndBody = MoodDetector.extractInlineMoodTag(parsedThoughtAndBody.second)
+                var mergedThought = listOf(rawThought.toString().trim(), parsedThoughtAndBody.first)
                     .filter { it.isNotEmpty() }.joinToString("\n\n")
-                var finalBody = bodyNoMood.ifBlank { cleanBody.ifBlank { rawContent.toString().trim() } }
+                var inlineMood = parsedMoodAndBody.first
+                var finalBody = parsedMoodAndBody.second.ifBlank { parsedThoughtAndBody.second.ifBlank { rawContent.toString().trim() } }
 
-                // Let typewriter finish revealing the remaining buffered text cleanly before finalizing!
+                // Autonomous keyless agentic [WEB_SEARCH] loop (up to 2 rounds)
+                if (!saveAsCompactSummary) {
+                    var webRound = 0
+                    val accumulatedWebBlocks = StringBuilder()
+                    while (webRound < 2) {
+                        val (searchQuery, _) = UniversalLlmClient.extractWebSearchQuery(finalBody)
+                        if (searchQuery.isNullOrBlank()) break
+                        webRound++
+                        _uiState.value = _uiState.value.copy(
+                            retryStatusText = "Searching web for \"$searchQuery\"...",
+                        )
+                        val searchRes = webTools.searchWeb(searchQuery, maxResults = 5)
+                        val searchBlock = searchRes.fold(
+                            onSuccess = { items ->
+                                if (items.isEmpty()) "No web search results found for \"$searchQuery\"."
+                                else buildString {
+                                    append("[Live Web Search Results for \"$searchQuery\"]\n")
+                                    items.forEachIndexed { idx, r ->
+                                        append("${idx + 1}. ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}\n\n")
+                                    }
+                                }
+                            },
+                            onFailure = { "Web search failed for \"$searchQuery\": ${it.localizedMessage}" },
+                        )
+                        accumulatedWebBlocks.append(searchBlock).append("\n")
+                        val groundedPrompt = buildString {
+                            append(promptText)
+                            append("\n\n")
+                            append(accumulatedWebBlocks.toString())
+                            append("Use the live web search results above to answer thoroughly, naturally, and accurately. Do NOT emit another [WEB_SEARCH] tag unless a completely different follow-up query is strictly needed.")
+                        }
+                        streamSinglePass(
+                            passHistory = effectiveHistory,
+                            passPrompt = groundedPrompt,
+                            passBitmaps = emptyList(), // Never re-send image bytes on follow-up web search turn
+                            passFile = attachedFile,
+                            resetDisplay = true,
+                        )
+                        parsedThoughtAndBody = ProviderPresets.parseThoughts(rawContent.toString())
+                        parsedMoodAndBody = MoodDetector.extractInlineMoodTag(parsedThoughtAndBody.second)
+                        mergedThought = listOf(rawThought.toString().trim(), parsedThoughtAndBody.first)
+                            .filter { it.isNotEmpty() }.joinToString("\n\n")
+                        inlineMood = parsedMoodAndBody.first
+                        finalBody = parsedMoodAndBody.second.ifBlank { parsedThoughtAndBody.second.ifBlank { rawContent.toString().trim() } }
+                    }
+                    // Strip any leftover [WEB_SEARCH] tag if the model still emitted one after max rounds
+                    finalBody = UniversalLlmClient.extractWebSearchQuery(finalBody).second
+                }
+
+                // Let typewriter finish revealing the remaining buffered text cleanly before finalizing
                 targetBodyText.set(finalBody)
                 targetThoughtText.set(mergedThought)
                 targetMood.set(inlineMood ?: MoodDetector.detectMood(finalBody))
                 networkDone.set(true)
                 revealJob?.join()
 
-                // Check for [ILLUME_GEN]...[/ILLUME_GEN] image generation tool trigger
-                var generatedImagePath = ""
+                // Inline Multi-Image Illume (up to 5) & Keyless Web/Stock Images (up to 5)
                 if (!saveAsCompactSummary) {
-                    val (illumePrompt, strippedOfIllume) = UniversalLlmClient.extractIllumePrompt(finalBody)
-                    if (!illumePrompt.isNullOrBlank()) {
-                        finalBody = strippedOfIllume.ifBlank { "Generated artwork for **\"$illumePrompt\"**." }
+                    val (illumePrompts, bodyWithIllumeSlots) = UniversalLlmClient.extractAllIllumeBlocks(finalBody, maxCount = 5)
+                    val (webImgQueries, bodyWithAllSlots) = UniversalLlmClient.extractAllWebImageBlocks(bodyWithIllumeSlots, maxCount = 5)
+
+                    if (illumePrompts.isNotEmpty() || webImgQueries.isNotEmpty()) {
+                        var workingBody = bodyWithAllSlots
+                        illumePrompts.forEachIndexed { idx, p ->
+                            workingBody = workingBody.replace(
+                                "[[CELLIUM_IMG_SLOT:$idx]]",
+                                "[[CELLIUM_IMG_LOADING:Illume #${idx + 1}: ${p.take(44)}]]",
+                            )
+                        }
+                        webImgQueries.forEachIndexed { idx, q ->
+                            workingBody = workingBody.replace(
+                                "[[CELLIUM_WEBIMG_SLOT:$idx]]",
+                                "[[CELLIUM_IMG_LOADING:Web Photo #${idx + 1}: ${q.take(44)}]]",
+                            )
+                        }
+                        finalBody = workingBody
                         _uiState.value = _uiState.value.copy(
                             streamingContent = finalBody,
-                            retryStatusText = "Rendering artwork via Illume...",
+                            retryStatusText = if (illumePrompts.isNotEmpty()) {
+                                "Rendering ${illumePrompts.size} artwork(s) via Illume..."
+                            } else {
+                                "Fetching ${webImgQueries.size} web photo(s)..."
+                            },
                         )
-                        val artRes = generateArtwork(illumePrompt)
-                        artRes.onSuccess { art ->
-                            generatedImagePath = art.localPath
-                        }.onFailure { err ->
-                            finalBody = "$finalBody\n\n*(Illume generation failed: ${err.localizedMessage})*"
+
+                        illumePrompts.forEachIndexed { idx, imgPrompt ->
+                            val loadingMarker = "[[CELLIUM_IMG_LOADING:Illume #${idx + 1}: ${imgPrompt.take(44)}]]"
+                            _uiState.value = _uiState.value.copy(
+                                retryStatusText = "Rendering artwork ${idx + 1}/${illumePrompts.size} via Illume...",
+                            )
+                            val artRes = generateArtwork(imgPrompt)
+                            artRes.onSuccess { art ->
+                                if (prefs.agentModeEnabled) {
+                                    copyImageToAgentWorkspace(File(art.localPath))
+                                }
+                                finalBody = finalBody.replace(loadingMarker, "[[CELLIUM_IMG:${art.localPath}]]")
+                            }.onFailure { err ->
+                                finalBody = finalBody.replace(
+                                    loadingMarker,
+                                    "*(Illume #${idx + 1} failed: ${err.localizedMessage})*",
+                                )
+                            }
+                            _uiState.value = _uiState.value.copy(streamingContent = finalBody)
+                        }
+
+                        val webDir = webImagesDir()
+                        webImgQueries.forEachIndexed { idx, q ->
+                            val loadingMarker = "[[CELLIUM_IMG_LOADING:Web Photo #${idx + 1}: ${q.take(44)}]]"
+                            _uiState.value = _uiState.value.copy(
+                                retryStatusText = "Searching stock photo ${idx + 1}/${webImgQueries.size}: $q...",
+                            )
+                            val imgSearch = webTools.searchWebImages(q, maxResults = 3)
+                            var downloadedPath: String? = null
+                            val hits = imgSearch.getOrNull().orEmpty()
+                            for (hit in hits) {
+                                val dl = webTools.downloadImageToFile(hit.imageUrl, webDir, filePrefix = "web_photo")
+                                val file = dl.getOrNull()
+                                if (file != null && file.exists()) {
+                                    downloadedPath = file.absolutePath
+                                    if (prefs.agentModeEnabled) {
+                                        copyImageToAgentWorkspace(file)
+                                    }
+                                    break
+                                }
+                            }
+                            finalBody = if (!downloadedPath.isNullOrBlank()) {
+                                finalBody.replace(loadingMarker, "[[CELLIUM_IMG:$downloadedPath]]")
+                            } else {
+                                finalBody.replace(loadingMarker, "*(No stock photo found for \"$q\")*")
+                            }
+                            _uiState.value = _uiState.value.copy(streamingContent = finalBody)
                         }
                     }
                 }
@@ -1354,7 +1637,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     mood = detectedMood,
                     providerName = prov.name,
                     modelName = modelUsed,
-                    attachmentPath = generatedImagePath,
+                    attachmentPath = "",
                     tokenEstimate = estTokens,
                     latencyMs = latency,
                     tokensPerSec = tps,
@@ -1383,7 +1666,6 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 )
 
                 // Mood Engine Method 2: fast background AI mood classification when selected
-                // Skip on keyless Pollinations Classic API (1 concurrent request per IP prevents HTTP 429)
                 val isKeylessPollinations = prov.id == ProviderPresets.ID_POLLINATIONS_FREE && prov.apiKey.isBlank()
                 if (!saveAsCompactSummary && prefs.moodMethod == "background_ai" && prov.protocol != "on_device" && !isKeylessPollinations) {
                     viewModelScope.launch {
@@ -1403,7 +1685,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     val agentCmd = CommandGuard.extractAgentCommand(finalBody)
                     if (!agentCmd.isNullOrBlank()) {
                         val assessment = CommandGuard.assess(agentCmd)
-                        if (assessment.tier == CommandSafetyTier.SAFE && prefs.agentAutoApproveSafe && shizukuConnected) {
+                        if (assessment.tier == CommandSafetyTier.SAFE && prefs.agentAutoApproveSafe) {
                             executeAgentCommand(sessionId, assistantId, assessment.command)
                         } else {
                             _uiState.value = _uiState.value.copy(
@@ -1556,7 +1838,14 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private suspend fun executeAgentCommand(sessionId: String, parentId: String, command: String) {
-        val res = shizukuBridge.runCommand(command, timeoutSec = 20)
+        val shizukuConnected = _uiState.value.shizukuStatus == ShizukuStatus.CONNECTED_SHELL ||
+            _uiState.value.shizukuStatus == ShizukuStatus.CONNECTED_ROOT
+        val runnerName = if (shizukuConnected) "Shizuku" else "Local Shell"
+        val res = if (shizukuConnected) {
+            shizukuBridge.runCommand(command, timeoutSec = 20)
+        } else {
+            shizukuBridge.runLocalShellCommand(command, resolveLocalWorkspaceDir(), timeoutSec = 20)
+        }
         val output = res.getOrElse { "Error: ${it.localizedMessage}" }
         val toolMsgId = UUID.randomUUID().toString()
         val toolEntity = MessageEntity(
@@ -1564,11 +1853,11 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             sessionId = sessionId,
             parentId = parentId,
             role = "tool",
-            content = "Shizuku shell executed `$command`.",
+            content = "$runnerName executed `$command`.",
             toolCommand = command,
             toolOutput = output.take(8000),
             toolStatus = "approved",
-            providerName = "Shizuku",
+            providerName = runnerName,
         )
         dao.upsertMessage(toolEntity)
         _selectedLeafBySession.value = _selectedLeafBySession.value + (sessionId to toolMsgId)
@@ -1580,7 +1869,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             sessionId = sessionId,
             parentMessageId = toolMsgId,
             historyBeforePrompt = path,
-            promptText = "Summarize the Shizuku command output above clearly and concisely for the user.",
+            promptText = "Summarize the $runnerName command output above clearly and concisely for the user.",
             attachmentBitmaps = emptyList(),
             attachedFile = null,
         )
@@ -2129,10 +2418,17 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 _uiState.value.shizukuStatus == ShizukuStatus.CONNECTED_ROOT
             val freedMb = onDeviceEngine.reclaimInternalRam(includeShizuku = shizukuConnected)
             val avail = onDeviceEngine.availableDeviceRamMb()
-            showBanner(
-                if (freedMb > 0) "Freed ~${freedMb} MB RAM (${avail} MB now free)."
-                else "RAM trimmed & caches cleared (${avail} MB available)."
-            )
+            if (!shizukuConnected) {
+                val warn = "Shizuku is NOT connected — only cleared Cellium's own RAM (~${freedMb} MB; ${avail} MB device free). Start & authorize Shizuku in Agent & Shizuku to free your phone's full RAM."
+                showSettingsFeedback(warn, isError = true)
+            } else {
+                val msg = if (freedMb > 0) {
+                    "Freed ~${freedMb} MB across device via Shizuku (${avail} MB now free)."
+                } else {
+                    "Device RAM trimmed & caches cleared via Shizuku (${avail} MB available)."
+                }
+                showSettingsFeedback(msg, isError = false)
+            }
         }
     }
 
@@ -2187,6 +2483,72 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             val res = imagineClient.saveToDevicePhotos(File(artwork.localPath))
             res.onSuccess { showBanner(it) }
                 .onFailure { _uiState.value = _uiState.value.copy(errorMessage = it.localizedMessage) }
+        }
+    }
+
+    fun saveImageToDownloadsCellium(sourcePath: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = runCatching {
+                val src = File(sourcePath)
+                require(src.exists()) { "Image file no longer exists on device." }
+                val ext = src.extension.lowercase().ifBlank { "png" }
+                val mime = when (ext) {
+                    "jpg", "jpeg" -> "image/jpeg"
+                    "webp" -> "image/webp"
+                    else -> "image/png"
+                }
+                val fileName = "Cellium_${System.currentTimeMillis()}.$ext"
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                        put(MediaStore.Downloads.MIME_TYPE, mime)
+                        put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Cellium")
+                    }
+                    val resolver = appContext.contentResolver
+                    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        ?: throw IllegalStateException("Could not create Downloads/Cellium entry.")
+                    resolver.openOutputStream(uri)?.use { out ->
+                        src.inputStream().use { inp -> inp.copyTo(out) }
+                    } ?: throw IllegalStateException("Could not open Downloads stream.")
+                } else {
+                    @Suppress("DEPRECATION")
+                    val dlDir = File(
+                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                        "Cellium",
+                    ).apply { mkdirs() }
+                    src.copyTo(File(dlDir, fileName), overwrite = true)
+                }
+                "Saved to Downloads/Cellium/$fileName"
+            }
+            withContext(Dispatchers.Main) {
+                res.onSuccess {
+                    soundEngine.playPop()
+                    showBanner(it)
+                }.onFailure { err ->
+                    _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage)
+                }
+            }
+        }
+    }
+
+    fun saveImageToUri(sourcePath: String, targetUri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = runCatching {
+                val src = File(sourcePath)
+                require(src.exists()) { "Image file no longer exists on device." }
+                appContext.contentResolver.openOutputStream(targetUri)?.use { out ->
+                    src.inputStream().use { inp -> inp.copyTo(out) }
+                } ?: throw IllegalStateException("Unable to write to chosen location.")
+                "Image saved successfully."
+            }
+            withContext(Dispatchers.Main) {
+                res.onSuccess {
+                    soundEngine.playPop()
+                    showBanner(it)
+                }.onFailure { err ->
+                    _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage)
+                }
+            }
         }
     }
 
@@ -2274,8 +2636,8 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             MemoryGuardService.start(appContext, "Manual Shizuku Anti-Kill Active")
             val res = shizukuBridge.applyAntiKillProtection(reason = "Manual boost")
-            res.onSuccess { showBanner(it) }
-                .onFailure { _uiState.value = _uiState.value.copy(errorMessage = it.localizedMessage) }
+            res.onSuccess { showSettingsFeedback("Anti-Kill applied: ${it.take(120)}", isError = false) }
+                .onFailure { showSettingsFeedback(it.localizedMessage ?: "Shizuku Anti-Kill failed", isError = true) }
         }
     }
 
@@ -2285,9 +2647,9 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             val res = shizukuBridge.runCommand("id && uname -m")
             res.onSuccess { out ->
                 val clean = out.trim().ifBlank { "OK" }
-                showBanner("Shizuku shell OK: $clean")
+                showSettingsFeedback("Shizuku shell OK: $clean", isError = false)
             }.onFailure { err ->
-                _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage ?: "Shizuku shell test failed")
+                showSettingsFeedback(err.localizedMessage ?: "Shizuku shell test failed", isError = true)
             }
         }
     }
@@ -2328,9 +2690,11 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             if (!silent) {
                 _uiState.value = _uiState.value.copy(isSyncingCloud = false)
                 res.onSuccess {
-                    showBanner(it.message)
+                    showSettingsFeedback(it.message, isError = false)
                     refreshCloudStorage()
-                }.onFailure { _uiState.value = _uiState.value.copy(errorMessage = it.localizedMessage) }
+                }.onFailure {
+                    showSettingsFeedback(it.localizedMessage ?: "Cloud sync failed", isError = true)
+                }
             }
         }
     }
@@ -2351,10 +2715,10 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val res = cloudSync.deleteCloudItem(collection, docId)
             res.onSuccess {
-                showBanner("Deleted item from Cloud.")
+                showSettingsFeedback("Deleted item from Cloud.", isError = false)
                 refreshCloudStorage()
             }.onFailure {
-                _uiState.value = _uiState.value.copy(errorMessage = it.localizedMessage)
+                showSettingsFeedback(it.localizedMessage ?: "Cloud delete failed", isError = true)
             }
         }
     }
@@ -2371,6 +2735,18 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
     fun clearBanner() { _uiState.value = _uiState.value.copy(bannerMessage = null) }
     fun clearError() { _uiState.value = _uiState.value.copy(errorMessage = null) }
     fun showBanner(msg: String) { _uiState.value = _uiState.value.copy(bannerMessage = msg) }
+    fun showSettingsFeedback(msg: String, isError: Boolean = false) {
+        _uiState.value = _uiState.value.copy(
+            settingsFeedbackMessage = msg,
+            settingsFeedbackIsError = isError,
+        )
+    }
+    fun clearSettingsFeedback() {
+        _uiState.value = _uiState.value.copy(
+            settingsFeedbackMessage = null,
+            settingsFeedbackIsError = false,
+        )
+    }
 
     // ── Internals ────────────────────────────────────────────────────────
 
@@ -2421,10 +2797,40 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         return words.take(44)
     }
 
+    private fun attachmentsDir(): File {
+        val dir = appContext.getExternalFilesDir("attachments") ?: File(appContext.filesDir, "attachments")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    private fun webImagesDir(): File {
+        val dir = appContext.getExternalFilesDir("web_images") ?: File(appContext.filesDir, "web_images")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    private fun resolveLocalWorkspaceDir(): File {
+        val preferred = File(preferences.value.agentWorkspacePath.trim().ifBlank { "/sdcard/Documents/CelliumProjects" })
+        if (runCatching { preferred.mkdirs(); preferred.exists() && preferred.canWrite() }.getOrDefault(false)) {
+            return preferred
+        }
+        val fallback = appContext.getExternalFilesDir("agent_workspace") ?: File(appContext.filesDir, "agent_workspace")
+        if (!fallback.exists()) fallback.mkdirs()
+        return fallback
+    }
+
+    private fun copyImageToAgentWorkspace(sourceFile: File): String? = runCatching {
+        if (!sourceFile.exists()) return@runCatching null
+        val wsImages = File(resolveLocalWorkspaceDir(), "images").apply { mkdirs() }
+        val dest = File(wsImages, sourceFile.name)
+        sourceFile.copyTo(dest, overwrite = true)
+        dest.absolutePath
+    }.getOrNull()
+
     private fun saveAttachmentLocally(bitmap: Bitmap): String = runCatching {
-        val dir = File(appContext.filesDir, "attachments").apply { if (!exists()) mkdirs() }
+        val dir = attachmentsDir()
         val f = File(dir, "att_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.jpg")
-        FileOutputStream(f).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 82, it) }
+        FileOutputStream(f).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }
         f.absolutePath
     }.getOrDefault("")
 

@@ -6,6 +6,11 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -45,14 +50,17 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Palette
+import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.UploadFile
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -120,8 +128,17 @@ fun ChatComposerBar(
     onRemoveImageAt: (Int) -> Unit,
     onClearFile: () -> Unit,
     onPickImage: () -> Unit,
+    onTakePhoto: () -> Unit = {},
     onPickFile: () -> Unit,
     onStartVoiceInput: () -> Unit,
+    onCancelVoiceInput: () -> Unit = {},
+    onStopVoiceInput: () -> Unit = {},
+    isRecordingVoice: Boolean = false,
+    isTranscribingVoice: Boolean = false,
+    recordingSeconds: Int = 0,
+    recordingEngineLabel: String = "",
+    initialDraft: String = "",
+    onDraftChanged: (String) -> Unit = {},
     onOpenArena: () -> Unit,
     onStopStreaming: () -> Unit,
     onSend: (String) -> Unit,
@@ -129,7 +146,7 @@ fun ChatComposerBar(
 ) {
     val context = LocalContext.current
     val visuals = LocalCelliumVisuals.current
-    val textState = rememberTextFieldState()
+    val textState = rememberTextFieldState(initialText = initialDraft)
     var showAttachSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(injectedText) {
@@ -137,11 +154,16 @@ fun ChatComposerBar(
             val existing = textState.text.toString()
             val next = if (existing.isBlank()) injectedText else "$existing $injectedText"
             textState.setTextAndPlaceCursorAtEnd(next)
+            onDraftChanged(next)
             onClearInjectedText()
         }
     }
 
     val currentText by remember { derivedStateOf { textState.text.toString() } }
+
+    LaunchedEffect(currentText) {
+        onDraftChanged(currentText)
+    }
 
     val builtInSlashOptions = remember {
         listOf(
@@ -336,13 +358,115 @@ fun ChatComposerBar(
             }
         }
 
+        // Visual Voice Recording / Transcribing Indicator Bar
+        AnimatedVisibility(visible = isRecordingVoice || isTranscribingVoice) {
+            val pulseTransition = rememberInfiniteTransition(label = "rec_pulse")
+            val dotAlpha by pulseTransition.animateFloat(
+                initialValue = 0.35f,
+                targetValue = 1.0f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(550),
+                    repeatMode = RepeatMode.Reverse,
+                ),
+                label = "rec_dot_alpha",
+            )
+            val mins = recordingSeconds / 60
+            val secs = recordingSeconds % 60
+            val timeStr = "%d:%02d".format(mins, secs)
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (isRecordingVoice) CelRedError.copy(alpha = 0.18f) else visuals.primary.copy(alpha = 0.18f))
+                    .border(
+                        width = 1.dp,
+                        color = if (isRecordingVoice) CelRedError.copy(alpha = 0.65f) else visuals.activeBorder,
+                        shape = RoundedCornerShape(16.dp),
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (isTranscribingVoice) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = visuals.primary,
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(CelRedError.copy(alpha = dotAlpha)),
+                    )
+                    Icon(
+                        imageVector = Icons.Rounded.GraphicEq,
+                        contentDescription = "Recording audio",
+                        tint = CelRedError,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (isTranscribingVoice) {
+                            "Transcribing via ${recordingEngineLabel.ifBlank { "Voice" }}..."
+                        } else {
+                            "Recording · $timeStr"
+                        },
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontFamily = JetBrainsMono,
+                            fontWeight = FontWeight.Bold,
+                        ),
+                        color = if (isRecordingVoice) CelRedError else CelTextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = if (isTranscribingVoice) {
+                            "Converting your speech to text..."
+                        } else {
+                            "${recordingEngineLabel.ifBlank { "Mic" }} · Tap Stop when done speaking"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CelTextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (isRecordingVoice) {
+                    IconButton(
+                        onClick = onCancelVoiceInput,
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(Color(0x33FFFFFF))
+                            .testTag("cancel_voice_recording_button"),
+                    ) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Cancel recording", tint = CelTextPrimary, modifier = Modifier.size(18.dp))
+                    }
+                    IconButton(
+                        onClick = onStopVoiceInput,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(CelRedError)
+                            .testTag("stop_voice_recording_button"),
+                    ) {
+                        Icon(Icons.Rounded.Stop, contentDescription = "Stop recording and transcribe", tint = Color.White, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+
         // Main Pill Composer Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(26.dp))
                 .background(visuals.glassSurface)
-                .border(1.dp, visuals.activeBorder, RoundedCornerShape(26.dp))
+                .border(1.dp, if (isRecordingVoice) CelRedError.copy(alpha = 0.75f) else visuals.activeBorder, RoundedCornerShape(26.dp))
                 .padding(horizontal = 6.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -353,10 +477,20 @@ fun ChatComposerBar(
                 Icon(Icons.Rounded.Add, contentDescription = "Attach images, file, or template", tint = CelLavender)
             }
             IconButton(
-                onClick = onStartVoiceInput,
-                modifier = Modifier.size(40.dp).testTag("composer_mic_button"),
+                onClick = { if (isRecordingVoice) onStopVoiceInput() else onStartVoiceInput() },
+                enabled = !isTranscribingVoice,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(if (isRecordingVoice) CelRedError else Color.Transparent)
+                    .testTag("composer_mic_button"),
             ) {
-                Icon(Icons.Rounded.Mic, contentDescription = "Voice input", tint = CelLavender, modifier = Modifier.size(20.dp))
+                Icon(
+                    imageVector = if (isRecordingVoice) Icons.Rounded.Stop else Icons.Rounded.Mic,
+                    contentDescription = if (isRecordingVoice) "Stop recording" else "Voice input",
+                    tint = if (isRecordingVoice) Color.White else CelLavender,
+                    modifier = Modifier.size(20.dp),
+                )
             }
 
             Box(
@@ -403,6 +537,7 @@ fun ChatComposerBar(
                     onClick = {
                         val toSend = textState.text.toString()
                         textState.clearText()
+                        onDraftChanged("")
                         onSend(toSend)
                     },
                     enabled = canSend,
@@ -430,12 +565,23 @@ fun ChatComposerBar(
                 Text("Attach or Insert", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     AttachActionCard(
+                        icon = Icons.Rounded.PhotoCamera,
+                        title = "Camera",
+                        subtitle = "Take photo",
+                        accent = Color(0xFF10B981),
+                        modifier = Modifier.weight(1f).testTag("attach_camera_option"),
+                        onClick = {
+                            showAttachSheet = false
+                            onTakePhoto()
+                        },
+                    )
+                    AttachActionCard(
                         icon = Icons.Rounded.Image,
-                        title = "Upload Images",
-                        subtitle = "Up to 5 photos",
+                        title = "Gallery",
+                        subtitle = "Up to 5",
                         accent = visuals.primary,
                         modifier = Modifier.weight(1f).testTag("attach_image_option"),
                         onClick = {
@@ -445,8 +591,8 @@ fun ChatComposerBar(
                     )
                     AttachActionCard(
                         icon = Icons.Rounded.UploadFile,
-                        title = "Upload File",
-                        subtitle = "Code, TXT, MD, JSON",
+                        title = "File",
+                        subtitle = "TXT, MD, Code",
                         accent = Color(0xFF38BDF8),
                         modifier = Modifier.weight(1f).testTag("attach_file_option"),
                         onClick = {

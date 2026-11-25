@@ -39,6 +39,7 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Backup
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.BatteryChargingFull
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.rounded.FileDownload
 import androidx.compose.material.icons.rounded.FileUpload
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NotificationsActive
@@ -76,6 +78,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -180,10 +183,10 @@ fun SettingsScreen(
     }
 
     val notifPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        viewModel.showBanner(if (granted) "Notifications enabled." else "Notification permission denied.")
+        viewModel.showSettingsFeedback(if (granted) "Notifications enabled." else "Notification permission denied.", isError = !granted)
     }
     val micPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        viewModel.showBanner(if (granted) "Microphone ready for Live Voice." else "Microphone permission denied.")
+        viewModel.showSettingsFeedback(if (granted) "Microphone ready for Live Voice." else "Microphone permission denied.", isError = !granted)
     }
     val exportBackupLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
@@ -215,19 +218,27 @@ fun SettingsScreen(
             }
         }
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item {
-                Text("Cel.Cellium Settings", style = MaterialTheme.typography.titleLarge, color = CelTextPrimary)
-                Text(
-                    "${BuildConfig.VERSION_NAME} · Local-First Room SQLite · CelSuite.HenryJayz.Cellium",
-                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
-                    color = CelTextSecondary,
+        Column(modifier = Modifier.fillMaxSize()) {
+            uiState.settingsFeedbackMessage?.let { msg ->
+                SettingsFeedbackBanner(
+                    message = msg,
+                    isError = uiState.settingsFeedbackIsError,
+                    onDismiss = { viewModel.clearSettingsFeedback() },
                 )
             }
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Text("Cel.Cellium Settings", style = MaterialTheme.typography.titleLarge, color = CelTextPrimary)
+                    Text(
+                        "${BuildConfig.VERSION_NAME} · Local-First Room SQLite · CelSuite.HenryJayz.Cellium",
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                        color = CelTextSecondary,
+                    )
+                }
 
             item {
                 OutlinedTextField(
@@ -298,6 +309,7 @@ fun SettingsScreen(
                     )
                 }
             }
+            }
         }
     } else {
         // ── FOCUSED SUB-SCREEN ──
@@ -321,6 +333,14 @@ fun SettingsScreen(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
+                )
+            }
+
+            uiState.settingsFeedbackMessage?.let { msg ->
+                SettingsFeedbackBanner(
+                    message = msg,
+                    isError = uiState.settingsFeedbackIsError,
+                    onDismiss = { viewModel.clearSettingsFeedback() },
                 )
             }
 
@@ -517,12 +537,16 @@ fun SettingsScreen(
                                 var threadsDraft by remember(cfg.ggufThreads) { mutableFloatStateOf(cfg.ggufThreads.toFloat()) }
                                 var gpuLayersDraft by remember(cfg.ggufGpuLayers) { mutableFloatStateOf(cfg.ggufGpuLayers.toFloat()) }
 
-                                Text("History Turns Sent: ${histDraft.toInt()}", style = MaterialTheme.typography.labelSmall, color = CelLavender)
+                                Text(
+                                    text = if (histDraft.toInt() >= 200) "History Turns Sent: Full History (up to 400)" else "History Turns Sent: ${histDraft.toInt()}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CelLavender,
+                                )
                                 Slider(
-                                    value = histDraft,
+                                    value = histDraft.coerceIn(4f, 200f),
                                     onValueChange = { histDraft = it },
                                     onValueChangeFinished = { scope.launch { viewModel.prefsStore.updateContextModify(cfg.copy(historyLimit = histDraft.toInt())) } },
-                                    valueRange = 2f..64f,
+                                    valueRange = 4f..200f,
                                 )
 
                                 HorizontalDivider(color = visuals.subtleBorder, modifier = Modifier.padding(vertical = 8.dp))
@@ -672,7 +696,7 @@ fun SettingsScreen(
                                     onClick = {
                                         scope.launch {
                                             viewModel.prefsStore.updateAgentWorkspace(workspaceDraft, prompted = true)
-                                            viewModel.showBanner("Agent workspace updated.")
+                                            viewModel.showSettingsFeedback("Agent workspace path saved.")
                                         }
                                     },
                                     shape = RoundedCornerShape(10.dp),
@@ -786,7 +810,7 @@ fun SettingsScreen(
                                             Column {
                                                 Text("Cloud Storage Manager", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
                                                 Text(
-                                                    text = "${String.format(Locale.US, "%.1f", usedBytes / 1024.0)} KB / ${String.format(Locale.US, "%.1f", quotaBytes / 1024.0)} KB (0.01% Spark)",
+                                                    text = "${String.format(Locale.US, "%.1f", usedBytes / 1024.0)} KB / ${String.format(Locale.US, "%.1f", quotaBytes / 1024.0)} KB (${String.format(Locale.US, "%.1f", pct * 100f)}% Used)",
                                                     style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
                                                     color = if (pct > 0.85f) CelDangerRed else CelEmeraldThought,
                                                 )
@@ -853,6 +877,56 @@ fun SettingsScreen(
                                 }
                             }
                         }
+
+                        // Permanently Locked Sync Images toggle (Cellium+)
+                        item {
+                            GlassCard(shape = RoundedCornerShape(22.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(CelAmber.copy(alpha = 0.16f)),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Icon(Icons.Rounded.Lock, contentDescription = "Locked", tint = CelAmber, modifier = Modifier.size(18.dp))
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            Text("Sync Images", style = MaterialTheme.typography.titleSmall, color = CelTextPrimary)
+                                            Surface(
+                                                color = CelAmber.copy(alpha = 0.18f),
+                                                shape = RoundedCornerShape(6.dp),
+                                            ) {
+                                                Text(
+                                                    text = "Cellium+",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                                                    color = CelAmber,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = "Images stay local on your phone to protect cloud space. Coming soon with Cellium+.",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = CelTextMuted,
+                                        )
+                                    }
+                                    Switch(
+                                        checked = false,
+                                        onCheckedChange = null,
+                                        enabled = false,
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     SettingsCategory.SYSTEM -> {
@@ -908,7 +982,7 @@ fun SettingsScreen(
                                         granted = micGranted,
                                         onClick = {
                                             if (!micGranted) micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                            else viewModel.showBanner("Microphone permission already granted.")
+                                            else viewModel.showSettingsFeedback("Microphone permission already granted.")
                                         },
                                         testTag = "perm_mic_btn",
                                     )
@@ -1264,6 +1338,44 @@ private fun PermissionShortcutRow(
                 softWrap = false,
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
             )
+        }
+    }
+}
+
+@Composable
+private fun SettingsFeedbackBanner(
+    message: String,
+    isError: Boolean,
+    onDismiss: () -> Unit,
+) {
+    val accent = if (isError) CelDangerRed else CelEmeraldThought
+    Surface(
+        color = accent.copy(alpha = 0.18f),
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.55f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = CelTextPrimary,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier.size(26.dp),
+            ) {
+                Icon(Icons.Rounded.Close, contentDescription = "Dismiss", tint = accent, modifier = Modifier.size(16.dp))
+            }
         }
     }
 }

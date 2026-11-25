@@ -14,8 +14,8 @@ android {
         applicationId = "CelSuite.HenryJayz.Cellium"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "v2611.24.0"
+        versionCode = 7
+        versionName = "v2611.25.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

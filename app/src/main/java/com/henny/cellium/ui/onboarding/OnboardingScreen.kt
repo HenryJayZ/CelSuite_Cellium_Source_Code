@@ -788,6 +788,15 @@ private fun StartupProviderStep(
                 Text("Save & Launch Cel.Cellium", fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
             }
         }
+
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "Tip: Cel.Cellium was most thoroughly tested with Google Gemini models.",
+            style = MaterialTheme.typography.labelSmall,
+            color = CelTextMuted.copy(alpha = 0.78f),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 
     if (showCatalogSheet) {
