@@ -1,6 +1,19 @@
 # Preserve Firestore models annotated with @Keep
 -keep @androidx.annotation.Keep class * { *; }
 
+# Preserve Firebase Core, Auth, Firestore & gRPC/Protobuf transport (CRITICAL for release Cloud Sync!)
+-keep class com.google.firebase.** { *; }
+-keep interface com.google.firebase.** { *; }
+-keep class com.google.firestore.** { *; }
+-keep class io.grpc.** { *; }
+-keep class com.google.protobuf.** { *; }
+-keep class com.google.android.gms.** { *; }
+-dontwarn com.google.firebase.**
+-dontwarn com.google.firestore.**
+-dontwarn io.grpc.**
+-dontwarn com.google.protobuf.**
+-dontwarn com.google.android.gms.**
+
 # Preserve Llamatik (llama.cpp JNI + reflection bridge)
 -keep class com.llamatik.** { *; }
 -keep interface com.llamatik.** { *; }
@@ -10,6 +23,10 @@
 -keep class com.google.mediapipe.** { *; }
 -dontwarn com.google.mediapipe.**
 
+# Preserve LiteRT / TensorFlow Lite (openWakeWord)
+-keep class org.tensorflow.lite.** { *; }
+-dontwarn org.tensorflow.lite.**
+
 # Preserve Shizuku AIDL & UserService
 -keep class rikka.shizuku.** { *; }
 -keep class com.henny.cellium.shizuku.** { *; }
@@ -17,7 +34,7 @@
 -dontwarn rikka.shizuku.**
 
 # Preserve Kotlinx Serialization & Backup/Data models
--keepattributes *Annotation*, InnerClasses
+-keepattributes *Annotation*, InnerClasses, Signature
 -dontnote kotlinx.serialization.AnnotationsKt
 -keepclassmembers class kotlinx.serialization.json.** {
     *** Companion;
@@ -34,11 +51,10 @@
 }
 -keep class com.henny.cellium.data.** { *; }
 
-# Preserve Jetpack CredentialManager & Google Sign-In (prevents R8 stripping reflection-loaded providers in release APKs!)
+# Preserve Jetpack CredentialManager & Google Sign-In
 -keep class androidx.credentials.** { *; }
 -keep interface androidx.credentials.** { *; }
 -keep class com.google.android.libraries.identity.googleid.** { *; }
--keep class com.google.firebase.auth.** { *; }
 -keep class com.google.android.gms.auth.** { *; }
 -dontwarn androidx.credentials.**
 -dontwarn com.google.android.libraries.identity.googleid.**

@@ -132,6 +132,56 @@ class CelliumSttEngine(context: Context) {
             ),
             ENGINE_POLLINATIONS to listOf("openai-audio"),
         )
+
+        private val WHISPER_SILENCE_HALLUCINATIONS = setOf(
+            "you",
+            "thank you",
+            "thanks",
+            "thanks for watching",
+            "thank you for watching",
+            "bye",
+            "bye bye",
+            "goodbye",
+            "mbc",
+            "subtitles by",
+            "amara org",
+            "um",
+            "uh",
+            "hmm",
+            "hm",
+            "oh",
+            "ah",
+            "okay",
+            "ok",
+            "silence",
+            "music",
+            "applause",
+            "laughter",
+        )
+
+        /**
+         * Filters out accidental STT noise outputs like ".", "...", punctuation-only artifacts,
+         * and classic Whisper silence hallucinations on very short bursts so they never get posted to chat.
+         */
+        fun sanitizeTranscript(raw: String, speechDurationMs: Long = 2000L): String {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return ""
+            val alphaNumOnly = trimmed.filter { it.isLetterOrDigit() }
+            if (alphaNumOnly.isEmpty()) return ""
+            val normalized = trimmed
+                .lowercase()
+                .replace(Regex("[^a-z0-9\\s]"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (normalized.isEmpty()) return ""
+            if (speechDurationMs < 1100L && normalized in WHISPER_SILENCE_HALLUCINATIONS) {
+                return ""
+            }
+            if (normalized.startsWith("subtitles by") || normalized.startsWith("transcribed by") || normalized.contains("amara.org")) {
+                return ""
+            }
+            return trimmed
+        }
     }
 
     fun requestStopRecording() {
@@ -336,6 +386,8 @@ class CelliumSttEngine(context: Context) {
         val pcmOut = ByteArrayOutputStream()
         val buf = ShortArray(1024)
         var speechDetected = false
+        var speechStartMs = 0L
+        var consecutiveSpeechFrames = 0
         var lastSpeechMs = System.currentTimeMillis()
         val startMs = System.currentTimeMillis()
         var lastReportedSec = -1
@@ -383,15 +435,22 @@ class CelliumSttEngine(context: Context) {
                             ambientRms = (ambientRms * 0.96f + rms.coerceIn(60f, 650f) * 0.04f)
                         }
 
-                        val onsetThreshold = maxOf(310f, ambientRms * 2.10f)
-                        val holdThreshold = maxOf(195f, ambientRms * 1.42f)
+                        val onsetThreshold = maxOf(340f, ambientRms * 2.25f)
+                        val holdThreshold = maxOf(210f, ambientRms * 1.45f)
 
                         if (!speechDetected) {
                             if (rms >= onsetThreshold) {
-                                speechDetected = true
-                                lastSpeechMs = now
-                            } else if (now - startMs >= preSpeechTimeoutMs) {
-                                break
+                                consecutiveSpeechFrames++
+                                if (consecutiveSpeechFrames >= 3) {
+                                    speechDetected = true
+                                    speechStartMs = now
+                                    lastSpeechMs = now
+                                }
+                            } else {
+                                consecutiveSpeechFrames = 0
+                                if (now - startMs >= preSpeechTimeoutMs) {
+                                    break
+                                }
                             }
                         } else {
                             if (rms >= holdThreshold) {
@@ -425,9 +484,11 @@ class CelliumSttEngine(context: Context) {
             return@withContext Result.success("")
         }
 
+        val speechDurationMs = if (speechStartMs > 0L) (lastSpeechMs - speechStartMs).coerceAtLeast(200L) else 2000L
         withContext(Dispatchers.Main) { onTranscribing() }
         val wavBytes = wrapPcmAsWav(pcmBytes, sampleRate)
         transcribeWav(engineId, apiKey.trim(), modelOverride.trim(), wavBytes, onModelAutoSelected)
+            .map { raw -> sanitizeTranscript(raw, speechDurationMs) }
     }
 
     private fun transcribeWav(

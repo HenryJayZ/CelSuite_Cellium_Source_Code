@@ -1,7 +1,9 @@
 package com.henny.cellium.ai
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.util.Base64
+import java.io.File
 import com.henny.cellium.avatar.AVATAR_MOODS
 import com.henny.cellium.avatar.MoodDetector
 import com.henny.cellium.core.ContextModifyConfig
@@ -72,6 +74,7 @@ class UniversalLlmClient {
         moodMethod: String = "inline_tag",
         contextConfig: ContextModifyConfig = ContextModifyConfig(),
         extraInstruction: String = "",
+        includeDeviceActions: Boolean = false,
     ): String = buildString {
         if (contextConfig.includePersona && persona.systemPrompt.isNotBlank()) {
             append(persona.systemPrompt.trim())
@@ -97,6 +100,9 @@ class UniversalLlmClient {
             append("NEVER invent any other mood word. Put your normal reply on line 2.")
         }
 
+        append("\n\n[Conversation Vision Memory]\n")
+        append("Recent images in this conversation — including images YOU generated with Illume or fetched earlier — are automatically attached to your visual input. Never say you cannot see images you just generated.")
+
         if (contextConfig.includeIllumeInstructions) {
             append("\n\n[Illume Built-In Image Generator & Keyless Web Tools — ACTIVE]\n")
             append("1. AI Image Generation: You HAVE a built-in image generator! Whenever the user asks you to generate, draw, paint, create, make, or render images/art/pictures, emit up to 5 separate blocks placed INLINE right where each image belongs in your explanation (no code fences):\n")
@@ -108,8 +114,27 @@ class UniversalLlmClient {
             append("[WEB_IMAGE]<simple photo subject keywords>[/WEB_IMAGE]")
         }
 
+        if (includeDeviceActions) {
+            append("\n\n[Native Android Device Actions — Quiet Assistant Agent]\n")
+            append("You can directly control Android without Shizuku! When the user asks for the current time/date, battery/device status, to open an app, list apps, set an alarm or timer, turn flashlight on/off, adjust volume, open a URL, dial a number, or search the web, output ONLY one raw block (no intro text, no markdown fences) and wait silently for the result:\n")
+            append("[DEVICE_ACTION]{\"action\":\"get_time\"}[/DEVICE_ACTION]\n")
+            append("Available JSON actions:\n")
+            append("- {\"action\":\"get_time\"}\n")
+            append("- {\"action\":\"get_device_status\"}\n")
+            append("- {\"action\":\"open_app\",\"app\":\"Spotify\"}\n")
+            append("- {\"action\":\"list_apps\",\"query\":\"camera\"}\n")
+            append("- {\"action\":\"set_alarm\",\"hour\":7,\"minute\":30,\"message\":\"Wake up\"}\n")
+            append("- {\"action\":\"set_timer\",\"seconds\":300,\"message\":\"Pasta\"}\n")
+            append("- {\"action\":\"flashlight\",\"on\":true}\n")
+            append("- {\"action\":\"set_volume\",\"stream\":\"media\",\"percent\":60}\n")
+            append("- {\"action\":\"open_url\",\"url\":\"https://example.com\"}\n")
+            append("- {\"action\":\"dial\",\"number\":\"5551234\"}\n")
+            append("- {\"action\":\"web_search\",\"query\":\"weather today\"}\n")
+            append("After Cellium returns [DEVICE_ACTION_RESULT], reply naturally in spoken style.")
+        }
+
         if (agentModeEnabled && contextConfig.includeAgentInstructions) {
-            append("\n\n[Cel.Cellium Android Agent Mode]\n")
+            append("\n\n[Cel.Cellium Android Agent Mode & Multi-Image File Vision]\n")
             append("Project Workspace Directory: $agentWorkspacePath\n")
             append(
                 if (shizukuConnected) {
@@ -117,13 +142,18 @@ class UniversalLlmClient {
                         "1. Output ONLY a single raw tool block and NOTHING ELSE (no intro sentence, no markdown ``` fences, no comments):\n" +
                         "[SHIZUKU_RUN]\n<single shell command>\n[/SHIZUKU_RUN]\n" +
                         "2. Cellium executes it immediately and sends stdout back to you so you can then give the final answer.\n" +
-                        "3. For project files, work inside $agentWorkspacePath. Never emit destructive commands."
+                        "3. For project files, work inside $agentWorkspacePath. Never emit destructive commands.\n"
                 } else {
                     "Local Android Shell IS ACTIVE (Shizuku is NOT connected, so privileged ADB commands like pm/am/dumpsys/settings are unavailable, but normal shell commands like ls, cat, pwd, mkdir, cp, mv, find, grep, wc, sed, head, tail, df, uname, date, sh scripts, and inspecting files inside the workspace work right away!).\n" +
                         "1. To run a normal shell command, output ONLY a single raw tool block and NOTHING ELSE (no markdown ``` fences):\n" +
                         "[SHIZUKU_RUN]\n<single shell command>\n[/SHIZUKU_RUN]\n" +
-                        "2. If the user specifically needs privileged Android system commands (pm, am, dumpsys, settings), tell them in 1 sentence to authorize Shizuku in Settings -> Agent & Shizuku."
+                        "2. If the user specifically needs privileged Android system commands (pm, am, dumpsys, settings), tell them in 1 sentence to authorize Shizuku in Settings -> Agent & Shizuku.\n"
                 }
+            )
+            append(
+                "4. DIRECT MULTI-IMAGE INSPECTION (OpenCode / Antigravity style): Whenever the user wants you to literally view, look at, inspect, or compare one or multiple image files on device storage (e.g. .png, .jpg, .jpeg, .webp paths you found via ls/find or provided by the user), NEVER hesitate or say you can only read filenames! Immediately output ONLY:\n" +
+                    "[VIEW_IMAGE]\n/full/path/to/image1.png\n/full/path/to/image2.jpg\n[/VIEW_IMAGE]\n" +
+                    "Cellium loads up to 5 images at once (via normal storage or Shizuku) and sends the real pixels directly to your vision so you can examine them thoroughly!"
             )
         }
 
@@ -511,6 +541,7 @@ class UniversalLlmClient {
         userPrompt: String,
         images: List<Bitmap>,
     ): Flow<StreamChunk> = flow {
+        val historyImages = collectRecentHistoryImages(history, maxImages = 4)
         val messagesJson = buildJsonArray {
             if (systemPrompt.isNotBlank()) {
                 add(buildJsonObject {
@@ -524,9 +555,9 @@ class UniversalLlmClient {
                     if (msg.attachmentFileName.isNotBlank() && msg.attachmentFileContent.isNotBlank()) {
                         append("[File: ${msg.attachmentFileName}]\n${msg.attachmentFileContent.take(3000)}\n\n")
                     }
-                    append(msg.content)
+                    append(cleanInlineImgMarkersForTextHistory(msg.content))
                     if (msg.toolCommand.isNotBlank() && msg.toolOutput.isNotBlank()) {
-                        append("\n[Shizuku Command Output for `${msg.toolCommand}`]:\n${msg.toolOutput.take(2500)}")
+                        append("\n[Command Output for `${msg.toolCommand}`]:\n${msg.toolOutput.take(2500)}")
                     }
                 }.trim()
                 if (text.isNotEmpty()) {
@@ -536,14 +567,36 @@ class UniversalLlmClient {
                     })
                 }
             }
-            if (images.isNotEmpty()) {
+            val totalVisuals = historyImages.size + images.size
+            if (totalVisuals > 0) {
+                val promptWithVisualGuide = buildString {
+                    if (historyImages.isNotEmpty()) {
+                        append("[Recent conversation images attached in order for your vision: ")
+                        append(historyImages.mapIndexed { i, (label, _) -> "${i + 1}) $label" }.joinToString("; "))
+                        if (images.isNotEmpty()) {
+                            append("; followed by ${images.size} newly attached image(s) from the user")
+                        }
+                        append("]\n\n")
+                    }
+                    append(userPrompt.ifBlank { "Describe these images in detail." })
+                }
                 add(buildJsonObject {
                     put("role", "user")
                     put("content", buildJsonArray {
                         add(buildJsonObject {
                             put("type", "text")
-                            put("text", userPrompt.ifBlank { "Describe these images in detail." })
+                            put("text", promptWithVisualGuide)
                         })
+                        historyImages.forEach { (_, bmp) ->
+                            val b64 = bitmapToBase64Jpeg(bmp)
+                            bmp.recycle()
+                            add(buildJsonObject {
+                                put("type", "image_url")
+                                put("image_url", buildJsonObject {
+                                    put("url", "data:image/jpeg;base64,$b64")
+                                })
+                            })
+                        }
                         images.forEach { bmp ->
                             val b64 = bitmapToBase64Jpeg(bmp)
                             add(buildJsonObject {
@@ -633,10 +686,11 @@ class UniversalLlmClient {
         userPrompt: String,
         images: List<Bitmap>,
     ): Flow<StreamChunk> = flow {
+        val historyImages = collectRecentHistoryImages(history, maxImages = 4)
         val messagesJson = buildJsonArray {
             history.forEach { msg ->
                 val role = if (msg.role == "assistant") "assistant" else "user"
-                val text = msg.content.trim()
+                val text = cleanInlineImgMarkersForTextHistory(msg.content).trim()
                 if (text.isNotEmpty()) {
                     add(buildJsonObject {
                         put("role", role)
@@ -644,10 +698,34 @@ class UniversalLlmClient {
                     })
                 }
             }
-            if (images.isNotEmpty()) {
+            val totalVisuals = historyImages.size + images.size
+            if (totalVisuals > 0) {
+                val promptWithVisualGuide = buildString {
+                    if (historyImages.isNotEmpty()) {
+                        append("[Recent conversation images attached in order for your vision: ")
+                        append(historyImages.mapIndexed { i, (label, _) -> "${i + 1}) $label" }.joinToString("; "))
+                        if (images.isNotEmpty()) {
+                            append("; followed by ${images.size} newly attached image(s) from the user")
+                        }
+                        append("]\n\n")
+                    }
+                    append(userPrompt.ifBlank { "Describe these images." })
+                }
                 add(buildJsonObject {
                     put("role", "user")
                     put("content", buildJsonArray {
+                        historyImages.forEach { (_, bmp) ->
+                            val b64 = bitmapToBase64Jpeg(bmp)
+                            bmp.recycle()
+                            add(buildJsonObject {
+                                put("type", "image")
+                                put("source", buildJsonObject {
+                                    put("type", "base64")
+                                    put("media_type", "image/jpeg")
+                                    put("data", b64)
+                                })
+                            })
+                        }
                         images.forEach { bmp ->
                             val b64 = bitmapToBase64Jpeg(bmp)
                             add(buildJsonObject {
@@ -661,7 +739,7 @@ class UniversalLlmClient {
                         }
                         add(buildJsonObject {
                             put("type", "text")
-                            put("text", userPrompt.ifBlank { "Describe these images." })
+                            put("text", promptWithVisualGuide)
                         })
                     })
                 })
@@ -749,6 +827,66 @@ class UniversalLlmClient {
         return (msg ?: body).take(260).ifBlank { "Request rejected by provider" }
     }
 
+    private fun cleanInlineImgMarkersForTextHistory(content: String): String =
+        INLINE_IMG_MARKER_REGEX.replace(content) { match ->
+            val name = File(match.groupValues[1].trim()).name.ifBlank { "image" }
+            "[Image shown: $name]"
+        }
+
+    /**
+     * Collects up to [maxImages] recent images from conversation history (both assistant-generated
+     * [[CELLIUM_IMG:...]] / attachmentPath images and user-sent attachmentPath images) so Cel
+     * literally sees images she generated earlier or discussed in recent turns!
+     */
+    private fun collectRecentHistoryImages(
+        history: List<MessageEntity>,
+        maxImages: Int = 4,
+    ): List<Pair<String, Bitmap>> {
+        if (history.isEmpty() || maxImages <= 0) return emptyList()
+        val found = ArrayList<Pair<String, File>>()
+        val seenPaths = HashSet<String>()
+        val window = history.takeLast(6)
+        for (msg in window.asReversed()) {
+            if (found.size >= maxImages) break
+            val roleLabel = if (msg.role == "assistant") "Image you generated/sent earlier" else "Image user sent earlier"
+            val paths = mutableListOf<String>()
+            if (msg.attachmentPath.isNotBlank()) {
+                msg.attachmentPath.split("\n").map { it.trim() }.filter { it.isNotBlank() }.forEach { paths.add(it) }
+            }
+            INLINE_IMG_MARKER_REGEX.findAll(msg.content).forEach { m ->
+                val p = m.groupValues[1].trim()
+                if (p.isNotBlank()) paths.add(p)
+            }
+            for (p in paths.asReversed()) {
+                if (found.size >= maxImages) break
+                if (seenPaths.add(p)) {
+                    val f = File(p)
+                    if (f.exists() && f.isFile && f.length() > 64L) {
+                        found.add("$roleLabel (${f.name})" to f)
+                    }
+                }
+            }
+        }
+        val decoded = ArrayList<Pair<String, Bitmap>>(found.size)
+        for ((label, file) in found.asReversed()) {
+            val bmp = decodeScaledBitmapSafe(file, maxSide = 896)
+            if (bmp != null) decoded.add(label to bmp)
+        }
+        return decoded
+    }
+
+    private fun decodeScaledBitmapSafe(file: File, maxSide: Int = 896): Bitmap? = runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val w = bounds.outWidth
+        val h = bounds.outHeight
+        if (w <= 0 || h <= 0) return@runCatching null
+        var sample = 1
+        while (w / sample > maxSide * 2 || h / sample > maxSide * 2) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        BitmapFactory.decodeFile(file.absolutePath, opts)
+    }.getOrNull()
+
     private fun bitmapToBase64Jpeg(bitmap: Bitmap): String {
         val maxSide = 1024
         val scale = minOf(maxSide.toFloat() / bitmap.width, maxSide.toFloat() / bitmap.height, 1f)
@@ -762,10 +900,16 @@ class UniversalLlmClient {
         } else bitmap
         val out = ByteArrayOutputStream()
         target.compress(Bitmap.CompressFormat.JPEG, 80, out)
+        if (target !== bitmap) target.recycle()
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
     companion object {
+        private val INLINE_IMG_MARKER_REGEX = Regex("""\[\[CELLIUM_IMG:([^\]]+)]]""")
+        private val VIEW_IMAGE_REGEX = Regex(
+            """(?:```[a-zA-Z]*\s*)?\[VIEW_IMAGE]([\s\S]*?)\[/VIEW_IMAGE](?:\s*```)?""",
+            RegexOption.IGNORE_CASE,
+        )
         private val ILLUME_BLOCK_REGEX = Regex(
             """(?:```[a-zA-Z]*\s*)?\[(?:ILLUME_GEN|ILLUME|IMAGE_GEN|IMAGINE)]([\s\S]*?)\[/(?:ILLUME_GEN|ILLUME|IMAGE_GEN|IMAGINE)](?:\s*```)?""",
             RegexOption.IGNORE_CASE,
@@ -786,6 +930,22 @@ class UniversalLlmClient {
             """(?:```[a-zA-Z]*\s*)?\[WEB_IMAGE]([\s\S]*?)\[/WEB_IMAGE](?:\s*```)?""",
             RegexOption.IGNORE_CASE,
         )
+
+        /**
+         * Extracts 1..[maxCount] local image paths requested by Cel via [VIEW_IMAGE]...[/VIEW_IMAGE].
+         */
+        fun extractViewImagePaths(raw: String, maxCount: Int = 5): Pair<List<String>, String> {
+            val paths = LinkedHashSet<String>()
+            val cleaned = VIEW_IMAGE_REGEX.replace(raw) { match ->
+                match.groupValues[1]
+                    .split("\n", ",")
+                    .map { it.trim().trim('`', '"', '\'') }
+                    .filter { it.isNotBlank() }
+                    .forEach { p -> if (paths.size < maxCount) paths.add(p) }
+                ""
+            }.trim()
+            return paths.toList() to cleaned
+        }
 
         /**
          * Extracts up to [maxCount] inline [ILLUME_GEN] prompts, replacing each one in-place with

@@ -11,14 +11,17 @@ import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 
 private const val TAG = "WakeWordEngine"
+private const val CHUNK_SAMPLES = 1280       // 80ms @ 16kHz
+private const val OVERLAP_SAMPLES = 480      // 160 * 3 overlap required by openWakeWord melspectrogram STFT
+private const val MEL_INPUT_SAMPLES = CHUNK_SAMPLES + OVERLAP_SAMPLES // 1760 samples -> 8 mel frames
 
 /**
- * 3-stage openWakeWord LiteRT (TFLite) inference pipeline for "Okay Cel":
- *   Stage 1: melspectrogram.tflite   [1, 1280] -> [1, 1, 5, 32] (norm = raw / 10 + 2)
- *   Stage 2: embedding_model.tflite  [1, 76, 32, 1] -> [1, 1, 1, 96] (sliding by 8 frames)
+ * Exact 3-stage openWakeWord LiteRT (TFLite) inference pipeline for "Okay Cel":
+ *   Stage 1: melspectrogram.tflite   [1, 1760] (480 overlap + 1280 chunk) -> [1, 1, 8, 32] (norm = raw / 10 + 2)
+ *   Stage 2: embedding_model.tflite  [1, 76, 32, 1] -> [1, 1, 1, 96] (1 embedding per 8 mel frames = 80ms)
  *   Stage 3: oh_kay_sell.tflite      [1, 16, 96] -> [1, 1] (confidence 0..1)
  *
- * Pre-allocates all input/output buffers so the 80ms real-time audio loop performs zero GC churn.
+ * Pre-allocates all buffers so the 80ms real-time audio loop produces zero heap churn.
  */
 class WakeWordEngine(
     private val context: Context,
@@ -35,10 +38,15 @@ class WakeWordEngine(
     private var embRing = Array(16) { FloatArray(96) }
     private var embFramesFilled = 0
     private var wakeInputFrames = 16
+    private var melOutputFrameCount = 8
+
+    // 480-sample overlap ring carrying tail of previous 80ms chunk into next melspectrogram call
+    private val prevOverlap = ShortArray(OVERLAP_SAMPLES)
+    private var hasOverlap = false
 
     // Pre-allocated inference buffers
-    private val melInput = Array(1) { FloatArray(1280) }
-    private val melOutput = Array(1) { Array(1) { Array(5) { FloatArray(32) } } }
+    private val melInput = Array(1) { FloatArray(MEL_INPUT_SAMPLES) }
+    private var melOutput = Array(1) { Array(1) { Array(8) { FloatArray(32) } } }
     private val embInput = Array(1) { Array(76) { Array(32) { FloatArray(1) } } }
     private val embOutput = Array(1) { Array(1) { Array(1) { FloatArray(96) } } }
     private lateinit var wakeInput: Array<Array<FloatArray>>
@@ -53,7 +61,16 @@ class WakeWordEngine(
             val opts = Interpreter.Options().apply {
                 setNumThreads(2)
             }
-            melInterpreter = Interpreter(loadAssetBuffer("melspectrogram.tflite"), opts)
+            val mInterp = Interpreter(loadAssetBuffer("melspectrogram.tflite"), opts)
+            // Resize melspectrogram input to [1, 1760] matching official openWakeWord (1280 + 480 overlap)
+            mInterp.resizeInput(0, intArrayOf(1, MEL_INPUT_SAMPLES))
+            mInterp.allocateTensors()
+            val melOutShape = mInterp.getOutputTensor(0).shape()
+            melOutputFrameCount = if (melOutShape.size >= 3 && melOutShape[2] in 1..32) melOutShape[2] else 8
+            val melBins = if (melOutShape.size >= 4 && melOutShape[3] in 16..128) melOutShape[3] else 32
+            melOutput = Array(1) { Array(1) { Array(melOutputFrameCount) { FloatArray(melBins) } } }
+            melInterpreter = mInterp
+
             embInterpreter = Interpreter(loadAssetBuffer("embedding_model.tflite"), opts)
 
             val wakeBuf = if (customModelPath.isNotBlank() && File(customModelPath).exists()) {
@@ -64,7 +81,6 @@ class WakeWordEngine(
             val wInterp = Interpreter(wakeBuf, opts)
             wakeInterpreter = wInterp
 
-            // Dynamically inspect classifier input shape (default [1, 16, 96])
             val inShape = wInterp.getInputTensor(0).shape()
             wakeInputFrames = if (inShape.size >= 2 && inShape[1] in 1..64) inShape[1] else 16
             val embDim = if (inShape.size >= 3 && inShape[2] in 16..512) inShape[2] else 96
@@ -84,43 +100,59 @@ class WakeWordEngine(
         melFramesAccumulated = 0
         melFramesSinceLastEmb = 0
         embFramesFilled = 0
+        hasOverlap = false
+        prevOverlap.fill(0)
         melRing.forEach { it.fill(0f) }
         embRing.forEach { it.fill(0f) }
     }
 
     /**
-     * Feeds one 80ms chunk (1280 samples @ 16kHz PCM16) and returns wake-word score [0..1].
+     * Feeds one 80ms chunk (1280 samples @ 16kHz PCM16) with exact 480-sample overlap
+     * and returns wake-word confidence score in [0..1].
      */
     fun processChunk(pcm16: ShortArray): Float {
-        if (!ready || pcm16.size < 1280) return 0f
+        if (!ready || pcm16.size < CHUNK_SAMPLES) return 0f
         val mel = melInterpreter ?: return 0f
         val emb = embInterpreter ?: return 0f
         val wake = wakeInterpreter ?: return 0f
 
-        // 1. Copy PCM shorts as float (-32768..32767) per openWakeWord specification
+        // 1. Build 1760-sample overlapped frame: [480 previous tail] + [1280 current chunk]
         val inBuf = melInput[0]
-        for (i in 0 until 1280) {
-            inBuf[i] = pcm16[i].toFloat()
+        if (hasOverlap) {
+            for (i in 0 until OVERLAP_SAMPLES) {
+                inBuf[i] = prevOverlap[i].toFloat()
+            }
+        } else {
+            for (i in 0 until OVERLAP_SAMPLES) {
+                inBuf[i] = 0f
+            }
         }
+        for (i in 0 until CHUNK_SAMPLES) {
+            inBuf[OVERLAP_SAMPLES + i] = pcm16[i].toFloat()
+        }
+        // Save tail 480 samples for the next chunk
+        System.arraycopy(pcm16, CHUNK_SAMPLES - OVERLAP_SAMPLES, prevOverlap, 0, OVERLAP_SAMPLES)
+        hasOverlap = true
 
-        // 2. Run melspectrogram stage -> 5 frames of 32 mel bins
+        // 2. Run melspectrogram stage -> 8 frames of 32 mel bins per 80ms chunk
         mel.run(melInput, melOutput)
         val newFrames = melOutput[0][0]
         var maxScore = 0f
 
-        for (f in 0 until 5) {
-            // Shift melRing left by 1
+        for (f in 0 until melOutputFrameCount) {
             val recycled = melRing[0]
             System.arraycopy(melRing, 1, melRing, 0, 75)
             melRing[75] = recycled
-            for (b in 0 until 32) {
+            val srcRow = newFrames[f]
+            val binCount = minOf(32, srcRow.size)
+            for (b in 0 until binCount) {
                 // openWakeWord normalization: x / 10 + 2
-                recycled[b] = newFrames[f][b] / 10.0f + 2.0f
+                recycled[b] = srcRow[b] / 10.0f + 2.0f
             }
             melFramesAccumulated = (melFramesAccumulated + 1).coerceAtMost(76)
             melFramesSinceLastEmb++
 
-            // Frame-exact 8-frame sliding stride matching openWakeWord reference implementation!
+            // Frame-exact 8-frame sliding stride matching official openWakeWord reference!
             if (melFramesAccumulated >= 76 && melFramesSinceLastEmb >= 8) {
                 melFramesSinceLastEmb -= 8
 
@@ -136,7 +168,6 @@ class WakeWordEngine(
                 emb.run(embInput, embOutput)
                 val vec = embOutput[0][0][0]
 
-                // Shift embRing left by 1
                 val recycledEmb = embRing[0]
                 System.arraycopy(embRing, 1, embRing, 0, wakeInputFrames - 1)
                 embRing[wakeInputFrames - 1] = recycledEmb

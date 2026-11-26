@@ -98,19 +98,29 @@ data class CelliumPreferences(
     val hiddenProviderIds: Set<String> = emptySet(),
     val starredModelsJson: String = "[]",
 
-    // Voice, TTS, STT, Typing Speed, SFX, Haptics & Wake Word
+    // Voice, TTS, STT, Typing Speed, SFX, Haptics, Start-up Sound & Wake Word
     val soundsEnabled: Boolean = true,
     val animaleseEnabled: Boolean = true,
-    val typingSoundStyle: String = "animal_crossing", // "animal_crossing" (Cozy Chatter) or "scratchin_melodii" (Groove Synth)
-    val typingSoundPitch: Float = 1.0f, // 0.55f..1.45f
+    val typingSoundStyle: String = "scratchin_melodii", // "scratchin_melodii" (Groove Synth default) or "animal_crossing" (Cozy Chatter)
+    val typingSoundPitch: Float = 1.0f, // 0.25f..2.50f
     val typingSoundCadence: String = "word", // "word" or "letter"
     val typingSpeed: String = "medium", // "super_slow", "slow", "medium", "fast", "very_fast", "instant"
     val hapticsEnabled: Boolean = true,
     val sfxVolume: Float = 0.80f,
-    val ttsEngine: String = "edge", // "edge", "google", "system"
-    val ttsVoiceName: String = "en-US-AriaNeural",
-    val ttsPitch: Float = 1.06f,
-    val ttsSpeechRate: Float = 1.04f,
+    // Normal Chat Voice (Speaker button / Auto-read in Chat)
+    val ttsEngine: String = "synth", // "synth", "edge", "polly", "tiktok", "google", "system"
+    val ttsVoiceName: String = "synth:groove_synth",
+    val ttsPitch: Float = 1.0f, // 0.25f..2.50f
+    val ttsSpeechRate: Float = 1.04f, // 0.50f..2.20f
+    // Live Mode, Floating Cel & Assistant Pop-up Voice
+    val liveTtsEngine: String = "synth",
+    val liveTtsVoiceName: String = "synth:groove_synth",
+    val liveTtsPitch: Float = 1.0f, // 0.25f..2.50f
+    val liveTtsSpeechRate: Float = 1.04f, // 0.50f..2.20f
+    // Customizable Assistant Start-up Sound (22 presets + custom audio + deletable presets)
+    val startupSoundId: String = "soft_celesta",
+    val startupSoundCustomPath: String = "",
+    val deletedStartupSoundIds: Set<String> = emptySet(),
     val sttEngine: String = "device", // "device", "groq_whisper", "pollinations_audio", "openai_whisper", "huggingface_whisper"
     val sttApiKey: String = "",
     val sttModel: String = "",
@@ -118,7 +128,8 @@ data class CelliumPreferences(
     val liveHandsFreeLoop: Boolean = true,
     val wakeWordEnabled: Boolean = false,
     val wakeWordCustomPath: String = "",
-    val wakeWordSensitivity: Float = 0.38f,
+    val wakeWordSensitivity: Float = 0.25f,
+    val wakeWordScreenOnOnly: Boolean = true,
 
     // Locked Chats Vault & Sync Timestamp
     val vaultPinHash: String = "",
@@ -211,6 +222,13 @@ class PreferencesStore(context: Context) {
         val TTS_VOICE = stringPreferencesKey("tts_voice")
         val TTS_PITCH = floatPreferencesKey("tts_pitch")
         val TTS_RATE = floatPreferencesKey("tts_rate")
+        val LIVE_TTS_ENGINE = stringPreferencesKey("live_tts_engine")
+        val LIVE_TTS_VOICE = stringPreferencesKey("live_tts_voice")
+        val LIVE_TTS_PITCH = floatPreferencesKey("live_tts_pitch")
+        val LIVE_TTS_RATE = floatPreferencesKey("live_tts_rate")
+        val STARTUP_SOUND_ID = stringPreferencesKey("startup_sound_id")
+        val STARTUP_SOUND_CUSTOM_PATH = stringPreferencesKey("startup_sound_custom_path")
+        val DELETED_STARTUP_SOUND_IDS = stringSetPreferencesKey("deleted_startup_sound_ids")
         val STT_ENGINE = stringPreferencesKey("stt_engine")
         val STT_API_KEY = stringPreferencesKey("stt_api_key")
         val STT_MODEL = stringPreferencesKey("stt_model")
@@ -219,6 +237,7 @@ class PreferencesStore(context: Context) {
         val WAKE_WORD_ENABLED = booleanPreferencesKey("wake_word_enabled")
         val WAKE_WORD_CUSTOM_PATH = stringPreferencesKey("wake_word_custom_path")
         val WAKE_WORD_SENSITIVITY = floatPreferencesKey("wake_word_sensitivity")
+        val WAKE_WORD_SCREEN_ON_ONLY = booleanPreferencesKey("wake_word_screen_on_only")
         val VAULT_PIN_HASH = stringPreferencesKey("vault_pin_hash")
         val PREFS_UPDATED_AT_MS = longPreferencesKey("prefs_updated_at_ms")
         val FLOATING_TIPS_SHOWN = booleanPreferencesKey("floating_tips_shown")
@@ -312,16 +331,23 @@ class PreferencesStore(context: Context) {
             starredModelsJson = p[Keys.STARRED_MODELS_JSON] ?: "[]",
             soundsEnabled = p[Keys.SOUNDS_ENABLED] ?: true,
             animaleseEnabled = p[Keys.ANIMALESE_ENABLED] ?: true,
-            typingSoundStyle = p[Keys.TYPING_SOUND_STYLE] ?: "animal_crossing",
-            typingSoundPitch = (p[Keys.TYPING_SOUND_PITCH] ?: 1.0f).coerceIn(0.55f, 1.45f),
+            typingSoundStyle = p[Keys.TYPING_SOUND_STYLE] ?: "scratchin_melodii",
+            typingSoundPitch = (p[Keys.TYPING_SOUND_PITCH] ?: 1.0f).coerceIn(0.25f, 2.50f),
             typingSoundCadence = p[Keys.TYPING_SOUND_CADENCE] ?: "word",
             typingSpeed = p[Keys.TYPING_SPEED] ?: "medium",
             hapticsEnabled = p[Keys.HAPTICS_ENABLED] ?: true,
             sfxVolume = p[Keys.SFX_VOLUME] ?: 0.80f,
-            ttsEngine = p[Keys.TTS_ENGINE] ?: "edge",
-            ttsVoiceName = p[Keys.TTS_VOICE] ?: "en-US-AriaNeural",
-            ttsPitch = p[Keys.TTS_PITCH] ?: 1.06f,
-            ttsSpeechRate = p[Keys.TTS_RATE] ?: 1.04f,
+            ttsEngine = p[Keys.TTS_ENGINE] ?: "synth",
+            ttsVoiceName = p[Keys.TTS_VOICE] ?: "synth:groove_synth",
+            ttsPitch = (p[Keys.TTS_PITCH] ?: 1.0f).coerceIn(0.25f, 2.50f),
+            ttsSpeechRate = (p[Keys.TTS_RATE] ?: 1.04f).coerceIn(0.50f, 2.20f),
+            liveTtsEngine = p[Keys.LIVE_TTS_ENGINE] ?: (p[Keys.TTS_ENGINE] ?: "synth"),
+            liveTtsVoiceName = p[Keys.LIVE_TTS_VOICE] ?: (p[Keys.TTS_VOICE] ?: "synth:groove_synth"),
+            liveTtsPitch = (p[Keys.LIVE_TTS_PITCH] ?: (p[Keys.TTS_PITCH] ?: 1.0f)).coerceIn(0.25f, 2.50f),
+            liveTtsSpeechRate = (p[Keys.LIVE_TTS_RATE] ?: (p[Keys.TTS_RATE] ?: 1.04f)).coerceIn(0.50f, 2.20f),
+            startupSoundId = p[Keys.STARTUP_SOUND_ID] ?: "soft_celesta",
+            startupSoundCustomPath = p[Keys.STARTUP_SOUND_CUSTOM_PATH] ?: "",
+            deletedStartupSoundIds = p[Keys.DELETED_STARTUP_SOUND_IDS] ?: emptySet(),
             sttEngine = p[Keys.STT_ENGINE] ?: "device",
             sttApiKey = p[Keys.STT_API_KEY] ?: "",
             sttModel = p[Keys.STT_MODEL] ?: "",
@@ -329,7 +355,8 @@ class PreferencesStore(context: Context) {
             liveHandsFreeLoop = p[Keys.LIVE_HANDS_FREE] ?: true,
             wakeWordEnabled = p[Keys.WAKE_WORD_ENABLED] ?: false,
             wakeWordCustomPath = p[Keys.WAKE_WORD_CUSTOM_PATH] ?: "",
-            wakeWordSensitivity = (p[Keys.WAKE_WORD_SENSITIVITY] ?: 0.38f).coerceIn(0.15f, 0.90f),
+            wakeWordSensitivity = (p[Keys.WAKE_WORD_SENSITIVITY] ?: 0.25f).coerceIn(0.05f, 0.90f),
+            wakeWordScreenOnOnly = p[Keys.WAKE_WORD_SCREEN_ON_ONLY] ?: true,
             vaultPinHash = p[Keys.VAULT_PIN_HASH] ?: "",
             prefsUpdatedAtMs = p[Keys.PREFS_UPDATED_AT_MS] ?: 0L,
             arenaProviderA = p[Keys.ARENA_PROVIDER_A] ?: "preset_pollinations_free",
@@ -535,7 +562,7 @@ class PreferencesStore(context: Context) {
             it[Keys.HAPTICS_ENABLED] = haptics
             it[Keys.SFX_VOLUME] = volume.coerceIn(0f, 1f)
             if (typingStyle != null) it[Keys.TYPING_SOUND_STYLE] = typingStyle
-            if (typingPitch != null) it[Keys.TYPING_SOUND_PITCH] = typingPitch.coerceIn(0.55f, 1.45f)
+            if (typingPitch != null) it[Keys.TYPING_SOUND_PITCH] = typingPitch.coerceIn(0.25f, 2.50f)
             if (typingCadence != null) it[Keys.TYPING_SOUND_CADENCE] = typingCadence
             it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
         }
@@ -543,11 +570,17 @@ class PreferencesStore(context: Context) {
     suspend fun updateVaultPinHash(hash: String) {
         dataStore.edit { it[Keys.VAULT_PIN_HASH] = hash }
     }
-    suspend fun updateWakeWordSettings(enabled: Boolean, customPath: String? = null, sensitivity: Float? = null) {
+    suspend fun updateWakeWordSettings(
+        enabled: Boolean,
+        customPath: String? = null,
+        sensitivity: Float? = null,
+        screenOnOnly: Boolean? = null,
+    ) {
         dataStore.edit {
             it[Keys.WAKE_WORD_ENABLED] = enabled
             if (customPath != null) it[Keys.WAKE_WORD_CUSTOM_PATH] = customPath
-            if (sensitivity != null) it[Keys.WAKE_WORD_SENSITIVITY] = sensitivity.coerceIn(0.15f, 0.90f)
+            if (sensitivity != null) it[Keys.WAKE_WORD_SENSITIVITY] = sensitivity.coerceIn(0.05f, 0.90f)
+            if (screenOnOnly != null) it[Keys.WAKE_WORD_SCREEN_ON_ONLY] = screenOnOnly
         }
     }
     suspend fun updateVoiceSettings(
@@ -561,11 +594,37 @@ class PreferencesStore(context: Context) {
         dataStore.edit {
             if (ttsEngine != null) it[Keys.TTS_ENGINE] = ttsEngine
             it[Keys.TTS_VOICE] = voice
-            it[Keys.TTS_PITCH] = pitch.coerceIn(0.65f, 1.55f)
-            it[Keys.TTS_RATE] = rate.coerceIn(0.65f, 1.65f)
+            it[Keys.TTS_PITCH] = pitch.coerceIn(0.25f, 2.50f)
+            it[Keys.TTS_RATE] = rate.coerceIn(0.50f, 2.20f)
             it[Keys.AUTO_READ] = autoRead
             it[Keys.LIVE_HANDS_FREE] = handsFree
             it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
+    suspend fun updateLiveVoiceSettings(
+        engine: String,
+        voice: String,
+        pitch: Float,
+        rate: Float,
+    ) {
+        dataStore.edit {
+            it[Keys.LIVE_TTS_ENGINE] = engine
+            it[Keys.LIVE_TTS_VOICE] = voice
+            it[Keys.LIVE_TTS_PITCH] = pitch.coerceIn(0.25f, 2.50f)
+            it[Keys.LIVE_TTS_RATE] = rate.coerceIn(0.50f, 2.20f)
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
+    suspend fun updateStartupSound(soundId: String, customPath: String? = null) {
+        dataStore.edit {
+            it[Keys.STARTUP_SOUND_ID] = soundId
+            if (customPath != null) it[Keys.STARTUP_SOUND_CUSTOM_PATH] = customPath
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
+    suspend fun updateDeletedStartupSounds(deletedIds: Set<String>) {
+        dataStore.edit {
+            it[Keys.DELETED_STARTUP_SOUND_IDS] = deletedIds
         }
     }
     suspend fun updateSttSettings(engine: String, apiKey: String? = null, model: String? = null) {
@@ -689,7 +748,7 @@ class PreferencesStore(context: Context) {
             if (hiddenProviderIds != null) p[Keys.HIDDEN_PROVIDER_IDS] = hiddenProviderIds
             if (!moodMethod.isNullOrBlank()) p[Keys.MOOD_METHOD] = moodMethod
             if (!typingSoundStyle.isNullOrBlank()) p[Keys.TYPING_SOUND_STYLE] = typingSoundStyle
-            if (typingSoundPitch != null) p[Keys.TYPING_SOUND_PITCH] = typingSoundPitch.coerceIn(0.55f, 1.45f)
+            if (typingSoundPitch != null) p[Keys.TYPING_SOUND_PITCH] = typingSoundPitch.coerceIn(0.25f, 2.50f)
             if (!typingSoundCadence.isNullOrBlank()) p[Keys.TYPING_SOUND_CADENCE] = typingSoundCadence
             if (!typingSpeed.isNullOrBlank()) p[Keys.TYPING_SPEED] = typingSpeed
             if (!ttsEngine.isNullOrBlank()) p[Keys.TTS_ENGINE] = ttsEngine

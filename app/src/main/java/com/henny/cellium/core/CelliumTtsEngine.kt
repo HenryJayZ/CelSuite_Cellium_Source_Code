@@ -10,6 +10,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -399,10 +401,16 @@ internal object EdgeSecMsGecV2 {
  * Automatically falls back cleanly if the device is offline or a cloud service hits a limit,
  * while surfacing transparent fallback notices so the user always knows which voice spoke.
  */
-class CelliumTtsEngine(context: Context) {
+class CelliumTtsEngine(
+    context: Context,
+    private val sharedSoundEngine: CelliumSoundEngine? = null,
+) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true }
+    private val ownedSoundEngine: CelliumSoundEngine by lazy {
+        sharedSoundEngine ?: CelliumSoundEngine(appContext)
+    }
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
@@ -419,11 +427,42 @@ class CelliumTtsEngine(context: Context) {
     private var pendingSystemOnDone: (() -> Unit)? = null
 
     companion object {
+        const val ENGINE_SYNTH = "synth"
         const val ENGINE_EDGE = "edge"
         const val ENGINE_POLLY = "polly"
         const val ENGINE_TIKTOK = "tiktok"
         const val ENGINE_GOOGLE = "google"
         const val ENGINE_SYSTEM = "system"
+
+        val SYNTH_VOICES: List<TtsVoicePreset> = listOf(
+            TtsVoicePreset("synth:groove_synth", "Groove Synth", "Cel Default", "Funky Vocal-Chop Synth", ENGINE_SYNTH),
+            TtsVoicePreset("synth:cozy_chatter", "Cozy Chatter", "Formant Vowel", "Animal-Crossing Style", ENGINE_SYNTH),
+            TtsVoicePreset("synth:crystal_bell", "Crystal Bell", "Music Box", "Delicate Shimmer Chimes", ENGINE_SYNTH),
+            TtsVoicePreset("synth:retro_bit", "Retro Bit", "8-Bit Chiptune", "Playful Arcade Blips", ENGINE_SYNTH),
+            TtsVoicePreset("synth:lofi_keys", "Lo-Fi Keys", "Rhodes Electric", "Soft Chill Syllables", ENGINE_SYNTH),
+        )
+
+        fun engineLabel(engine: String): String = when (engine.lowercase()) {
+            ENGINE_SYNTH -> "Synth"
+            ENGINE_EDGE -> "Edge Neural"
+            ENGINE_POLLY -> "Polly Studio"
+            ENGINE_TIKTOK -> "TikTok Voices"
+            ENGINE_GOOGLE -> "Google TTS"
+            else -> "System Offline"
+        }
+
+        fun resolveVoiceLabel(engine: String, voiceId: String): String {
+            val all = SYNTH_VOICES + EDGE_VOICES + POLLY_VOICES + TIKTOK_VOICES + GOOGLE_VOICES
+            all.firstOrNull { it.id.equals(voiceId, ignoreCase = true) }?.let { return it.label }
+            return when (engine.lowercase()) {
+                ENGINE_SYNTH -> SYNTH_VOICES.first().label
+                ENGINE_EDGE -> voiceId.removeSuffix("Neural").substringAfterLast('-').ifBlank { "Emma Multilingual" }
+                ENGINE_POLLY -> voiceId.removePrefix("polly:").ifBlank { "Joanna" }
+                ENGINE_TIKTOK -> voiceId.removePrefix("tiktok:").ifBlank { "Jessie" }
+                ENGINE_GOOGLE -> voiceId.removePrefix("google:").ifBlank { "Google US English" }
+                else -> voiceId.ifBlank { "Default System Voice" }
+            }
+        }
 
         val EDGE_VOICES: List<TtsVoicePreset> = listOf(
             TtsVoicePreset("en-US-EmmaMultilingualNeural", "Emma Multilingual", "English (US)", "Female · Ultra-Natural HD", ENGINE_EDGE),
@@ -512,6 +551,8 @@ class CelliumTtsEngine(context: Context) {
                 .replace(Regex("\\[ILLUME_GEN][\\s\\S]*?\\[/ILLUME_GEN]", RegexOption.IGNORE_CASE), "")
                 .replace(Regex("\\[WEB_SEARCH][\\s\\S]*?\\[/WEB_SEARCH]", RegexOption.IGNORE_CASE), "")
                 .replace(Regex("\\[WEB_IMAGE][\\s\\S]*?\\[/WEB_IMAGE]", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("\\[DEVICE_ACTION][\\s\\S]*?\\[/DEVICE_ACTION]", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("\\[VIEW_IMAGE][\\s\\S]*?\\[/VIEW_IMAGE]", RegexOption.IGNORE_CASE), "")
                 .replace(Regex("\\[(?:SHIZUKU_RUN|AGENT_RUN)][\\s\\S]*?\\[/(?:SHIZUKU_RUN|AGENT_RUN)]", RegexOption.IGNORE_CASE), "")
                 .replace(Regex("\\[\\[CELLIUM_IMG[^]]*]]"), "")
                 .replace(Regex("\\[MOOD:[^]]+]", RegexOption.IGNORE_CASE), "")
@@ -601,17 +642,19 @@ class CelliumTtsEngine(context: Context) {
 
     fun speak(
         rawText: String,
-        engine: String = ENGINE_EDGE,
+        engine: String = ENGINE_SYNTH,
         voiceName: String = "",
-        pitch: Float = 1.06f,
+        pitch: Float = 1.0f,
         speechRate: Float = 1.04f,
         onStart: (() -> Unit)? = null,
         onComplete: (() -> Unit)? = null,
         onError: ((String) -> Unit)? = null,
         onFallback: ((String) -> Unit)? = null,
+        onSynthCharProgress: ((Int) -> Unit)? = null,
     ) {
         val clean = cleanTextForSpeech(rawText)
         if (clean.isBlank()) {
+            onStart?.invoke()
             onComplete?.invoke()
             return
         }
@@ -621,6 +664,22 @@ class CelliumTtsEngine(context: Context) {
         speakJob = scope.launch {
             runCatching { prevJob?.cancelAndJoin() }
             when (engine.lowercase()) {
+                ENGINE_SYNTH -> {
+                    val style = voiceName.removePrefix("synth:").ifBlank { "groove_synth" }
+                    speakSynthVoice(
+                        displayText = rawText,
+                        cleanText = clean,
+                        voiceStyle = style,
+                        pitch = pitch.coerceIn(0.25f, 2.50f),
+                        speechRate = speechRate.coerceIn(0.50f, 2.20f),
+                        onStart = onStart,
+                        onCharProgress = onSynthCharProgress,
+                    )
+                    if (isActive) {
+                        withContext(Dispatchers.Main) { onComplete?.invoke() }
+                    }
+                    return@launch
+                }
                 ENGINE_EDGE -> {
                     val chosenVoice = voiceName.takeIf { it.endsWith("Neural", ignoreCase = true) }
                         ?: EDGE_VOICES.first().id
@@ -698,6 +757,57 @@ class CelliumTtsEngine(context: Context) {
         }
     }
 
+    private suspend fun speakSynthVoice(
+        displayText: String,
+        cleanText: String,
+        voiceStyle: String,
+        pitch: Float,
+        speechRate: Float,
+        onStart: (() -> Unit)?,
+        onCharProgress: ((Int) -> Unit)?,
+    ) {
+        withContext(Dispatchers.Main) { onStart?.invoke() }
+        val target = displayText.ifBlank { cleanText }
+        val totalLen = target.length
+        if (totalLen == 0) return
+        val baseCharDelayMs = (36f / speechRate.coerceIn(0.50f, 2.20f)).toLong().coerceIn(14L, 85L)
+        var lastChirpAt = 0L
+        val minChirpGapMs = (74f / speechRate.coerceIn(0.50f, 2.20f)).toLong().coerceIn(38L, 120L)
+        val step = if (totalLen > 240) 2 else 1
+        var idx = 0
+        while (idx < totalLen && kotlinx.coroutines.currentCoroutineContext().isActive) {
+            idx = (idx + step).coerceAtMost(totalLen)
+            val ch = target[idx - 1]
+            if (onCharProgress != null) {
+                val snap = idx
+                withContext(Dispatchers.Main) { onCharProgress(snap) }
+            }
+            if (ch.isLetterOrDigit()) {
+                val now = System.currentTimeMillis()
+                if (now - lastChirpAt >= minChirpGapMs) {
+                    lastChirpAt = now
+                    val nearQuestion = target.substring(idx - 1, (idx + 6).coerceAtMost(totalLen)).contains('?')
+                    ownedSoundEngine.playSynthChirpForVoice(
+                        voiceStyle = voiceStyle,
+                        charCodeOrIndex = ch.code,
+                        pitch = pitch,
+                        isQuestion = nearQuestion,
+                        volumeScale = 0.58f,
+                    )
+                }
+            }
+            val pauseExtra = when (ch) {
+                '.', '!', '?' -> baseCharDelayMs * 3L
+                ',', ';', ':' -> baseCharDelayMs * 2L
+                else -> 0L
+            }
+            delay(baseCharDelayMs + pauseExtra)
+        }
+        if (onCharProgress != null) {
+            withContext(Dispatchers.Main) { onCharProgress(totalLen) }
+        }
+    }
+
     private suspend fun speakEdgeNeural(
         text: String,
         voiceName: String,
@@ -705,11 +815,15 @@ class CelliumTtsEngine(context: Context) {
         speechRate: Float,
         onStart: (() -> Unit)?,
     ): Boolean {
-        val (firstBytes, shouldRetryClock) = synthesizeEdgeAttempt(text, voiceName, pitch, speechRate)
+        val clampedPitch = pitch.coerceIn(0.25f, 2.50f)
+        // Edge SSML handles moderate pitch cleanly; apply extra pitch multiplier on MediaPlayer for extreme low/high
+        val ssmlPitch = clampedPitch.coerceIn(0.60f, 1.60f)
+        val residualMediaPitch = (clampedPitch / ssmlPitch).coerceIn(0.40f, 2.00f)
+        val (firstBytes, shouldRetryClock) = synthesizeEdgeAttempt(text, voiceName, ssmlPitch, speechRate)
         val mp3Bytes = if (firstBytes != null && firstBytes.size >= 256) {
             firstBytes
         } else if (shouldRetryClock) {
-            synthesizeEdgeAttempt(text, voiceName, pitch, speechRate).first
+            synthesizeEdgeAttempt(text, voiceName, ssmlPitch, speechRate).first
         } else {
             null
         }
@@ -718,7 +832,7 @@ class CelliumTtsEngine(context: Context) {
         runCatching {
             FileOutputStream(cacheFile).use { it.write(mp3Bytes) }
         }.onFailure { return false }
-        return playAudioFileBlocking(cacheFile, pitch = 1.0f, speechRate = 1.0f, onStart = onStart)
+        return playAudioFileBlocking(cacheFile, pitch = residualMediaPitch, speechRate = 1.0f, onStart = onStart)
     }
 
     private suspend fun synthesizeEdgeAttempt(
@@ -752,9 +866,9 @@ class CelliumTtsEngine(context: Context) {
                 .build()
 
             val audioOut = ByteArrayOutputStream()
-            val ratePct = ((speechRate.coerceIn(0.65f, 1.65f) - 1.0f) * 100f).roundToInt()
+            val ratePct = ((speechRate.coerceIn(0.50f, 2.20f) - 1.0f) * 100f).roundToInt().coerceIn(-50, 100)
             val rateStr = if (ratePct >= 0) "+${ratePct}%" else "${ratePct}%"
-            val pitchHz = ((pitch.coerceIn(0.65f, 1.55f) - 1.0f) * 40f).roundToInt()
+            val pitchHz = ((pitch.coerceIn(0.55f, 1.65f) - 1.0f) * 55f).roundToInt().coerceIn(-45, 65)
             val pitchStr = if (pitchHz >= 0) "+${pitchHz}Hz" else "${pitchHz}Hz"
 
             val escapedText = text
@@ -882,8 +996,8 @@ class CelliumTtsEngine(context: Context) {
             runCatching { FileOutputStream(cacheFile).use { it.write(audioBytes) } }.onFailure { return false }
             val played = playAudioFileBlocking(
                 file = cacheFile,
-                pitch = pitch.coerceIn(0.70f, 1.45f),
-                speechRate = speechRate.coerceIn(0.65f, 1.65f),
+                pitch = pitch.coerceIn(0.25f, 2.50f),
+                speechRate = speechRate.coerceIn(0.50f, 2.20f),
                 onStart = if (!started) {
                     started = true
                     onStart
@@ -945,8 +1059,8 @@ class CelliumTtsEngine(context: Context) {
             runCatching { FileOutputStream(cacheFile).use { it.write(audioBytes) } }.onFailure { return false }
             val played = playAudioFileBlocking(
                 file = cacheFile,
-                pitch = pitch.coerceIn(0.70f, 1.45f),
-                speechRate = speechRate.coerceIn(0.65f, 1.65f),
+                pitch = pitch.coerceIn(0.25f, 2.50f),
+                speechRate = speechRate.coerceIn(0.50f, 2.20f),
                 onStart = if (!started) {
                     started = true
                     onStart
@@ -986,8 +1100,8 @@ class CelliumTtsEngine(context: Context) {
             runCatching { FileOutputStream(cacheFile).use { it.write(bytes) } }.onFailure { return false }
             val played = playAudioFileBlocking(
                 file = cacheFile,
-                pitch = pitch.coerceIn(0.70f, 1.45f),
-                speechRate = speechRate.coerceIn(0.65f, 1.65f),
+                pitch = pitch.coerceIn(0.25f, 2.50f),
+                speechRate = speechRate.coerceIn(0.50f, 2.20f),
                 onStart = if (!started) {
                     started = true
                     onStart
@@ -1047,8 +1161,8 @@ class CelliumTtsEngine(context: Context) {
                     runCatching {
                         if (speechRate != 1.0f || pitch != 1.0f) {
                             player.playbackParams = player.playbackParams
-                                .setSpeed(speechRate.coerceIn(0.65f, 1.65f))
-                                .setPitch(pitch.coerceIn(0.70f, 1.45f))
+                                .setSpeed(speechRate.coerceIn(0.50f, 2.20f))
+                                .setPitch(pitch.coerceIn(0.25f, 2.50f))
                         }
                     }
                     scope.launch(Dispatchers.Main) { onStart?.invoke() }
@@ -1089,9 +1203,10 @@ class CelliumTtsEngine(context: Context) {
         onComplete: (() -> Unit)?,
     ) = withContext(Dispatchers.Main) {
         ensureSystemTts { engine ->
-            engine.setPitch(pitch.coerceIn(0.65f, 1.55f))
-            engine.setSpeechRate(speechRate.coerceIn(0.65f, 1.65f))
+            engine.setPitch(pitch.coerceIn(0.25f, 2.50f))
+            engine.setSpeechRate(speechRate.coerceIn(0.50f, 2.20f))
             if (voiceName.isNotBlank() &&
+                !voiceName.startsWith("synth:") &&
                 !voiceName.startsWith("google:") &&
                 !voiceName.startsWith("polly:") &&
                 !voiceName.startsWith("tiktok:") &&
@@ -1112,5 +1227,8 @@ class CelliumTtsEngine(context: Context) {
         runCatching { systemTts?.shutdown() }
         systemTts = null
         systemReady = false
+        if (sharedSoundEngine == null) {
+            runCatching { ownedSoundEngine.release() }
+        }
     }
 }

@@ -6,8 +6,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioFormat
@@ -15,6 +17,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -28,10 +31,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.sqrt
 
 private const val TAG = "WakeWordService"
 private const val CHANNEL_ID = "cellium_wake_word"
@@ -40,15 +46,52 @@ private const val SAMPLE_RATE = 16000
 private const val CHUNK_SAMPLES = 1280 // 80ms @ 16kHz
 
 /**
- * Low-CPU foreground AudioRecord service running openWakeWord ("Okay Cel") via LiteRT.
- * Uses an RMS silence pre-gate so TFLite inference is skipped during quiet rooms to save battery.
+ * Low-CPU foreground openWakeWord ("Okay Cel") service using exact 1760-sample overlapped LiteRT inference.
+ * Releases AudioRecord completely whenever pausedForSession OR screen is off (when wakeWordScreenOnOnly=true)
+ * so the Android privacy mic indicator turns off whenever not actively needed.
+ * Exposes liveScore StateFlow so Settings can render a real-time wake-word test meter.
  */
 class WakeWordService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var listenJob: Job? = null
+    private var prefsJob: Job? = null
     private var engine: WakeWordEngine? = null
+
     @Volatile private var pausedForSession = false
+    @Volatile private var isScreenOn = true
+    @Volatile private var sensitivityThreshold = 0.25f
+    @Volatile private var screenOnOnly = true
+
+    private var screenReceiverRegistered = false
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> isScreenOn = false
+                Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT -> isScreenOn = true
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        val pm = getSystemService(PowerManager::class.java)
+        isScreenOn = pm?.isInteractive ?: true
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(screenReceiver, filter, RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(screenReceiver, filter)
+            }
+            screenReceiverRegistered = true
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -75,8 +118,20 @@ class WakeWordService : Service() {
         }
 
         startForegroundCompat()
+        observePrefsLive()
         startListeningLoop()
         return START_STICKY
+    }
+
+    private fun observePrefsLive() {
+        if (prefsJob != null) return
+        val store = PreferencesStore(applicationContext)
+        prefsJob = serviceScope.launch {
+            store.preferencesFlow.collectLatest { p ->
+                sensitivityThreshold = p.wakeWordSensitivity.coerceIn(0.05f, 0.90f)
+                screenOnOnly = p.wakeWordScreenOnOnly
+            }
+        }
     }
 
     private fun startForegroundCompat() {
@@ -116,15 +171,42 @@ class WakeWordService : Service() {
         }
     }
 
+    private fun openAudioRecorder(minBuf: Int): AudioRecord? {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            return null
+        }
+        fun trySource(source: Int): AudioRecord? = try {
+            val r = AudioRecord(
+                source,
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                minBuf,
+            )
+            if (r.state == AudioRecord.STATE_INITIALIZED) r else {
+                r.release()
+                null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+        return trySource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+            ?: trySource(MediaRecorder.AudioSource.MIC)
+    }
+
     private fun startListeningLoop() {
         listenJob?.cancel()
         listenJob = serviceScope.launch {
-            val prefs = PreferencesStore(applicationContext).preferencesFlow.first()
-            val sensitivity = prefs.wakeWordSensitivity.coerceIn(0.15f, 0.90f)
-            val wakeEngine = WakeWordEngine(applicationContext, prefs.wakeWordCustomPath)
+            _isRunning.value = true
+            val initialPrefs = PreferencesStore(applicationContext).preferencesFlow.first()
+            sensitivityThreshold = initialPrefs.wakeWordSensitivity.coerceIn(0.05f, 0.90f)
+            screenOnOnly = initialPrefs.wakeWordScreenOnOnly
+
+            val wakeEngine = WakeWordEngine(applicationContext, initialPrefs.wakeWordCustomPath)
             engine = wakeEngine
             if (!wakeEngine.initialize()) {
                 DevLogBuffer.add("ERROR", "WakeWord", "Could not initialize openWakeWord TFLite models.")
+                _isRunning.value = false
                 stopSelf()
                 return@launch
             }
@@ -135,128 +217,104 @@ class WakeWordService : Service() {
                 AudioFormat.ENCODING_PCM_16BIT,
             ).coerceAtLeast(CHUNK_SAMPLES * 4)
 
-            fun openRecorder(source: Int): AudioRecord? {
-                if (ContextCompat.checkSelfPermission(
-                        this@WakeWordService,
-                        Manifest.permission.RECORD_AUDIO,
-                    ) != PackageManager.PERMISSION_GRANTED
-                ) {
-                    return null
-                }
-                return try {
-                    val r = AudioRecord(
-                        source,
-                        SAMPLE_RATE,
-                        AudioFormat.CHANNEL_IN_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT,
-                        minBuf,
-                    )
-                    if (r.state == AudioRecord.STATE_INITIALIZED) r else {
-                        r.release()
-                        null
-                    }
-                } catch (_: SecurityException) {
-                    null
-                } catch (_: Throwable) {
-                    null
-                }
-            }
-
-            val recorder = openRecorder(MediaRecorder.AudioSource.VOICE_RECOGNITION)
-                ?: openRecorder(MediaRecorder.AudioSource.MIC)
-
-            if (recorder == null) {
-                DevLogBuffer.add("ERROR", "WakeWord", "AudioRecord failed to initialize on both VOICE_RECOGNITION and MIC.")
-                stopSelf()
-                return@launch
-            }
-
             val pcm = ShortArray(CHUNK_SAMPLES)
-            // Keep 6-chunk (480ms) pre-roll ring buffer so waking from silence NEVER clips "Okay..."!
-            val preRollSize = 6
-            val preRoll = Array(preRollSize) { ShortArray(CHUNK_SAMPLES) }
-            var preRollIdx = 0
-            var preRollCount = 0
-            var sleeping = false
+            var recorder: AudioRecord? = null
             var lastTriggerMs = 0L
-            var silentChunks = 0
             var lastPeakLogMs = 0L
 
+            fun releaseRecorder() {
+                recorder?.let { r ->
+                    runCatching { r.stop() }
+                    runCatching { r.release() }
+                }
+                recorder = null
+                _liveScore.value = 0f
+                _micActive.value = false
+            }
+
             try {
-                recorder.startRecording()
-                DevLogBuffer.add("INFO", "WakeWord", "Listening for 'Okay Cel' (threshold=${"%.2f".format(sensitivity)})")
+                DevLogBuffer.add("INFO", "WakeWord", "Listening for 'Okay Cel' (threshold=${"%.2f".format(sensitivityThreshold)})")
                 while (isActive) {
-                    if (pausedForSession) {
-                        delay(250L)
+                    val shouldHoldMic = !pausedForSession && (!screenOnOnly || isScreenOn)
+                    if (!shouldHoldMic) {
+                        if (recorder != null) {
+                            releaseRecorder()
+                            wakeEngine.resetState()
+                        }
+                        delay(300L)
                         continue
                     }
+
+                    if (recorder == null) {
+                        val opened = openAudioRecorder(minBuf)
+                        if (opened == null) {
+                            delay(600L)
+                            continue
+                        }
+                        runCatching { opened.startRecording() }
+                            .onFailure {
+                                runCatching { opened.release() }
+                                delay(600L)
+                                continue
+                            }
+                        recorder = opened
+                        _micActive.value = true
+                        wakeEngine.resetState()
+                    }
+
+                    val activeRec = recorder ?: continue
                     var offset = 0
                     while (offset < CHUNK_SAMPLES && isActive) {
-                        val read = recorder.read(pcm, offset, CHUNK_SAMPLES - offset)
+                        if (pausedForSession || (screenOnOnly && !isScreenOn)) break
+                        val read = activeRec.read(pcm, offset, CHUNK_SAMPLES - offset)
                         if (read <= 0) break
                         offset += read
                     }
                     if (offset < CHUNK_SAMPLES) {
-                        delay(40L)
+                        delay(30L)
                         continue
                     }
 
-                    // Energy check with generous pre-roll preservation
-                    var sumSq = 0.0
-                    for (i in 0 until CHUNK_SAMPLES) {
-                        val v = pcm[i].toDouble()
-                        sumSq += v * v
-                    }
-                    val rms = sqrt(sumSq / CHUNK_SAMPLES.toDouble())
-                    if (rms < 75.0) {
-                        silentChunks++
-                        if (silentChunks > 30) {
-                            // Store into pre-roll ring while sleeping to save CPU
-                            System.arraycopy(pcm, 0, preRoll[preRollIdx], 0, CHUNK_SAMPLES)
-                            preRollIdx = (preRollIdx + 1) % preRollSize
-                            preRollCount = (preRollCount + 1).coerceAtMost(preRollSize)
-                            sleeping = true
-                            continue
-                        }
-                    } else {
-                        silentChunks = 0
-                        if (sleeping && preRollCount > 0) {
-                            // Flush the 480ms pre-roll right before the speech onset!
-                            val startIdx = (preRollIdx - preRollCount + preRollSize) % preRollSize
-                            for (k in 0 until preRollCount) {
-                                wakeEngine.processChunk(preRoll[(startIdx + k) % preRollSize])
-                            }
-                            preRollCount = 0
-                            sleeping = false
-                        }
-                    }
-
+                    // Feed EVERY 80ms frame continuously (no aggressive RMS drop that clips onset!)
                     val score = wakeEngine.processChunk(pcm)
+                    _liveScore.value = score
+                    val threshold = sensitivityThreshold
                     val now = System.currentTimeMillis()
-                    if (score >= 0.14f && now - lastPeakLogMs > 1800L) {
+                    if (score >= 0.12f && now - lastPeakLogMs > 1800L) {
                         lastPeakLogMs = now
-                        DevLogBuffer.add("INFO", "WakeWord", "Peak score=${"%.2f".format(score)} (threshold=${"%.2f".format(sensitivity)}, rms=${rms.toInt()})")
+                        DevLogBuffer.add("INFO", "WakeWord", "Score=${"%.2f".format(score)} (threshold=${"%.2f".format(threshold)})")
                     }
-                    if (score >= sensitivity && now - lastTriggerMs > 2500L) {
+                    if (score >= threshold && now - lastTriggerMs > 2400L) {
                         lastTriggerMs = now
                         wakeEngine.resetState()
                         DevLogBuffer.add("INFO", "WakeWord", "Detected 'Okay Cel' (score=${"%.2f".format(score)})")
+                        // Immediately release mic before Floating Cel opens STT so AudioRecord never conflicts
+                        releaseRecorder()
+                        pausedForSession = true
                         FloatingCelOverlayService.start(applicationContext, autoListen = true)
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "WakeWord loop error", e)
             } finally {
-                runCatching { recorder.stop() }
-                runCatching { recorder.release() }
+                releaseRecorder()
                 wakeEngine.close()
+                _isRunning.value = false
             }
         }
     }
 
     override fun onDestroy() {
+        if (screenReceiverRegistered) {
+            runCatching { unregisterReceiver(screenReceiver) }
+            screenReceiverRegistered = false
+        }
+        prefsJob?.cancel()
         listenJob?.cancel()
         engine?.close()
+        _liveScore.value = 0f
+        _micActive.value = false
+        _isRunning.value = false
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -265,6 +323,15 @@ class WakeWordService : Service() {
         private const val ACTION_STOP = "com.henny.cellium.WAKE_STOP"
         private const val ACTION_PAUSE_LISTENING = "com.henny.cellium.WAKE_PAUSE"
         private const val ACTION_RESUME_LISTENING = "com.henny.cellium.WAKE_RESUME"
+
+        private val _liveScore = MutableStateFlow(0f)
+        val liveScore: StateFlow<Float> = _liveScore.asStateFlow()
+
+        private val _isRunning = MutableStateFlow(false)
+        val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
+
+        private val _micActive = MutableStateFlow(false)
+        val micActive: StateFlow<Boolean> = _micActive.asStateFlow()
 
         fun start(context: Context) {
             val intent = Intent(context, WakeWordService::class.java)

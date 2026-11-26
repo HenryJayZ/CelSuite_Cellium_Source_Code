@@ -179,7 +179,7 @@ fun DotMatrixAvatarCanvas(
         val angryDust = ANGRY_DUST_KEYWORDS.any { it in bl }
         val sleepyDust = SLEEPY_DUST_KEYWORDS.any { it in bl }
         val blinkLerp = if (isTired) 0.07f else 0.35f
-        val jitterAmp = if (intense) 2.8f else 0.55f
+        val shakeAmp = if (intense) 1.45f else 0f
         val pts = expr.points
 
         var lastFrameMs = 0L
@@ -228,7 +228,7 @@ fun DotMatrixAvatarCanvas(
                 }
                 val touchActive = wallNow <= sim.touchActiveUntilMs
                 val mouth = mouthOpenness.coerceIn(0f, 1f)
-                val morphLerp = (1f - (1f - 0.085f).pow(dtMs / 16.67f)).coerceIn(0.03f, 0.14f)
+                val morphLerp = (1f - (1f - 0.19f).pow(dtMs / 16.67f)).coerceIn(0.08f, 0.34f)
 
                 for (i in particles.indices) {
                     val p = particles[i]
@@ -328,10 +328,15 @@ fun DotMatrixAvatarCanvas(
                         }
                     }
 
-                    val stepX = ((tx - p.cx) * morphLerp).coerceIn(-16f, 16f)
-                    val stepY = ((ty - p.cy) * morphLerp).coerceIn(-16f, 16f)
-                    p.cx += stepX + sin(tSec * 7.3f + seed) * jitterAmp
-                    p.cy += stepY + cos(tSec * 5.9f + seed * 1.31f) * jitterAmp
+                    if (shakeAmp > 0f) {
+                        tx += sin(tSec * 26f + seed) * shakeAmp
+                        ty += cos(tSec * 23f + seed * 1.31f) * shakeAmp
+                    }
+
+                    val stepX = ((tx - p.cx) * morphLerp).coerceIn(-22f, 22f)
+                    val stepY = ((ty - p.cy) * morphLerp).coerceIn(-22f, 22f)
+                    p.cx += stepX
+                    p.cy += stepY
                 }
                 frameTickState.longValue = nowMs
             }

@@ -1,12 +1,13 @@
 package com.henny.cellium.assistant
 
 import android.content.Context
-import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.View
 import com.henny.cellium.avatar.AvatarExpression
@@ -14,15 +15,18 @@ import com.henny.cellium.avatar.AvatarKind
 import com.henny.cellium.avatar.AvatarLibrary
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
 
 /**
- * Pure Android Canvas View rendering Cel's animated dot-matrix face for true system-wide
- * WindowManager overlays and VoiceInteractionSession (zero Compose WindowManager overhead).
- * Supports smooth per-dot morphing, hands-free halo, mic-ready ring states, sleeping Zzz glyphs,
- * angry/scared crimson pulse, blush blink sync, subtle breathing, and talking mouth modulation.
+ * Pure Android Canvas View rendering Cel's fully animated dot-matrix face for true system-wide
+ * WindowManager overlays and VoiceInteractionSession.
+ * Uses a dedicated main-looper Handler ticker so pixel animations NEVER stall on overlays,
+ * with crisp non-spiraling spring morphing, lively breathing, natural blinking, talking mouth
+ * modulation, tear/sweat/steam/laugh/sob particle motion, explicit expression overrides
+ * (for Hell Abyss scared/relieved reactions), and state rings.
  */
 class AssistantDotFaceView(
     context: Context,
@@ -32,6 +36,7 @@ class AssistantDotFaceView(
     private val library: AvatarLibrary = AvatarLibrary.load(context)
     private var gender: String = "Female"
     private var mood: String = "idle"
+    private var explicitExpressionName: String? = null
     private var talking: Boolean = false
     private var listening: Boolean = false
     private var micReady: Boolean = false
@@ -49,7 +54,7 @@ class AssistantDotFaceView(
     }
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
-        color = Color.argb(220, 10, 7, 20)
+        color = Color.argb(226, 10, 7, 20)
     }
     private val sleepPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#D8B4FE")
@@ -59,16 +64,21 @@ class AssistantDotFaceView(
     private val startMs = SystemClock.uptimeMillis()
     private var lastFrameMs = startMs
     private var animRunning = false
+    private val tickerHandler = Handler(Looper.getMainLooper())
 
-    // Smooth interpolated particle coordinates (x, y) in avatar 600x400 space
+    // Smooth interpolated particle coordinates (x, y) in avatar 600x400 space (zero per-frame heap churn)
     private val currentPositions = ArrayList<FloatArray>()
 
     private val frameRunnable = object : Runnable {
         override fun run() {
             if (!animRunning) return
             invalidate()
-            postDelayed(this, 33L)
+            tickerHandler.postDelayed(this, 33L)
         }
+    }
+
+    init {
+        setWillNotDraw(false)
     }
 
     fun updateState(
@@ -79,7 +89,9 @@ class AssistantDotFaceView(
         isMicReady: Boolean = micReady,
         isHandsFree: Boolean = handsFree,
         primaryColor: Int = accentColor,
+        expressionOverride: String? = explicitExpressionName,
     ) {
+        val moodChanged = newMood != mood
         mood = newMood
         gender = newGender
         talking = isTalking
@@ -87,20 +99,49 @@ class AssistantDotFaceView(
         micReady = isMicReady
         handsFree = isHandsFree
         accentColor = primaryColor
+        explicitExpressionName = if (moodChanged && expressionOverride == explicitExpressionName) {
+            null
+        } else {
+            expressionOverride
+        }
         invalidate()
+    }
+
+    fun setExplicitExpression(name: String?) {
+        explicitExpressionName = name
+        invalidate()
+    }
+
+    private fun startTicker() {
+        if (animRunning) return
+        animRunning = true
+        lastFrameMs = SystemClock.uptimeMillis()
+        tickerHandler.removeCallbacks(frameRunnable)
+        tickerHandler.post(frameRunnable)
+    }
+
+    private fun stopTicker() {
+        animRunning = false
+        tickerHandler.removeCallbacks(frameRunnable)
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        animRunning = true
-        lastFrameMs = SystemClock.uptimeMillis()
-        post(frameRunnable)
+        startTicker()
     }
 
     override fun onDetachedFromWindow() {
-        animRunning = false
-        removeCallbacks(frameRunnable)
+        stopTicker()
         super.onDetachedFromWindow()
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        if (visibility == VISIBLE && isAttachedToWindow) {
+            startTicker()
+        } else if (visibility != VISIBLE) {
+            stopTicker()
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -128,16 +169,14 @@ class AssistantDotFaceView(
             canvas.drawCircle(cx, cy, radius + 3.5f, outerHaloPaint)
         }
 
-        // Ring color reflects exact state:
-        // - Angry / Scared: fiery crimson pulse
-        // - Listening & Mic Ready: vivid emerald pulse
-        // - Listening & Starting Mic: warm amber pulse
-        // - Talking: accent pulse
-        // - Sleepy: muted soft violet
         val ringColor = when {
             mood == "angry" || mood == "scared" -> {
                 val a = (175 + 70 * sin(elapsedSec * 12f)).toInt().coerceIn(100, 250)
                 Color.argb(a, 239, 68, 68)
+            }
+            mood == "relieved" -> {
+                val a = (165 + 65 * sin(elapsedSec * 7f)).toInt().coerceIn(95, 240)
+                Color.argb(a, 52, 211, 153)
             }
             listening && micReady -> {
                 val a = (175 + 75 * sin(elapsedSec * 8f)).toInt().coerceIn(100, 250)
@@ -152,18 +191,26 @@ class AssistantDotFaceView(
                 Color.argb(a, Color.red(accentColor), Color.green(accentColor), Color.blue(accentColor))
             }
             mood == "sleepy" -> Color.argb(95, 167, 139, 250)
-            else -> Color.argb(135, Color.red(accentColor), Color.green(accentColor), Color.blue(accentColor))
+            else -> Color.argb(145, Color.red(accentColor), Color.green(accentColor), Color.blue(accentColor))
         }
         ringPaint.color = ringColor
         canvas.drawCircle(cx, cy, radius - 2f, ringPaint)
 
-        val baseExpr: AvatarExpression = library.getForMood(gender, mood) ?: return
+        val baseExpr: AvatarExpression = explicitExpressionName?.let { library.get(gender, it) }
+            ?: library.getForMood(gender, mood)
+            ?: return
         val expr = if (talking) {
-            val openness = (0.35f + 0.55f * abs(sin(elapsedSec * 12f))).coerceIn(0f, 1f)
+            val openness = (0.35f + 0.58f * abs(sin(elapsedSec * 13.5f))).coerceIn(0f, 1f)
             AvatarLibrary.talkingExpression(baseExpr, openness)
         } else baseExpr
 
-        // Keep smooth per-dot positions synced with expression point count
+        val bl = expr.baseName.lowercase()
+        val isIntense = mood == "angry" || mood == "scared" ||
+            "scared" in bl || "fearful" in bl || "terrified" in bl || "shocked" in bl || "angry" in bl || "rage" in bl
+        val isLaugh = "laugh" in bl || "chibi joy" in bl || "excited" in bl
+        val isSob = "cry" in bl || "sob" in bl || "sad" in bl
+        val isAngryDust = "angry" in bl || "rage" in bl || "annoyed" in bl
+
         val targetCount = expr.points.size
         while (currentPositions.size < targetCount) {
             val pt = expr.points[currentPositions.size]
@@ -173,19 +220,27 @@ class AssistantDotFaceView(
             currentPositions.removeAt(currentPositions.size - 1)
         }
 
-        // Frame-rate normalized gentle morph so pixels glide smoothly instead of whipping
-        val morphAlpha = (1f - (1f - 0.11f).pow(dtMs / 16.67f)).coerceIn(0.05f, 0.22f)
-        val maxStep = 14f * (dtMs / 16.67f)
+        // Crisp, non-spiraling frame-rate normalized spring morph
+        val morphAlpha = (1f - (1f - 0.22f).pow(dtMs / 16.67f)).coerceIn(0.08f, 0.36f)
+        val maxStep = 22f * (dtMs / 16.67f)
 
-        // Natural blink cycle every 4.2s (disabled when asleep)
-        val cyclePos = elapsedSec % 4.2f
-        val blinkT = if (mood != "sleepy" && expr.blinkEnabled && cyclePos < 0.24f) {
-            sin((cyclePos / 0.24f) * PI).toFloat().coerceIn(0f, 1f)
+        // Lively blink cycle every 3.5s (disabled when asleep)
+        val cyclePos = elapsedSec % 3.5f
+        val blinkT = if (mood != "sleepy" && expr.blinkEnabled && cyclePos < 0.22f) {
+            sin((cyclePos / 0.22f) * PI).toFloat().coerceIn(0f, 1f)
         } else 0f
 
-        val breathSpeed = if (mood == "sleepy") 1.1f else 2.1f
-        val breathAmp = if (mood == "sleepy") 3.2f else 2.2f
+        // Visible floating breathing & micro-expression bounce (scaled for compact floating circles!)
+        val breathSpeed = if (mood == "sleepy") 1.5f else 2.7f
+        val breathAmp = if (mood == "sleepy") 9.5f else 7.2f
         val breathY = sin(elapsedSec * breathSpeed) * breathAmp
+        val swayX = sin(elapsedSec * 1.45f) * 3.8f
+        val bounceY = when {
+            isLaugh -> -abs(sin(elapsedSec * 8.5f)) * 9.0f
+            isSob -> sin(elapsedSec * 6.0f) * 5.0f
+            talking -> sin(elapsedSec * 10.5f) * 3.2f
+            else -> 0f
+        }
         val unitScale = (min(w, h) / 480f) * 1.15f
         val dotHalf = (3.3f * unitScale).coerceAtLeast(1.4f)
 
@@ -201,9 +256,39 @@ class AssistantDotFaceView(
             pos[0] += dx
             pos[1] += dy
 
-            var py = pos[1] + breathY
-            val px = pos[0]
+            var px = pos[0] + swayX
+            var py = pos[1] + breathY + bounceY
             var alpha = 255
+
+            val seed = i * 0.41f
+            if (isIntense) {
+                // Bounded non-cumulative fear/anger shiver (zero spiraling!)
+                px += sin(elapsedSec * 28f + seed) * 2.2f
+                py += cos(elapsedSec * 25f + seed) * 2.2f
+            }
+
+            when (pt.kind) {
+                AvatarKind.TEAR -> {
+                    py += ((elapsedSec * 46f + (if (pt.left) 0f else 12f) + pt.y * 0.35f) % 28f)
+                }
+                AvatarKind.CARTOON_SWEAT -> {
+                    val ph = (elapsedSec * 0.95f + (if (pt.left) 0.3f else 0f)) % 1f
+                    py += min(1f, ph * 1.45f).pow(1.6f) * 22f
+                }
+                AvatarKind.DUST -> {
+                    if (isAngryDust) {
+                        val puff = (elapsedSec * 38f + (if (pt.left) 0f else 14f) + seed * 3f) % 30f
+                        py -= puff
+                        px += (if (pt.left) -1f else 1f) * (puff * 0.42f)
+                    } else if (mood == "sleepy") {
+                        val zf = (elapsedSec * 22f) % 24f
+                        px += zf * 0.50f
+                        py -= zf
+                    }
+                }
+                else -> Unit
+            }
+
             if (blinkT > 0.01f) {
                 val sideEnabled = if (pt.left) expr.blinkLeft else expr.blinkRight
                 if (sideEnabled) {
@@ -219,17 +304,20 @@ class AssistantDotFaceView(
                     }
                 }
             }
+
             val sx = cx + (px - 300f) * unitScale
             val sy = cy + (py - 200f) * unitScale
 
             val dotColor = when (pt.kind) {
                 AvatarKind.BLUSH, AvatarKind.PERM_BLUSH -> Color.argb(alpha, 244, 114, 182)
+                AvatarKind.TEAR -> Color.argb(alpha, 56, 189, 248)
+                AvatarKind.CARTOON_SWEAT -> Color.argb(alpha, 103, 232, 249)
                 AvatarKind.EYELID, AvatarKind.EYEBROW -> Color.argb(alpha, rAccent, gAccent, bAccent)
                 else -> Color.argb(alpha, 248, 244, 255)
             }
 
-            glowPaint.color = Color.argb((alpha * 0.26f).toInt(), Color.red(dotColor), Color.green(dotColor), Color.blue(dotColor))
-            canvas.drawCircle(sx, sy, dotHalf * 1.8f, glowPaint)
+            glowPaint.color = Color.argb((alpha * 0.28f).toInt(), Color.red(dotColor), Color.green(dotColor), Color.blue(dotColor))
+            canvas.drawCircle(sx, sy, dotHalf * 1.85f, glowPaint)
 
             dotPaint.color = dotColor
             rect.set(sx - dotHalf, sy - dotHalf, sx + dotHalf, sy + dotHalf)

@@ -17,18 +17,40 @@ class AssistantConsentActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleIncomingIntent(intent)
+    }
 
-        when (intent?.action) {
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(incoming: Intent?) {
+        val action = incoming?.action
+        when (action) {
             ACTION_REQUEST_SCREEN_VISION -> {
                 val mpm = getSystemService(MediaProjectionManager::class.java)
                 @Suppress("DEPRECATION")
                 startActivityForResult(mpm.createScreenCaptureIntent(), REQ_MEDIA_PROJECTION)
             }
-            Intent.ACTION_ASSIST, "android.intent.action.VOICE_ASSIST" -> {
-                if (Settings.canDrawOverlays(this)) {
-                    FloatingCelOverlayService.start(this, autoListen = true)
-                } else {
-                    startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            Intent.ACTION_VOICE_COMMAND,
+            ACTION_VOICE_SEARCH_HANDS_FREE,
+            Intent.ACTION_SEARCH_LONG_PRESS,
+            Intent.ACTION_ASSIST,
+            ACTION_VOICE_ASSIST -> {
+                val fromEarpiece = action == Intent.ACTION_VOICE_COMMAND ||
+                    action == ACTION_VOICE_SEARCH_HANDS_FREE ||
+                    action == Intent.ACTION_SEARCH_LONG_PRESS
+                val launchedNativeSession = CelliumVoiceInteractionService.requestShowSession(fromEarpiece)
+                if (!launchedNativeSession) {
+                    if (Settings.canDrawOverlays(this)) {
+                        FloatingCelOverlayService.start(this, autoListen = true)
+                    } else {
+                        startActivity(
+                            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
                 }
                 finish()
             }
@@ -47,6 +69,8 @@ class AssistantConsentActivity : Activity() {
 
     companion object {
         private const val ACTION_REQUEST_SCREEN_VISION = "com.henny.cellium.REQ_SCREEN_VISION"
+        private const val ACTION_VOICE_ASSIST = "android.intent.action.VOICE_ASSIST"
+        private const val ACTION_VOICE_SEARCH_HANDS_FREE = "android.speech.action.VOICE_SEARCH_HANDS_FREE"
         private const val REQ_MEDIA_PROJECTION = 8821
 
         fun launchScreenVisionConsent(context: Context) {

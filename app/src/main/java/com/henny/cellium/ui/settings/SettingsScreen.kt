@@ -101,6 +101,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.henny.cellium.BuildConfig
+import com.henny.cellium.core.CelliumTtsEngine
 import com.henny.cellium.core.ContextModifyConfig
 import com.henny.cellium.core.UserProfile
 import com.henny.cellium.data.local.CustomPersonaEntity
@@ -290,7 +291,7 @@ fun SettingsScreen(
                         SettingsCategory.PROVIDERS -> "${uiState.activeProvider?.name ?: "None"} · Retry ${prefs.maxAutoRetries}x"
                         SettingsCategory.OFFLINE -> "${uiState.registeredLocalModels.size} models · Live RAM $processRamMb MB"
                         SettingsCategory.APPEARANCE -> "Theme: ${prefs.themePresetId} · Wrap ${if (prefs.codeWordWrap) "ON" else "OFF"}"
-                        SettingsCategory.VOICE -> "TTS: ${prefs.ttsEngine.uppercase()} · STT: ${prefs.sttEngine.substringBefore('_').uppercase()} · Speed: ${prefs.typingSpeed}"
+                        SettingsCategory.VOICE -> "Chat: ${CelliumTtsEngine.resolveVoiceLabel(prefs.ttsEngine, prefs.ttsVoiceName)} · Live: ${CelliumTtsEngine.resolveVoiceLabel(prefs.liveTtsEngine, prefs.liveTtsVoiceName)}"
                         SettingsCategory.PERSONAS -> "${uiState.customPersonas.size} personas · ${uiState.memories.size} memories"
                         SettingsCategory.CONTEXT -> "History ${prefs.contextModify.historyLimit} turns · n_ctx ${prefs.contextModify.ggufContextLength}"
                         SettingsCategory.AGENT -> "Shizuku: ${uiState.shizukuStatus.name} · Agent ${if (prefs.agentModeEnabled) "ON" else "OFF"}"

@@ -7,6 +7,8 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
@@ -21,6 +23,8 @@ import android.speech.RecognitionListener
 import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.text.Editable
+import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -29,7 +33,10 @@ import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import com.henny.cellium.ai.ProviderPresets
 import com.henny.cellium.ai.UniversalLlmClient
@@ -44,6 +51,7 @@ import com.henny.cellium.data.CustomPersona
 import com.henny.cellium.data.local.CelliumDatabase
 import com.henny.cellium.data.local.MessageEntity
 import com.henny.cellium.data.local.SessionEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -53,6 +61,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 import kotlin.math.abs
 
@@ -78,13 +88,38 @@ class CelliumRecognitionService : RecognitionService() {
 class CelliumVoiceInteractionService : VoiceInteractionService() {
     override fun onReady() {
         super.onReady()
+        activeServiceRef = java.lang.ref.WeakReference(this)
+    }
+
+    override fun onShutdown() {
+        if (activeServiceRef?.get() === this) {
+            activeServiceRef = null
+        }
+        super.onShutdown()
     }
 
     override fun onLaunchVoiceAssistFromKeyguard() {
         showSession(
-            Bundle(),
+            Bundle().apply { putBoolean("from_keyguard", true) },
             VoiceInteractionSession.SHOW_WITH_ASSIST or VoiceInteractionSession.SHOW_WITH_SCREENSHOT,
         )
+    }
+
+    companion object {
+        @Volatile
+        private var activeServiceRef: java.lang.ref.WeakReference<CelliumVoiceInteractionService>? = null
+
+        fun requestShowSession(fromEarpiece: Boolean = false): Boolean {
+            val svc = activeServiceRef?.get() ?: return false
+            return runCatching {
+                val args = Bundle().apply { putBoolean("from_earpiece", fromEarpiece) }
+                svc.showSession(
+                    args,
+                    VoiceInteractionSession.SHOW_WITH_ASSIST or VoiceInteractionSession.SHOW_WITH_SCREENSHOT,
+                )
+                true
+            }.getOrDefault(false)
+        }
     }
 }
 
@@ -94,12 +129,16 @@ class CelliumVoiceInteractionSessionService : VoiceInteractionSessionService() {
 }
 
 /**
- * Full-screen transparent freehand neon drawing canvas (Gemini Circle/Draw-to-Focus style)
- * allowing the user to circle or underline anything on screen to tell Cel exactly where to look.
+ * Always-on Gemini-style multi-region circle-to-crop overlay:
+ * - Drawing is ALWAYS active when a screenshot is captured (no Circle toggle button needed).
+ * - Each stroke crops that exact region from the screenshot (never triggers STT or auto-send!).
+ * - Supports multiple circled regions with persistent glowing selection boxes on screen.
  */
-private class ScreenHighlightOverlayView(
+private class ScreenCropOverlayView(
     context: Context,
-    private val onStrokesChanged: (Boolean) -> Unit,
+    private val onDrawingStarted: () -> Unit,
+    private val onRegionCropped: (RectF) -> Unit,
+    private val onBackgroundTapped: () -> Unit,
 ) : View(context) {
 
     var drawEnabled: Boolean = false
@@ -108,10 +147,14 @@ private class ScreenHighlightOverlayView(
             invalidate()
         }
 
-    // Store normalized strokes (pairs of x/w, y/h) so compositing onto any screenshot resolution is pixel-accurate!
-    private val strokes = ArrayList<ArrayList<Pair<Float, Float>>>()
-    private var currentStroke: ArrayList<Pair<Float, Float>>? = null
+    // Normalized crop rectangles (0..1) corresponding to each circled area
+    private val committedRegions = ArrayList<RectF>()
+    private var activeStroke: ArrayList<Pair<Float, Float>>? = null
+    private var downRawX = 0f
+    private var downRawY = 0f
+    private var movedBeyondTap = false
     private val drawPath = Path()
+    private val boxRect = RectF()
 
     private val outerGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -131,44 +174,98 @@ private class ScreenHighlightOverlayView(
         strokeJoin = Paint.Join.ROUND
         color = Color.argb(245, 248, 244, 255)
     }
-    private val frameBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val regionFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = Color.argb(38, 56, 189, 248)
+    }
+    private val regionStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 8f
-        color = Color.argb(150, 192, 132, 252)
+        strokeWidth = 5f
+        color = Color.argb(215, 125, 211, 252)
+    }
+    private val badgeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = Color.argb(225, 168, 85, 247)
+    }
+    private val badgeTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 28f
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        textAlign = Paint.Align.CENTER
     }
 
-    fun hasStrokes(): Boolean = strokes.isNotEmpty()
+    fun setRegions(regions: List<RectF>) {
+        committedRegions.clear()
+        committedRegions.addAll(regions)
+        invalidate()
+    }
 
-    fun clearStrokes() {
-        strokes.clear()
-        currentStroke = null
-        onStrokesChanged(false)
+    fun clearAll() {
+        committedRegions.clear()
+        activeStroke = null
         invalidate()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (!drawEnabled) return false
         val w = width.toFloat().coerceAtLeast(1f)
         val h = height.toFloat().coerceAtLeast(1f)
         val nx = (event.x / w).coerceIn(0f, 1f)
         val ny = (event.y / h).coerceIn(0f, 1f)
+
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                val stroke = ArrayList<Pair<Float, Float>>(32)
-                stroke.add(nx to ny)
-                strokes.add(stroke)
-                currentStroke = stroke
-                onStrokesChanged(true)
-                invalidate()
+                downRawX = event.x
+                downRawY = event.y
+                movedBeyondTap = false
+                if (drawEnabled) {
+                    activeStroke = ArrayList<Pair<Float, Float>>(32).apply { add(nx to ny) }
+                    invalidate()
+                }
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                currentStroke?.add(nx to ny)
+                if (!movedBeyondTap && (abs(event.x - downRawX) > 18f || abs(event.y - downRawY) > 18f)) {
+                    movedBeyondTap = true
+                    if (drawEnabled) onDrawingStarted()
+                }
+                if (drawEnabled && movedBeyondTap) {
+                    activeStroke?.add(nx to ny)
+                    invalidate()
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                val stroke = activeStroke
+                activeStroke = null
+                if (!movedBeyondTap) {
+                    onBackgroundTapped()
+                } else if (drawEnabled && stroke != null && stroke.size >= 3) {
+                    var minX = 1f
+                    var minY = 1f
+                    var maxX = 0f
+                    var maxY = 0f
+                    for ((px, py) in stroke) {
+                        if (px < minX) minX = px
+                        if (py < minY) minY = py
+                        if (px > maxX) maxX = px
+                        if (py > maxY) maxY = py
+                    }
+                    // Add gentle 2.5% padding so cropped content isn't cut tight at the edges
+                    val padX = 0.025f
+                    val padY = 0.018f
+                    val left = (minX - padX).coerceIn(0f, 0.96f)
+                    val top = (minY - padY).coerceIn(0f, 0.96f)
+                    val right = (maxX + padX).coerceIn(left + 0.04f, 1f)
+                    val bottom = (maxY + padY).coerceIn(top + 0.04f, 1f)
+                    if ((right - left) * w >= 32f && (bottom - top) * h >= 32f) {
+                        onRegionCropped(RectF(left, top, right, bottom))
+                    }
+                }
                 invalidate()
                 return true
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                currentStroke = null
+            MotionEvent.ACTION_CANCEL -> {
+                activeStroke = null
                 invalidate()
                 return true
             }
@@ -181,67 +278,67 @@ private class ScreenHighlightOverlayView(
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 4f || h <= 4f) return
-        if (drawEnabled) {
-            canvas.drawRect(4f, 4f, w - 4f, h - 4f, frameBorderPaint)
+
+        // Draw committed cropped regions with numbered badges
+        committedRegions.forEachIndexed { idx, r ->
+            boxRect.set(r.left * w, r.top * h, r.right * w, r.bottom * h)
+            canvas.drawRoundRect(boxRect, 22f, 22f, regionFillPaint)
+            canvas.drawRoundRect(boxRect, 22f, 22f, regionStrokePaint)
+            val badgeCx = (boxRect.left + 22f).coerceIn(22f, w - 22f)
+            val badgeCy = (boxRect.top + 22f).coerceIn(22f, h - 22f)
+            canvas.drawCircle(badgeCx, badgeCy, 18f, badgeBgPaint)
+            canvas.drawText("${idx + 1}", badgeCx, badgeCy + 10f, badgeTextPaint)
         }
-        drawAllStrokes(canvas, w, h)
-    }
 
-    private fun drawAllStrokes(canvas: Canvas, w: Float, h: Float) {
-        val baseStroke = (minOf(w, h) * 0.012f).coerceIn(7f, 16f)
-        outerGlowPaint.strokeWidth = baseStroke * 2.6f
-        midGlowPaint.strokeWidth = baseStroke * 1.4f
-        corePaint.strokeWidth = baseStroke * 0.52f
+        // Draw active freehand glowing stroke
+        val pts = activeStroke ?: return
+        if (pts.isEmpty()) return
+        val baseStroke = (minOf(w, h) * 0.011f).coerceIn(6f, 14f)
+        outerGlowPaint.strokeWidth = baseStroke * 2.5f
+        midGlowPaint.strokeWidth = baseStroke * 1.35f
+        corePaint.strokeWidth = baseStroke * 0.50f
 
-        for (pts in strokes) {
-            if (pts.isEmpty()) continue
-            drawPath.reset()
-            val first = pts[0]
-            drawPath.moveTo(first.first * w, first.second * h)
-            if (pts.size == 1) {
-                drawPath.lineTo(first.first * w + 1f, first.second * h + 1f)
-            } else {
-                for (i in 1 until pts.size) {
-                    val prev = pts[i - 1]
-                    val curr = pts[i]
-                    val mx = (prev.first + curr.first) * 0.5f * w
-                    val my = (prev.second + curr.second) * 0.5f * h
-                    drawPath.quadTo(prev.first * w, prev.second * h, mx, my)
-                }
-                val last = pts.last()
-                drawPath.lineTo(last.first * w, last.second * h)
+        drawPath.reset()
+        drawPath.moveTo(pts[0].first * w, pts[0].second * h)
+        if (pts.size == 1) {
+            drawPath.lineTo(pts[0].first * w + 1f, pts[0].second * h + 1f)
+        } else {
+            for (i in 1 until pts.size) {
+                val prev = pts[i - 1]
+                val curr = pts[i]
+                drawPath.quadTo(
+                    prev.first * w,
+                    prev.second * h,
+                    (prev.first + curr.first) * 0.5f * w,
+                    (prev.second + curr.second) * 0.5f * h,
+                )
             }
-            canvas.drawPath(drawPath, outerGlowPaint)
-            canvas.drawPath(drawPath, midGlowPaint)
-            canvas.drawPath(drawPath, corePaint)
+            val last = pts.last()
+            drawPath.lineTo(last.first * w, last.second * h)
         }
-    }
-
-    /**
-     * Composites the user's drawn glowing highlights onto a mutable copy of [source] screenshot.
-     */
-    fun compositeOntoScreenshot(source: Bitmap): Bitmap {
-        if (strokes.isEmpty()) return source
-        val maxSide = 1080
-        val scale = minOf(maxSide.toFloat() / source.width, maxSide.toFloat() / source.height, 1f)
-        val outW = (source.width * scale).toInt().coerceAtLeast(1)
-        val outH = (source.height * scale).toInt().coerceAtLeast(1)
-        val scaled = if (scale < 1f) Bitmap.createScaledBitmap(source, outW, outH, true) else source
-        val mutable = scaled.copy(Bitmap.Config.ARGB_8888, true)
-        if (scaled !== source) scaled.recycle()
-        val canvas = Canvas(mutable)
-        drawAllStrokes(canvas, mutable.width.toFloat(), mutable.height.toFloat())
-        return mutable
+        canvas.drawPath(drawPath, outerGlowPaint)
+        canvas.drawPath(drawPath, midGlowPaint)
+        canvas.drawPath(drawPath, corePaint)
     }
 }
 
+private data class CroppedSelection(
+    val id: String = UUID.randomUUID().toString(),
+    val normRect: RectF,
+    val bitmap: Bitmap,
+)
+
 /**
- * Gemini-style transparent Assistant overlay right over the current app:
- * - WindowInsets-aware bottom input bar (never overlaps 3-button Android navigation bars!)
- * - Plays shimmering heavenly summon chime on open
- * - Interactive Gemini-style Draw / Circle on Screen highlight mode composited onto the screenshot
- * - "Go Live" chip jumps straight into Floating Cel hands-free live mode
- * - Uses user's selected Edge Neural / Google / System TTS (emoji-free) & Cloud/Device STT
+ * Gemini-style transparent Assistant overlay right over the current app (v2611.26.1):
+ * - 4a–4f: Drawing ALWAYS ON (no Circle button); drawing cancels STT, crops cleanly to multi-crop
+ *   thumbnail strip above input box, unselects full screenshot by default, NEVER auto-sends.
+ * - 4g: Plays user's selected/custom start-up sound (22 presets + custom audio).
+ * - 4h/4n: Cancels ALL in-flight generation, STT & TTS immediately on close/hide/Go Live.
+ * - 4i: Typing in input bar immediately cancels listening and shows Send button; hands-free hides Send.
+ * - 4j: Clear stage labels + holds reply text reveal until voice audio is ready (or typewriter for Synth).
+ * - 4k: Saves attached screenshots/crops to disk in MessageEntity.attachmentPath + filters "." STT noise.
+ * - 4m: Quiet AndroidDeviceActions agentic loop (time, apps, alarm, timer, flashlight, volume, etc.).
+ * - 4r/4s/4t/4v: Active persona, quick chat switcher, Live/Floating voice profile (incl. Synth), and Retry on error.
  */
 class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
 
@@ -252,22 +349,39 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private var faceView: AssistantDotFaceView? = null
     private var speechBubble: TextView? = null
     private var screenChip: TextView? = null
-    private var drawChip: TextView? = null
-    private var clearDrawChip: TextView? = null
-    private var drawOverlay: ScreenHighlightOverlayView? = null
+    private var clearCropsChip: TextView? = null
+    private var chatSwitchChip: TextView? = null
+    private var sendBtnView: TextView? = null
+    private var drawOverlay: ScreenCropOverlayView? = null
+    private var previewStripScroll: HorizontalScrollView? = null
+    private var previewStripRow: LinearLayout? = null
+    private var chatPickerOverlay: FrameLayout? = null
     private var inputEdit: EditText? = null
+
     private var capturedScreenshot: Bitmap? = null
     private var includeScreenVision = true
-    private var drawModeActive = false
+    private val croppedRegions = ArrayList<CroppedSelection>()
 
     private var speechRecognizer: SpeechRecognizer? = null
+    private var showListenRunnable: Runnable? = null
+    private var sttLaunchJob: Job? = null
     private var cloudSttJob: Job? = null
+    private var askJob: Job? = null
+
     private lateinit var soundEngine: CelliumSoundEngine
     private lateinit var celliumTts: CelliumTtsEngine
     private lateinit var celliumStt: CelliumSttEngine
+
     private var isListening = false
+    private var isTypingMode = false
+    private var isVisible = false
     private var assistSessionId: String? = null
     private var lastMessageId: String? = null
+
+    // Retry state for offline / network failures (#4v)
+    private var lastFailedPrompt: String? = null
+    private var lastFailedImages: List<Bitmap> = emptyList()
+    private var bubbleIsRetryAction = false
 
     private fun dp(v: Float): Int = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP, v, context.resources.displayMetrics
@@ -276,7 +390,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     override fun onCreate() {
         super.onCreate()
         soundEngine = CelliumSoundEngine(context)
-        celliumTts = CelliumTtsEngine(context)
+        celliumTts = CelliumTtsEngine(context, sharedSoundEngine = soundEngine)
         celliumStt = CelliumSttEngine(context)
     }
 
@@ -284,31 +398,38 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         super.onHandleScreenshot(screenshot)
         capturedScreenshot = screenshot
         mainHandler.post {
+            drawOverlay?.drawEnabled = screenshot != null
             screenChip?.apply {
                 visibility = if (screenshot != null) View.VISIBLE else View.GONE
-                text = if (includeScreenVision) "Screen Attached" else "Screen Off"
+                updateScreenChipAppearance()
             }
-            drawChip?.visibility = if (screenshot != null) View.VISIBLE else View.GONE
+            rebuildAttachmentPreviewStrip()
         }
     }
 
     override fun onCreateContentView(): View {
         val root = FrameLayout(context).apply {
             setBackgroundColor(Color.argb(95, 4, 3, 10))
-            setOnClickListener {
-                if (!drawModeActive) hide()
-            }
         }
 
-        // Full-screen Gemini-style Draw/Circle canvas behind controls
-        val overlay = ScreenHighlightOverlayView(context) { hasStrokes ->
-            clearDrawChip?.visibility = if (hasStrokes) View.VISIBLE else View.GONE
-            if (hasStrokes) {
-                includeScreenVision = true
-                screenChip?.text = "Screen Attached"
-                screenChip?.setTextColor(Color.parseColor("#D8B4FE"))
-            }
-        }
+        // Always-on Gemini-style multi-region circle-to-crop overlay
+        val overlay = ScreenCropOverlayView(
+            context = context,
+            onDrawingStarted = {
+                // 4b: Drawing NEVER transcribes — immediately cancel any active/pending STT
+                cancelListeningQuietly()
+            },
+            onRegionCropped = { normRect ->
+                handleNewCircledCrop(normRect)
+            },
+            onBackgroundTapped = {
+                if (chatPickerOverlay?.visibility == View.VISIBLE) {
+                    chatPickerOverlay?.visibility = View.GONE
+                } else {
+                    hide()
+                }
+            },
+        )
         drawOverlay = overlay
         root.addView(
             overlay,
@@ -331,17 +452,26 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         faceView = face
 
         val bubble = TextView(context).apply {
-            text = "Hey! Ask me anything, circle on screen, or tap to speak."
+            text = "Circle anything on screen, speak, or type below."
             setTextColor(Color.parseColor("#F5F0FF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
             setPadding(dp(14f), dp(10f), dp(14f), dp(10f))
-            maxWidth = dp(235f)
+            maxWidth = dp(242f)
             background = GradientDrawable().apply {
-                setColor(Color.argb(235, 16, 12, 30))
+                setColor(Color.argb(238, 16, 12, 30))
                 cornerRadius = dp(18f).toFloat()
-                setStroke(dp(1f), Color.argb(180, 192, 132, 252))
+                setStroke(dp(1f), Color.argb(185, 192, 132, 252))
             }
-            setOnClickListener { visibility = View.GONE }
+            setOnClickListener {
+                if (bubbleIsRetryAction && !lastFailedPrompt.isNullOrBlank()) {
+                    val retryPrompt = lastFailedPrompt!!
+                    val retryImgs = lastFailedImages
+                    bubbleIsRetryAction = false
+                    askCel(retryPrompt, explicitBitmaps = retryImgs)
+                } else {
+                    visibility = View.GONE
+                }
+            }
         }
         speechBubble = bubble
 
@@ -354,7 +484,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             ).apply { leftMargin = dp(10f) }
         )
 
-        val baseCelBottomMargin = dp(122f)
+        val baseCelBottomMargin = dp(186f)
         val celLp = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -389,7 +519,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!dragged) {
-                        if (isListening) stopListening() else startListening()
+                        if (isListening) stopListeningForSubmit() else startListening()
                     }
                     true
                 }
@@ -405,6 +535,26 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             setOnClickListener { /* consume */ }
         }
 
+        // 4e & 4f: Cropped / Screenshot Thumbnail Preview Strip above chat box!
+        val stripRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        previewStripRow = stripRow
+        val stripScroll = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            visibility = View.GONE
+            addView(stripRow)
+        }
+        previewStripScroll = stripScroll
+        bottomCol.addView(
+            stripScroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(8f) }
+        )
+
         val chipRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
@@ -417,7 +567,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         }
 
         val sChip = TextView(context).apply {
-            text = "Screen Attached"
+            text = "Full Screen: ON"
             setTextColor(Color.parseColor("#D8B4FE"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
@@ -426,40 +576,14 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             setOnClickListener {
                 soundEngine.playClick()
                 includeScreenVision = !includeScreenVision
-                text = if (includeScreenVision) "Screen Attached" else "Screen Off"
-                setTextColor(if (includeScreenVision) Color.parseColor("#D8B4FE") else Color.parseColor("#9A90B0"))
+                updateScreenChipAppearance()
+                rebuildAttachmentPreviewStrip()
             }
         }
         screenChip = sChip
 
-        val dChip = TextView(context).apply {
-            text = "Circle"
-            setTextColor(Color.parseColor("#38BDF8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-            setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
-            background = chipBg(Color.argb(215, 14, 34, 52), Color.argb(175, 56, 189, 248))
-            visibility = if (capturedScreenshot != null) View.VISIBLE else View.GONE
-            setOnClickListener {
-                soundEngine.playClick()
-                drawModeActive = !drawModeActive
-                drawOverlay?.drawEnabled = drawModeActive
-                text = if (drawModeActive) "Drawing ON" else "Circle"
-                background = if (drawModeActive) {
-                    chipBg(Color.argb(235, 34, 88, 128), Color.argb(240, 125, 211, 252))
-                } else {
-                    chipBg(Color.argb(215, 14, 34, 52), Color.argb(175, 56, 189, 248))
-                }
-                if (drawModeActive) {
-                    includeScreenVision = true
-                    screenChip?.text = "Screen Attached"
-                    showBubble("Draw or circle what you want me to look at, then ask!")
-                }
-            }
-        }
-        drawChip = dChip
-
         val clrChip = TextView(context).apply {
-            text = "Clear"
+            text = "Clear Crops"
             setTextColor(Color.parseColor("#FCA5A5"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setPadding(dp(9f), dp(6f), dp(9f), dp(6f))
@@ -467,10 +591,25 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             visibility = View.GONE
             setOnClickListener {
                 soundEngine.playClick()
-                drawOverlay?.clearStrokes()
+                clearAllCrops()
             }
         }
-        clearDrawChip = clrChip
+        clearCropsChip = clrChip
+
+        // 4s: Quick chat switcher chip
+        val chatChip = TextView(context).apply {
+            text = "Chat: New"
+            setTextColor(Color.parseColor("#93C5FD"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
+            background = chipBg(Color.argb(215, 16, 30, 56), Color.argb(175, 96, 165, 250))
+            setOnClickListener {
+                soundEngine.playClick()
+                cancelListeningQuietly()
+                openChatPickerOverlay()
+            }
+        }
+        chatSwitchChip = chatChip
 
         val liveChip = TextView(context).apply {
             text = "Go Live"
@@ -480,10 +619,12 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             background = chipBg(Color.argb(220, 10, 46, 36), Color.argb(185, 52, 211, 153))
             setOnClickListener {
                 soundEngine.playOpen()
+                // 4n: Immediately abort all pop-up work BEFORE launching Floating Cel!
+                cancelAllActiveWork()
                 if (Settings.canDrawOverlays(context)) {
                     FloatingCelOverlayService.start(
                         context = context.applicationContext,
-                        autoListen = true,
+                        autoListen = false,
                         enableHandsFree = true,
                         requestScreenVision = includeScreenVision,
                     )
@@ -509,12 +650,16 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             ).apply { rightMargin = dp(7f) }
         }
         chipRow.addView(sChip, chipLp())
-        chipRow.addView(dChip, chipLp())
         chipRow.addView(clrChip, chipLp())
+        chipRow.addView(chatChip, chipLp())
         chipRow.addView(liveChip, chipLp())
 
+        val chipScroll = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(chipRow)
+        }
         bottomCol.addView(
-            chipRow,
+            chipScroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -539,12 +684,37 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             setPadding(dp(8f), dp(6f), dp(8f), dp(6f))
             setOnClickListener {
                 soundEngine.playClick()
-                if (isListening) stopListening() else startListening()
+                isTypingMode = false
+                if (isListening) stopListeningForSubmit() else startListening()
             }
         }
 
+        val sendBtn = TextView(context).apply {
+            text = "Send"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            setPadding(dp(14f), dp(7f), dp(14f), dp(7f))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#A855F7"))
+                cornerRadius = dp(18f).toFloat()
+            }
+            visibility = View.GONE
+            setOnClickListener {
+                soundEngine.playSend()
+                val q = inputEdit?.text?.toString()?.trim().orEmpty()
+                if (q.isNotEmpty()) {
+                    inputEdit?.setText("")
+                    isTypingMode = false
+                    visibility = View.GONE
+                    askCel(q)
+                }
+            }
+        }
+        sendBtnView = sendBtn
+
         val edit = EditText(context).apply {
-            hint = "Ask Cel about this screen..."
+            hint = "Circle screen, speak, or type..."
             setHintTextColor(Color.parseColor("#8A80A4"))
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
@@ -552,11 +722,36 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             isSingleLine = true
             imeOptions = EditorInfo.IME_ACTION_SEND
             setPadding(dp(8f), dp(6f), dp(8f), dp(6f))
+            setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus) {
+                    // 4i: Focusing the text box immediately cancels hands-free listening!
+                    isTypingMode = true
+                    cancelListeningQuietly()
+                    sendBtnView?.visibility = View.VISIBLE
+                }
+            }
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    val hasText = !s.isNullOrBlank()
+                    if (hasText) {
+                        // 4i: Typing cancels voice listening and waits for explicit Send
+                        isTypingMode = true
+                        cancelListeningQuietly()
+                        sendBtnView?.visibility = View.VISIBLE
+                    } else if (!isFocused) {
+                        sendBtnView?.visibility = View.GONE
+                    }
+                }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
             setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_SEND) {
                     val q = text.toString().trim()
                     if (q.isNotEmpty()) {
                         setText("")
+                        isTypingMode = false
+                        sendBtnView?.visibility = View.GONE
                         askCel(q)
                     }
                     true
@@ -564,25 +759,6 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             }
         }
         inputEdit = edit
-
-        val sendBtn = TextView(context).apply {
-            text = "Ask"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            setPadding(dp(14f), dp(7f), dp(14f), dp(7f))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#A855F7"))
-                cornerRadius = dp(18f).toFloat()
-            }
-            setOnClickListener {
-                soundEngine.playSend()
-                val q = edit.text.toString().trim()
-                if (q.isNotEmpty()) {
-                    edit.setText("")
-                    askCel(q)
-                }
-            }
-        }
 
         pill.addView(micBtn)
         pill.addView(edit, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -598,7 +774,22 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             )
         )
 
-        // WindowInsets listener: guarantees chat bar sits cleanly ABOVE 3-button nav bar & rises with IME!
+        // Overlay chat picker container (#4s)
+        val pickerHost = FrameLayout(context).apply {
+            setBackgroundColor(Color.argb(180, 6, 4, 14))
+            visibility = View.GONE
+            setOnClickListener { visibility = View.GONE }
+        }
+        chatPickerOverlay = pickerHost
+        root.addView(
+            pickerHost,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            )
+        )
+
+        // WindowInsets listener: sits cleanly above 3-button nav bar & rises with IME
         root.setOnApplyWindowInsetsListener { _, insets ->
             val bottomInset = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val nav = insets.getInsets(WindowInsets.Type.systemBars()).bottom
@@ -620,32 +811,306 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         return root
     }
 
+    private fun updateScreenChipAppearance() {
+        screenChip?.apply {
+            text = if (includeScreenVision) "Full Screen: ON" else "Full Screen: OFF"
+            setTextColor(if (includeScreenVision) Color.parseColor("#D8B4FE") else Color.parseColor("#9A90B0"))
+        }
+    }
+
+    private fun handleNewCircledCrop(normRect: RectF) {
+        val src = capturedScreenshot ?: return
+        val x = (normRect.left * src.width).toInt().coerceIn(0, (src.width - 2).coerceAtLeast(0))
+        val y = (normRect.top * src.height).toInt().coerceIn(0, (src.height - 2).coerceAtLeast(0))
+        val w = ((normRect.width()) * src.width).toInt().coerceIn(2, src.width - x)
+        val h = ((normRect.height()) * src.height).toInt().coerceIn(2, src.height - y)
+        val cropped = runCatching { Bitmap.createBitmap(src, x, y, w, h) }.getOrNull() ?: return
+
+        soundEngine.playPop()
+        // 4c: First circled crop automatically unselects full screenshot so ONLY crops upload unless re-enabled
+        if (croppedRegions.isEmpty()) {
+            includeScreenVision = false
+            updateScreenChipAppearance()
+        }
+        if (croppedRegions.size >= 5) {
+            val removed = croppedRegions.removeAt(0)
+            if (!removed.bitmap.isRecycled) removed.bitmap.recycle()
+        }
+        croppedRegions.add(CroppedSelection(normRect = normRect, bitmap = cropped))
+        drawOverlay?.setRegions(croppedRegions.map { it.normRect })
+        clearCropsChip?.visibility = View.VISIBLE
+        rebuildAttachmentPreviewStrip()
+        // 4d: NEVER auto-send! Inform user cleanly and wait for voice or text.
+        showBubble("Cropped ${croppedRegions.size} spot${if (croppedRegions.size > 1) "s" else ""}. Circle more, tap Mic, or type!")
+    }
+
+    private fun clearAllCrops() {
+        croppedRegions.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+        croppedRegions.clear()
+        drawOverlay?.clearAll()
+        clearCropsChip?.visibility = View.GONE
+        rebuildAttachmentPreviewStrip()
+    }
+
+    private fun rebuildAttachmentPreviewStrip() {
+        mainHandler.post {
+            val row = previewStripRow ?: return@post
+            val scroll = previewStripScroll ?: return@post
+            row.removeAllViews()
+
+            val fullBmp = if (includeScreenVision) capturedScreenshot else null
+            if (fullBmp != null && !fullBmp.isRecycled) {
+                row.addView(
+                    buildThumbCard(
+                        bitmap = fullBmp,
+                        label = "Full Screen",
+                        accentColor = Color.parseColor("#C084FC"),
+                        onRemove = {
+                            includeScreenVision = false
+                            updateScreenChipAppearance()
+                            rebuildAttachmentPreviewStrip()
+                        },
+                    )
+                )
+            }
+            croppedRegions.forEachIndexed { idx, sel ->
+                if (!sel.bitmap.isRecycled) {
+                    row.addView(
+                        buildThumbCard(
+                            bitmap = sel.bitmap,
+                            label = "Crop #${idx + 1}",
+                            accentColor = Color.parseColor("#38BDF8"),
+                            onRemove = {
+                                val target = croppedRegions.removeAt(idx)
+                                if (!target.bitmap.isRecycled) target.bitmap.recycle()
+                                drawOverlay?.setRegions(croppedRegions.map { it.normRect })
+                                clearCropsChip?.visibility = if (croppedRegions.isNotEmpty()) View.VISIBLE else View.GONE
+                                rebuildAttachmentPreviewStrip()
+                            },
+                        )
+                    )
+                }
+            }
+            scroll.visibility = if (row.childCount > 0) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun buildThumbCard(
+        bitmap: Bitmap,
+        label: String,
+        accentColor: Int,
+        onRemove: () -> Unit,
+    ): View {
+        val card = FrameLayout(context).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.argb(235, 16, 12, 30))
+                cornerRadius = dp(12f).toFloat()
+                setStroke(dp(1.2f), accentColor)
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(74f), dp(74f)).apply {
+                rightMargin = dp(8f)
+            }
+            setPadding(dp(2f), dp(2f), dp(2f), dp(2f))
+        }
+        val img = ImageView(context).apply {
+            setImageBitmap(bitmap)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }
+        card.addView(img, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+
+        val tag = TextView(context).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+            setBackgroundColor(Color.argb(180, 10, 8, 20))
+            setPadding(dp(4f), dp(1f), dp(4f), dp(1f))
+            gravity = Gravity.CENTER
+        }
+        card.addView(
+            tag,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM,
+            )
+        )
+
+        val closeX = TextView(context).apply {
+            text = "×"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                setColor(Color.argb(225, 220, 38, 38))
+                shape = GradientDrawable.OVAL
+            }
+            setOnClickListener {
+                soundEngine.playClick()
+                onRemove()
+            }
+        }
+        card.addView(
+            closeX,
+            FrameLayout.LayoutParams(dp(20f), dp(20f), Gravity.TOP or Gravity.END).apply {
+                topMargin = dp(2f)
+                rightMargin = dp(2f)
+            }
+        )
+        return card
+    }
+
+    private fun openChatPickerOverlay() {
+        val host = chatPickerOverlay ?: return
+        scope.launch {
+            val dao = CelliumDatabase.getInstance(context.applicationContext).dao()
+            val sessions = withContext(Dispatchers.IO) {
+                dao.getAllSessionsOnce().filter { !it.isArena && !it.isLocked }.take(12)
+            }
+            host.removeAllViews()
+            val card = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16f), dp(16f), dp(16f), dp(16f))
+                background = GradientDrawable().apply {
+                    setColor(Color.argb(248, 16, 12, 30))
+                    cornerRadius = dp(22f).toFloat()
+                    setStroke(dp(1.2f), Color.argb(190, 192, 132, 252))
+                }
+                setOnClickListener { /* consume */ }
+            }
+            card.addView(TextView(context).apply {
+                text = "Switch Active Chat"
+                setTextColor(Color.WHITE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+                setPadding(0, 0, 0, dp(10f))
+            })
+
+            fun makeRow(label: String, sub: String, selected: Boolean, onTap: () -> Unit): View = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
+                background = GradientDrawable().apply {
+                    setColor(if (selected) Color.argb(135, 92, 42, 160) else Color.argb(110, 34, 24, 58))
+                    cornerRadius = dp(12f).toFloat()
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(6f) }
+                addView(TextView(context).apply {
+                    text = label
+                    setTextColor(Color.WHITE)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+                    maxLines = 1
+                })
+                if (sub.isNotBlank()) {
+                    addView(TextView(context).apply {
+                        text = sub
+                        setTextColor(Color.parseColor("#B8AED0"))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        maxLines = 1
+                    })
+                }
+                setOnClickListener {
+                    soundEngine.playClick()
+                    onTap()
+                    host.visibility = View.GONE
+                }
+            }
+
+            val listCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            listCol.addView(
+                makeRow("+ New Assistant Chat", "Start a fresh thread", assistSessionId == null) {
+                    assistSessionId = null
+                    lastMessageId = null
+                    chatSwitchChip?.text = "Chat: New"
+                }
+            )
+            sessions.forEach { s ->
+                listCol.addView(
+                    makeRow(
+                        label = s.title.ifBlank { "Untitled Chat" },
+                        sub = s.lastMessagePreview.take(48).ifBlank { "${s.messageCount} messages" },
+                        selected = assistSessionId == s.id,
+                    ) {
+                        assistSessionId = s.id
+                        lastMessageId = s.activeLeafId
+                        chatSwitchChip?.text = "Chat: ${s.title.take(12)}"
+                    }
+                )
+            }
+            val scroller = ScrollView(context).apply {
+                addView(listCol)
+            }
+            card.addView(scroller, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(300f)))
+            host.addView(
+                card,
+                FrameLayout.LayoutParams(dp(300f), FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            )
+            host.visibility = View.VISIBLE
+        }
+    }
+
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
-        drawModeActive = false
-        drawOverlay?.drawEnabled = false
-        drawOverlay?.clearStrokes()
-        drawChip?.text = "Circle"
+        WakeWordService.setPaused(context.applicationContext, true)
+        isVisible = true
+        isTypingMode = false
+        bubbleIsRetryAction = false
+        includeScreenVision = true
+        clearAllCrops()
+        drawOverlay?.drawEnabled = capturedScreenshot != null
+        sendBtnView?.visibility = View.GONE
+        inputEdit?.setText("")
+        updateScreenChipAppearance()
+        rebuildAttachmentPreviewStrip()
+
         scope.launch {
             val prefs = PreferencesStore(context.applicationContext).preferencesFlow.first()
             soundEngine.enabled = prefs.soundsEnabled
             soundEngine.hapticsEnabled = prefs.hapticsEnabled
             soundEngine.masterVolume = prefs.sfxVolume
+            soundEngine.startupSoundId = prefs.startupSoundId
+            soundEngine.startupSoundCustomPath = prefs.startupSoundCustomPath
             soundEngine.playAssistantSummon()
             faceView?.updateState(newGender = prefs.avatarGender, newMood = "happy")
         }
-        mainHandler.postDelayed({ startListening() }, 360L)
+
+        showListenRunnable?.let { mainHandler.removeCallbacks(it) }
+        val r = Runnable {
+            if (isVisible && !isTypingMode && croppedRegions.isEmpty()) {
+                startListening()
+            }
+        }
+        showListenRunnable = r
+        mainHandler.postDelayed(r, 420L)
+    }
+
+    private fun cancelAllActiveWork() {
+        showListenRunnable?.let { mainHandler.removeCallbacks(it) }
+        showListenRunnable = null
+        cancelListeningQuietly()
+        askJob?.cancel()
+        askJob = null
+        llmClient.cancelActiveRequests()
+        if (::celliumTts.isInitialized) celliumTts.stop()
+        faceView?.updateState(isListening = false, isMicReady = false, isTalking = false)
     }
 
     override fun onHide() {
-        stopListening()
-        if (::celliumTts.isInitialized) celliumTts.stop()
+        isVisible = false
+        // 4h: Closing Cel IMMEDIATELY aborts any background LLM / STT / TTS work!
+        cancelAllActiveWork()
+        WakeWordService.setPaused(context.applicationContext, false)
         super.onHide()
     }
 
     override fun onDestroy() {
-        stopListening()
-        cloudSttJob?.cancel()
+        isVisible = false
+        cancelAllActiveWork()
+        WakeWordService.setPaused(context.applicationContext, false)
+        clearAllCrops()
         runCatching { speechRecognizer?.destroy() }
         if (::celliumTts.isInitialized) runCatching { celliumTts.release() }
         if (::soundEngine.isInitialized) runCatching { soundEngine.release() }
@@ -653,16 +1118,43 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         super.onDestroy()
     }
 
-    private fun startListening() {
-        if (::celliumTts.isInitialized) celliumTts.stop()
+    private fun cancelListeningQuietly() {
+        showListenRunnable?.let { mainHandler.removeCallbacks(it) }
+        showListenRunnable = null
+        isListening = false
+        sttLaunchJob?.cancel()
+        sttLaunchJob = null
         cloudSttJob?.cancel()
+        cloudSttJob = null
+        if (::celliumStt.isInitialized) celliumStt.cancelRecording()
+        mainHandler.post {
+            runCatching { speechRecognizer?.cancel() }
+            faceView?.updateState(isListening = false, isMicReady = false)
+        }
+    }
+
+    private fun stopListeningForSubmit() {
+        isListening = false
+        if (::celliumStt.isInitialized) celliumStt.requestStopRecording()
+        mainHandler.post {
+            runCatching { speechRecognizer?.stopListening() }
+            faceView?.updateState(isListening = false, isMicReady = false)
+        }
+    }
+
+    private fun startListening() {
+        if (!isVisible) return
+        if (::celliumTts.isInitialized) celliumTts.stop()
+        cancelListeningQuietly()
         isListening = true
+        bubbleIsRetryAction = false
         faceView?.updateState(newMood = "listening", isListening = true, isMicReady = false)
         showBubble("Starting mic...")
 
-        scope.launch {
+        sttLaunchJob = scope.launch {
             val appCtx = context.applicationContext
             val prefs = PreferencesStore(appCtx).preferencesFlow.first()
+            if (!isListening || !isVisible || isTypingMode) return@launch
             val sttEngineId = prefs.sttEngine
             if (sttEngineId != CelliumSttEngine.ENGINE_DEVICE) {
                 val opt = CelliumSttEngine.ALL_ENGINES.firstOrNull { it.id == sttEngineId }
@@ -688,7 +1180,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                         silenceAutoStopMs = 3_500L,
                         onReadyForSpeech = {
                             mainHandler.post {
-                                if (isListening) {
+                                if (isListening && isVisible && !isTypingMode) {
                                     faceView?.updateState(newMood = "listening", isListening = true, isMicReady = true)
                                     showBubble("Listening...")
                                 }
@@ -696,17 +1188,27 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                         },
                         onTranscribing = {
                             mainHandler.post {
-                                isListening = false
-                                faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
-                                showBubble("Transcribing...")
+                                if (isVisible && !isTypingMode) {
+                                    isListening = false
+                                    faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
+                                    showBubble("Transcribing...")
+                                }
                             }
                         },
                     )
                     isListening = false
-                    res.onSuccess { txt ->
-                        if (txt.isNotBlank()) askCel(txt) else faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
+                    if (!isVisible || isTypingMode) return@launch
+                    res.onSuccess { rawTxt ->
+                        val cleaned = CelliumSttEngine.sanitizeTranscript(rawTxt)
+                        if (cleaned.isNotBlank()) {
+                            askCel(cleaned)
+                        } else {
+                            faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
+                            showBubble("Didn't catch that — tap Mic or type!")
+                        }
                     }.onFailure {
                         faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
+                        showBubble("Mic idle — tap Mic or type!")
                     }
                 }
             } else {
@@ -717,6 +1219,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
 
     private fun startDeviceSpeechRecognizer() {
         mainHandler.post {
+            if (!isVisible || isTypingMode) return@post
             runCatching {
                 speechRecognizer?.destroy()
                 val sr = SpeechRecognizer.createSpeechRecognizer(context)
@@ -724,8 +1227,10 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 sr.setRecognitionListener(object : RecognitionListener {
                     override fun onReadyForSpeech(params: Bundle?) {
                         mainHandler.post {
-                            faceView?.updateState(newMood = "listening", isListening = true, isMicReady = true)
-                            showBubble("Listening...")
+                            if (isListening && isVisible && !isTypingMode) {
+                                faceView?.updateState(newMood = "listening", isListening = true, isMicReady = true)
+                                showBubble("Listening...")
+                            }
                         }
                     }
                     override fun onBeginningOfSpeech() = Unit
@@ -733,7 +1238,10 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     override fun onBufferReceived(buffer: ByteArray?) = Unit
                     override fun onEndOfSpeech() {
                         isListening = false
-                        faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
+                        if (isVisible && !isTypingMode) {
+                            faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
+                            showBubble("Transcribing...")
+                        }
                     }
                     override fun onError(error: Int) {
                         isListening = false
@@ -741,10 +1249,18 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     }
                     override fun onResults(results: Bundle?) {
                         isListening = false
-                        val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty().trim()
-                        if (text.isNotEmpty()) askCel(text) else faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
+                        if (!isVisible || isTypingMode) return
+                        val raw = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                        val cleaned = CelliumSttEngine.sanitizeTranscript(raw)
+                        if (cleaned.isNotEmpty()) {
+                            askCel(cleaned)
+                        } else {
+                            faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
+                            showBubble("Didn't catch that — tap Mic or type!")
+                        }
                     }
                     override fun onPartialResults(partialResults: Bundle?) {
+                        if (!isListening || !isVisible || isTypingMode) return
                         val p = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
                         if (p.isNotBlank()) showBubble("\"$p\"")
                     }
@@ -762,13 +1278,6 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         }
     }
 
-    private fun stopListening() {
-        isListening = false
-        if (::celliumStt.isInitialized) celliumStt.requestStopRecording()
-        runCatching { speechRecognizer?.stopListening() }
-        faceView?.updateState(isListening = false, isMicReady = false)
-    }
-
     private fun showBubble(text: String) {
         mainHandler.post {
             speechBubble?.apply {
@@ -778,31 +1287,58 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         }
     }
 
-    private fun askCel(userText: String) {
+    private fun saveBitmapsToAttachments(bitmaps: List<Bitmap>): String {
+        if (bitmaps.isEmpty()) return ""
+        val dir = File(context.applicationContext.filesDir, "attachments").apply { mkdirs() }
+        val saved = ArrayList<String>(bitmaps.size)
+        bitmaps.forEachIndexed { idx, bmp ->
+            if (!bmp.isRecycled) {
+                val outFile = File(dir, "assist_${System.currentTimeMillis()}_$idx.jpg")
+                runCatching {
+                    FileOutputStream(outFile).use { fos ->
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 88, fos)
+                    }
+                    saved.add(outFile.absolutePath)
+                }
+            }
+        }
+        return saved.joinToString("\n")
+    }
+
+    private fun askCel(userText: String, explicitBitmaps: List<Bitmap>? = null) {
+        val cleanedUserText = userText.trim()
+        if (cleanedUserText.isEmpty()) return
+        cancelListeningQuietly()
+        bubbleIsRetryAction = false
         faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
         showBubble("Thinking...")
 
-        val hadHighlights = drawOverlay?.hasStrokes() == true
-        val rawScreenshot = capturedScreenshot
-        val bmpToSend: Bitmap? = when {
-            !includeScreenVision || rawScreenshot == null -> null
-            hadHighlights -> drawOverlay?.compositeOntoScreenshot(rawScreenshot)
-            else -> rawScreenshot
+        val bitmapsToSend: List<Bitmap> = explicitBitmaps ?: buildList {
+            val rawShot = capturedScreenshot
+            if (includeScreenVision && rawShot != null && !rawShot.isRecycled) {
+                add(rawShot)
+            }
+            croppedRegions.forEach { sel ->
+                if (!sel.bitmap.isRecycled) {
+                    sel.bitmap.copy(Bitmap.Config.ARGB_8888, false)?.let { add(it) }
+                }
+            }
         }
-        if (hadHighlights) {
-            drawOverlay?.clearStrokes()
-            drawModeActive = false
-            drawOverlay?.drawEnabled = false
-            drawChip?.text = "Circle"
-        }
-
-        val effectivePrompt = if (hadHighlights && bmpToSend != null) {
-            "[The user circled/highlighted a specific region on this screen in glowing violet/cyan — focus ONLY on what they highlighted!] $userText"
-        } else {
-            userText
+        val cropCount = croppedRegions.size
+        if (explicitBitmaps == null && croppedRegions.isNotEmpty()) {
+            clearAllCrops()
         }
 
-        scope.launch {
+        val effectivePrompt = when {
+            cropCount > 0 && includeScreenVision ->
+                "[User attached full screen + $cropCount circled cropped region(s). Focus closely on the cropped regions!] $cleanedUserText"
+            cropCount > 0 ->
+                "[User circled and cropped $cropCount specific region(s) from their screen — answer specifically about these cropped image(s)!] $cleanedUserText"
+            else -> cleanedUserText
+        }
+
+        askJob?.cancel()
+        askJob = scope.launch {
             try {
                 val appCtx = context.applicationContext
                 val prefs = PreferencesStore(appCtx).preferencesFlow.first()
@@ -813,8 +1349,9 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 val personas = dao.getAllPersonasOnce().map {
                     CustomPersona(it.id, it.name, it.iconKey, it.tagline, it.systemPrompt, it.accentHex)
                 }
-                val latestNonArena = dao.getAllSessionsOnce().firstOrNull { !it.isArena && !it.isLocked }
-                val personaId = latestNonArena?.personaId?.ifBlank { prefs.defaultPersonaId } ?: prefs.defaultPersonaId
+                val activeSession = assistSessionId?.let { dao.getSession(it) }
+                    ?: dao.getAllSessionsOnce().firstOrNull { !it.isArena && !it.isLocked }
+                val personaId = activeSession?.personaId?.ifBlank { prefs.defaultPersonaId } ?: prefs.defaultPersonaId
                 val persona = BuiltInPersonas.resolve(personaId, personas)
                 val memories = dao.getAllMemoriesOnce()
 
@@ -823,13 +1360,20 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     dao.upsertSession(
                         SessionEntity(
                             id = newSid,
-                            title = "Assistant · ${userText.take(32)}",
+                            title = "Assistant · ${cleanedUserText.take(28)}",
                             personaId = persona.id,
                             providerId = prov.id,
                             modelName = prov.selectedModel,
                         )
                     )
+                    mainHandler.post { chatSwitchChip?.text = "Chat: ${cleanedUserText.take(10)}" }
                 }
+
+                // 4k: Persist attached screenshots & crops to disk so they appear in Chat!
+                val savedAttachmentPaths = withContext(Dispatchers.IO) {
+                    saveBitmapsToAttachments(bitmapsToSend)
+                }
+
                 val priorHistory = dao.getMessagesForSessionOnce(sid)
                 val userMsgId = UUID.randomUUID().toString()
                 dao.upsertMessage(
@@ -838,8 +1382,9 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                         sessionId = sid,
                         parentId = lastMessageId ?: priorHistory.lastOrNull()?.id,
                         role = "user",
-                        content = userText,
-                        tokenEstimate = ProviderPresets.estimateTokens(userText),
+                        content = cleanedUserText,
+                        attachmentPath = savedAttachmentPaths,
+                        tokenEstimate = ProviderPresets.estimateTokens(cleanedUserText),
                     )
                 )
 
@@ -856,45 +1401,88 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                         includeAgentInstructions = false,
                         includeMoodInstructions = prefs.moodMethod == "inline_tag",
                     ),
+                    includeDeviceActions = true,
                     extraInstruction = "[Default Android Assistant] Answer crisply in 1 to 3 spoken sentences without markdown symbols.",
                 )
 
-                val sb = StringBuilder()
-                val maxRetries = prefs.maxAutoRetries.coerceIn(0, 3)
-                var attempt = 0
-                while (true) {
-                    sb.clear()
-                    try {
-                        llmClient.streamChat(
-                            provider = prov,
-                            systemPrompt = sysPrompt,
-                            history = priorHistory.takeLast(14),
-                            userPrompt = effectivePrompt,
-                            imageBitmap = bmpToSend,
-                        ).collect { chunk ->
-                            if (chunk.contentDelta.isNotEmpty()) {
-                                sb.append(chunk.contentDelta)
-                                val (_, clean) = ProviderPresets.parseThoughts(sb.toString())
-                                val (tagMood, body) = MoodDetector.extractInlineMoodTag(clean)
-                                if (tagMood != null) faceView?.updateState(newMood = tagMood, newGender = prefs.avatarGender)
-                                if (body.isNotBlank()) showBubble(body)
+                // 4m: Quiet agentic loop (up to 3 device action steps before final spoken answer)
+                var currentHistory = priorHistory.takeLast(14).toMutableList()
+                var currentPrompt = effectivePrompt
+                var currentImages = bitmapsToSend
+                var finalRawReply = ""
+
+                for (step in 0..2) {
+                    val sb = StringBuilder()
+                    val maxRetries = prefs.maxAutoRetries.coerceIn(0, 3)
+                    var attempt = 0
+                    while (true) {
+                        sb.clear()
+                        try {
+                            llmClient.streamChat(
+                                provider = prov,
+                                systemPrompt = sysPrompt,
+                                history = currentHistory,
+                                userPrompt = currentPrompt,
+                                imageBitmaps = currentImages,
+                            ).collect { chunk ->
+                                if (chunk.contentDelta.isNotEmpty()) {
+                                    sb.append(chunk.contentDelta)
+                                    val (_, clean) = ProviderPresets.parseThoughts(sb.toString())
+                                    val (tagMood, _) = MoodDetector.extractInlineMoodTag(clean)
+                                    if (tagMood != null) {
+                                        faceView?.updateState(newMood = tagMood, newGender = prefs.avatarGender)
+                                    }
+                                }
                             }
+                            break
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (e: Exception) {
+                            if (!UniversalLlmClient.isRetryableError(e) || attempt >= maxRetries) throw e
+                            attempt++
+                            showBubble("Busy — retrying ($attempt/$maxRetries)...")
+                            delay(1200L * attempt)
                         }
+                    }
+
+                    val (_, cleanStep) = ProviderPresets.parseThoughts(sb.toString())
+                    val actions = AndroidDeviceActions.extractActionPayloads(cleanStep)
+                    if (actions.isNotEmpty() && step < 2) {
+                        showBubble("Running action...")
+                        faceView?.updateState(newMood = "working", newGender = prefs.avatarGender)
+                        val resultsText = buildString {
+                            for (payload in actions.take(3)) {
+                                val res = AndroidDeviceActions.executePayload(appCtx, payload)
+                                appendLine("[DEVICE_ACTION_RESULT (${res.action}, success=${res.success})]: ${res.output}")
+                            }
+                        }.trim()
+                        currentHistory.add(
+                            MessageEntity(
+                                id = UUID.randomUUID().toString(),
+                                sessionId = sid,
+                                role = "user",
+                                content = currentPrompt,
+                            )
+                        )
+                        currentHistory.add(
+                            MessageEntity(
+                                id = UUID.randomUUID().toString(),
+                                sessionId = sid,
+                                role = "assistant",
+                                content = cleanStep,
+                            )
+                        )
+                        currentPrompt = "$resultsText\nNow give your concise natural spoken answer to the user."
+                        currentImages = emptyList()
+                        showBubble("Thinking...")
+                    } else {
+                        finalRawReply = AndroidDeviceActions.stripActionTags(cleanStep)
                         break
-                    } catch (e: Exception) {
-                        if (!UniversalLlmClient.isRetryableError(e) || attempt >= maxRetries) throw e
-                        attempt++
-                        showBubble("Busy — retrying ($attempt/$maxRetries)...")
-                        delay(1200L * attempt)
                     }
                 }
-                if (bmpToSend != null && bmpToSend !== rawScreenshot) {
-                    bmpToSend.recycle()
-                }
 
-                val (_, cleanFinal) = ProviderPresets.parseThoughts(sb.toString())
-                val (tagMood, finalBody) = MoodDetector.extractInlineMoodTag(cleanFinal)
-                val reply = finalBody.ifBlank { cleanFinal.ifBlank { "All set!" } }
+                val (tagMood, finalBody) = MoodDetector.extractInlineMoodTag(finalRawReply)
+                val reply = finalBody.ifBlank { finalRawReply.ifBlank { "All set!" } }
                 val mood = tagMood ?: MoodDetector.detectMood(reply)
 
                 val assistantMsgId = UUID.randomUUID().toString()
@@ -925,22 +1513,61 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     )
                 }
 
+                lastFailedPrompt = null
+                lastFailedImages = emptyList()
+
+                if (!isVisible) return@launch
                 faceView?.updateState(newMood = mood, newGender = prefs.avatarGender)
-                showBubble(reply)
+
+                // 4j & 4t: Hold text reveal until voice audio starts playing (or typewriter for Synth!)
+                val voiceEngine = prefs.liveTtsEngine
+                val voiceName = prefs.liveTtsVoiceName
+                val voicePitch = prefs.liveTtsPitch
+                val voiceRate = prefs.liveTtsSpeechRate
+                val isSynth = voiceEngine.equals(CelliumTtsEngine.ENGINE_SYNTH, ignoreCase = true)
+
+                if (!isSynth) {
+                    showBubble("Preparing voice...")
+                } else {
+                    showBubble("")
+                }
+
                 if (::celliumTts.isInitialized) {
                     celliumTts.speak(
                         rawText = reply,
-                        engine = prefs.ttsEngine,
-                        voiceName = prefs.ttsVoiceName,
-                        pitch = prefs.ttsPitch,
-                        speechRate = prefs.ttsSpeechRate,
-                        onStart = { mainHandler.post { faceView?.updateState(isTalking = true) } },
-                        onComplete = { mainHandler.post { faceView?.updateState(isTalking = false) } },
+                        engine = voiceEngine,
+                        voiceName = voiceName,
+                        pitch = voicePitch,
+                        speechRate = voiceRate,
+                        onStart = {
+                            mainHandler.post {
+                                if (!isVisible) return@post
+                                faceView?.updateState(isTalking = true)
+                                if (!isSynth) showBubble(reply)
+                            }
+                        },
+                        onSynthCharProgress = if (isSynth) { count ->
+                            if (isVisible) showBubble(reply.take(count))
+                        } else null,
+                        onComplete = {
+                            mainHandler.post {
+                                faceView?.updateState(isTalking = false)
+                                if (isVisible) showBubble(reply)
+                            }
+                        },
                     )
+                } else {
+                    showBubble(reply)
                 }
+            } catch (ce: CancellationException) {
+                // Aborted cleanly on close/hide
             } catch (e: Exception) {
+                // 4v: Preserve prompt + images so user can tap bubble to retry when back online!
+                lastFailedPrompt = cleanedUserText
+                lastFailedImages = bitmapsToSend
+                bubbleIsRetryAction = true
                 faceView?.updateState(newMood = "error")
-                showBubble("Error: ${e.localizedMessage ?: "Assistant failed"}")
+                showBubble("Offline/Error: ${e.localizedMessage?.take(90) ?: "Request failed"}\nTap here to Retry")
             }
         }
     }

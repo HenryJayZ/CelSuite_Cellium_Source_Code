@@ -2,10 +2,12 @@ package com.henny.cellium.data.sync
 
 import android.content.Context
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
-import com.google.firebase.firestore.firestore
+import com.google.firebase.firestore.Source
 import com.henny.cellium.R
 import com.henny.cellium.core.CelliumPreferences
 import com.henny.cellium.core.DevLogBuffer
@@ -54,38 +56,61 @@ data class CloudStorageSummary(
 )
 
 /**
- * Full Google Account Cloud Sync Manager with:
- * - 3-mode Guest -> Google Sign-In conflict resolution (Merge / Replace Cloud / Replace Local)
- * - Firebase Spark free-tier 1 GiB quota enforcement (0.01% per user = 107,374 bytes / ~104.9 KB)
- * - Full Cloud Storage Inspector & per-item delete menu
- * - Syncs providers/keys, starred models, hidden providers, personas, memories, templates & chats
+ * Google Account Cloud Sync Manager using official Firebase Android SDK named-database initialization
+ * and strict Source.SERVER reads so offline/permission issues surface cleanly instead of silently
+ * returning empty local cache ("0 chats, 0 providers").
  */
 class CloudSyncManager(
     private val context: Context,
     private val dao: CelliumDao,
     private val prefsStore: PreferencesStore,
 ) {
-    private val db by lazy {
-        val dbId = runCatching { context.getString(R.string.firestore_database_id).trim() }.getOrDefault("")
-        if (dbId.isNotEmpty() && dbId != "(default)") Firebase.firestore(dbId) else Firebase.firestore
+    private val databaseId: String by lazy {
+        runCatching { context.getString(R.string.firestore_database_id).trim() }.getOrDefault("")
+    }
+
+    private val db: FirebaseFirestore by lazy {
+        val app = FirebaseApp.getInstance()
+        if (databaseId.isNotEmpty() && databaseId != "(default)") {
+            FirebaseFirestore.getInstance(app, databaseId)
+        } else {
+            FirebaseFirestore.getInstance(app)
+        }
     }
 
     companion object {
         // Firebase Spark free Firestore storage = 1 GiB (1,073,741,824 bytes).
-        // 0.01% per user = 107,374 bytes (~104.9 KB), safely supporting 10,000 free users!
+        // 0.01% per user = 107,374 bytes (~104.9 KB).
         const val FIREBASE_SPARK_TOTAL_BYTES: Long = 1_073_741_824L
         const val USER_QUOTA_BYTES: Long = 107_374L
+
+        private val DOC_ID_BAD_CHARS = Regex("[^a-zA-Z0-9_.\\-]")
+
+        private fun safeDocId(raw: String, fallbackPrefix: String): String {
+            val cleaned = DOC_ID_BAD_CHARS.replace(raw.trim(), "_").take(150)
+            return cleaned.ifBlank { "${fallbackPrefix}_${System.currentTimeMillis()}" }
+        }
+
+        private fun estimateDocBytes(data: Map<String, Any>?): Long {
+            if (data == null) return 64L
+            var sum = 64L
+            data.forEach { (k, v) ->
+                sum += k.toByteArray().size + v.toString().toByteArray().size + 16L
+            }
+            return sum
+        }
     }
 
     suspend fun hasCloudData(): Boolean = withContext(Dispatchers.IO) {
         val user = Firebase.auth.currentUser ?: return@withContext false
         val userDoc = db.collection("users").document(user.uid)
         runCatching {
-            val acc = userDoc.collection("account").document("profile_state").get().await()
+            user.getIdToken(false).await()
+            val acc = userDoc.collection("account").document("profile_state").get(Source.SERVER).await()
             if (acc.exists()) return@runCatching true
-            val sessions = userDoc.collection("sessions").limit(1).get().await()
+            val sessions = userDoc.collection("sessions").limit(1).get(Source.SERVER).await()
             if (!sessions.isEmpty) return@runCatching true
-            val providers = userDoc.collection("providers").limit(1).get().await()
+            val providers = userDoc.collection("providers").limit(1).get(Source.SERVER).await()
             !providers.isEmpty
         }.getOrDefault(false)
     }
@@ -95,28 +120,18 @@ class CloudSyncManager(
             ?: return@withContext Result.failure(IllegalStateException("Sign in with Google first to inspect cloud storage."))
         val userDoc = db.collection("users").document(user.uid)
         runCatching {
+            user.getIdToken(false).await()
             val items = mutableListOf<CloudStorageItem>()
             var totalBytes = 0L
 
-            fun estimateDocBytes(data: Map<String, Any>?): Long {
-                if (data == null) return 64L
-                var sum = 64L
-                data.forEach { (k, v) ->
-                    sum += k.toByteArray().size + v.toString().toByteArray().size + 16L
-                }
-                return sum
-            }
-
-            // Account preferences & starred models
-            val accDoc = runCatching { userDoc.collection("account").document("profile_state").get().await() }.getOrNull()
-            if (accDoc != null && accDoc.exists()) {
+            val accDoc = userDoc.collection("account").document("profile_state").get(Source.SERVER).await()
+            if (accDoc.exists()) {
                 val sz = estimateDocBytes(accDoc.data)
                 totalBytes += sz
                 items.add(CloudStorageItem("account", "profile_state", "Preferences, Stars & Stats", "Theme, voice, starred models, usage stats", sz))
             }
 
-            // Providers
-            val provSnap = userDoc.collection("providers").get().await()
+            val provSnap = userDoc.collection("providers").get(Source.SERVER).await()
             for (d in provSnap.documents) {
                 val sz = estimateDocBytes(d.data)
                 totalBytes += sz
@@ -131,11 +146,10 @@ class CloudSyncManager(
                 )
             }
 
-            // Sessions + nested messages
-            val sessSnap = userDoc.collection("sessions").get().await()
+            val sessSnap = userDoc.collection("sessions").get(Source.SERVER).await()
             for (d in sessSnap.documents) {
                 var sz = estimateDocBytes(d.data)
-                val msgs = userDoc.collection("sessions").document(d.id).collection("messages").get().await()
+                val msgs = userDoc.collection("sessions").document(d.id).collection("messages").get(Source.SERVER).await()
                 msgs.documents.forEach { m -> sz += estimateDocBytes(m.data) }
                 totalBytes += sz
                 items.add(
@@ -149,24 +163,21 @@ class CloudSyncManager(
                 )
             }
 
-            // Personas
-            val perSnap = userDoc.collection("personas").get().await()
+            val perSnap = userDoc.collection("personas").get(Source.SERVER).await()
             for (d in perSnap.documents) {
                 val sz = estimateDocBytes(d.data)
                 totalBytes += sz
                 items.add(CloudStorageItem("personas", d.id, "Persona: ${d.getString("name") ?: d.id}", d.getString("tagline").orEmpty(), sz))
             }
 
-            // Memories
-            val memSnap = userDoc.collection("memories").get().await()
+            val memSnap = userDoc.collection("memories").get(Source.SERVER).await()
             for (d in memSnap.documents) {
                 val sz = estimateDocBytes(d.data)
                 totalBytes += sz
                 items.add(CloudStorageItem("memories", d.id, "Memory: ${d.getString("title") ?: d.id}", d.getString("content").orEmpty().take(60), sz))
             }
 
-            // Templates
-            val tplSnap = userDoc.collection("templates").get().await()
+            val tplSnap = userDoc.collection("templates").get(Source.SERVER).await()
             for (d in tplSnap.documents) {
                 val sz = estimateDocBytes(d.data)
                 totalBytes += sz
@@ -186,8 +197,9 @@ class CloudSyncManager(
             ?: return@withContext Result.failure(IllegalStateException("Not signed in."))
         val userDoc = db.collection("users").document(user.uid)
         runCatching {
+            user.getIdToken(false).await()
             if (collection == "sessions") {
-                val msgs = userDoc.collection("sessions").document(docId).collection("messages").get().await()
+                val msgs = userDoc.collection("sessions").document(docId).collection("messages").get(Source.SERVER).await()
                 msgs.documents.forEach { it.reference.delete().await() }
             }
             userDoc.collection(collection).document(docId).delete().await()
@@ -197,14 +209,14 @@ class CloudSyncManager(
 
     private suspend fun wipeAllCloudData(uid: String) {
         val userDoc = db.collection("users").document(uid)
-        val sessions = userDoc.collection("sessions").get().await()
+        val sessions = userDoc.collection("sessions").get(Source.SERVER).await()
         for (s in sessions.documents) {
-            val msgs = s.reference.collection("messages").get().await()
+            val msgs = s.reference.collection("messages").get(Source.SERVER).await()
             msgs.documents.forEach { it.reference.delete().await() }
             s.reference.delete().await()
         }
         listOf("providers", "personas", "memories", "templates", "account").forEach { col ->
-            val snap = userDoc.collection(col).get().await()
+            val snap = userDoc.collection(col).get(Source.SERVER).await()
             snap.documents.forEach { it.reference.delete().await() }
         }
     }
@@ -221,6 +233,9 @@ class CloudSyncManager(
         val userDoc = db.collection("users").document(uid)
 
         runCatching {
+            // Ensure Firebase Auth token is valid before issuing Firestore server operations
+            user.getIdToken(false).await()
+
             if (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD) {
                 wipeAllCloudData(uid)
             } else if (mode == CloudSyncMode.KEEP_CLOUD_REPLACE_LOCAL) {
@@ -236,9 +251,9 @@ class CloudSyncManager(
             val allowUpload = mode != CloudSyncMode.KEEP_CLOUD_REPLACE_LOCAL
 
             // 1. Providers & API Keys
-            var syncedProviders = 0
+            var deltaProviders = 0
             val localProviders = dao.getAllProviders().associateBy { it.id }
-            val remoteProvSnap = userDoc.collection("providers").get().await()
+            val remoteProvSnap = userDoc.collection("providers").get(Source.SERVER).await()
             val remoteProvMap = remoteProvSnap.documents.associateBy { it.id }
 
             if (allowDownload) {
@@ -251,7 +266,7 @@ class CloudSyncManager(
                         dao.upsertProvider(
                             ProviderProfileEntity(
                                 id = id,
-                                name = doc.getString("name") ?: local?.name ?: id,
+                                name = doc.getString("name").orEmpty().ifBlank { local?.name ?: id },
                                 badge = doc.getString("badge") ?: local?.badge ?: "sparkle",
                                 protocol = doc.getString("protocol") ?: local?.protocol ?: "openai",
                                 baseUrl = doc.getString("baseUrl") ?: local?.baseUrl.orEmpty(),
@@ -267,25 +282,27 @@ class CloudSyncManager(
                                 updatedAtMs = maxOf(remoteUpdated, local?.updatedAtMs ?: 0L),
                             )
                         )
-                        syncedProviders++
+                        deltaProviders++
                     }
                 }
             }
 
             if (allowUpload) {
                 for (lp in localProviders.values) {
-                    val shouldUpload = lp.apiKey.isNotBlank() || lp.isCustom || lp.usageCount > 0 || lp.id == currentPrefs.activeProviderId
-                    val remoteDoc = remoteProvMap[lp.id]
+                    val docId = safeDocId(lp.id, "prov")
+                    val shouldUpload = lp.apiKey.isNotBlank() || lp.isCustom || lp.usageCount > 0 ||
+                        lp.id == currentPrefs.activeProviderId
+                    val remoteDoc = remoteProvMap[docId]
                     val remoteUpdated = remoteDoc?.getLong("updatedAtMs") ?: -1L
                     val remoteKey = remoteDoc?.getString("apiKey").orEmpty()
                     if (shouldUpload && (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD || remoteDoc == null || lp.updatedAtMs > remoteUpdated || (remoteKey.isBlank() && lp.apiKey.isNotBlank()))) {
-                        // Never upload bulky cachedModelsJson to cloud (models are fetched live), saving ~20+ KB for chats!
                         val estSize = 240L + lp.apiKey.length
                         if (byteBudgetRemaining < estSize) continue
                         byteBudgetRemaining -= estSize
+                        val safeName = lp.name.trim().ifBlank { docId }.take(120)
                         val payload = mapOf(
                             "userId" to uid,
-                            "name" to lp.name.take(120),
+                            "name" to safeName,
                             "badge" to lp.badge,
                             "protocol" to lp.protocol,
                             "baseUrl" to lp.baseUrl,
@@ -301,8 +318,8 @@ class CloudSyncManager(
                             "updatedAtMs" to lp.updatedAtMs,
                             "syncedAt" to FieldValue.serverTimestamp(),
                         )
-                        userDoc.collection("providers").document(lp.id).set(payload, SetOptions.merge()).await()
-                        syncedProviders++
+                        userDoc.collection("providers").document(docId).set(payload, SetOptions.merge()).await()
+                        deltaProviders++
                     }
                 }
             }
@@ -314,12 +331,13 @@ class CloudSyncManager(
             val localTotalCost = allMessages.sumOf { it.estimatedCostUsd }
 
             val accountRef = userDoc.collection("account").document("profile_state")
-            val remoteAccount = runCatching { accountRef.get().await() }.getOrNull()
-            val remoteAccountUpdatedMs = remoteAccount?.getLong("updatedAtMs") ?: 0L
+            val remoteAccount = accountRef.get(Source.SERVER).await()
+            val remoteAccountUpdatedMs = remoteAccount.getLong("updatedAtMs") ?: 0L
             val shouldApplyRemotePrefs = mode == CloudSyncMode.KEEP_CLOUD_REPLACE_LOCAL ||
                 currentPrefs.prefsUpdatedAtMs == 0L ||
                 remoteAccountUpdatedMs > currentPrefs.prefsUpdatedAtMs
-            if (allowDownload && remoteAccount != null && remoteAccount.exists() && shouldApplyRemotePrefs) {
+
+            if (allowDownload && remoteAccount.exists() && shouldApplyRemotePrefs) {
                 @Suppress("UNCHECKED_CAST")
                 val remoteHidden = (remoteAccount.get("hiddenProviderIds") as? List<*>)
                     ?.mapNotNull { it as? String }?.toSet()
@@ -375,6 +393,19 @@ class CloudSyncManager(
                     codeWordWrap = remoteAccount.getBoolean("codeWordWrap"),
                     remoteUpdatedAtMs = remoteAccountUpdatedMs,
                 )
+                val remoteLiveEngine = remoteAccount.getString("liveTtsEngine")
+                val remoteLiveVoice = remoteAccount.getString("liveTtsVoiceName")
+                if (!remoteLiveEngine.isNullOrBlank()) {
+                    prefsStore.updateLiveVoiceSettings(
+                        engine = remoteLiveEngine,
+                        voice = remoteLiveVoice.orEmpty(),
+                        pitch = remoteAccount.getDouble("liveTtsPitch")?.toFloat() ?: currentPrefs.liveTtsPitch,
+                        rate = remoteAccount.getDouble("liveTtsSpeechRate")?.toFloat() ?: currentPrefs.liveTtsSpeechRate,
+                    )
+                }
+                remoteAccount.getString("startupSoundId")?.takeIf { it.isNotBlank() }?.let { sid ->
+                    prefsStore.updateStartupSound(sid)
+                }
             }
 
             if (allowUpload) {
@@ -409,6 +440,11 @@ class CloudSyncManager(
                     "typingSpeed" to currentPrefs.typingSpeed,
                     "ttsEngine" to currentPrefs.ttsEngine,
                     "ttsVoiceName" to currentPrefs.ttsVoiceName,
+                    "liveTtsEngine" to currentPrefs.liveTtsEngine,
+                    "liveTtsVoiceName" to currentPrefs.liveTtsVoiceName,
+                    "liveTtsPitch" to currentPrefs.liveTtsPitch.toDouble(),
+                    "liveTtsSpeechRate" to currentPrefs.liveTtsSpeechRate.toDouble(),
+                    "startupSoundId" to currentPrefs.startupSoundId,
                     "sttEngine" to currentPrefs.sttEngine,
                     "sttApiKey" to currentPrefs.sttApiKey,
                     "sttModel" to currentPrefs.sttModel,
@@ -420,10 +456,10 @@ class CloudSyncManager(
                     "arenaPersonaB" to currentPrefs.arenaPersonaB,
                     "maxAutoRetries" to currentPrefs.maxAutoRetries,
                     "codeWordWrap" to currentPrefs.codeWordWrap,
-                    "totalSessions" to maxOf(allSessions.size.toLong(), remoteAccount?.getLong("totalSessions") ?: 0L),
-                    "totalMessages" to maxOf(allMessages.size.toLong(), remoteAccount?.getLong("totalMessages") ?: 0L),
-                    "totalTokens" to maxOf(localTotalTokens, remoteAccount?.getLong("totalTokens") ?: 0L),
-                    "totalEstimatedCostUsd" to maxOf(localTotalCost, remoteAccount?.getDouble("totalEstimatedCostUsd") ?: 0.0),
+                    "totalSessions" to maxOf(allSessions.size.toLong(), remoteAccount.getLong("totalSessions") ?: 0L),
+                    "totalMessages" to maxOf(allMessages.size.toLong(), remoteAccount.getLong("totalMessages") ?: 0L),
+                    "totalTokens" to maxOf(localTotalTokens, remoteAccount.getLong("totalTokens") ?: 0L),
+                    "totalEstimatedCostUsd" to maxOf(localTotalCost, remoteAccount.getDouble("totalEstimatedCostUsd") ?: 0.0),
                     "updatedAtMs" to uploadUpdatedMs,
                     "syncedAt" to FieldValue.serverTimestamp(),
                 )
@@ -431,11 +467,11 @@ class CloudSyncManager(
                 byteBudgetRemaining = (byteBudgetRemaining - 1536L).coerceAtLeast(0L)
             }
 
-            // 3. Personas (only upload custom personas so built-in defaults don't waste cloud chat quota!)
+            // 3. Custom Personas
             val builtInPersonaIds = setOf("default", "celysia", "celeste", "coder", "researcher", "writer", "coach", "anime", "roaster")
-            var syncedPersonas = 0
+            var deltaPersonas = 0
             val localPersonas = dao.getAllPersonasOnce().associateBy { it.id }
-            val remotePersonasSnap = userDoc.collection("personas").get().await()
+            val remotePersonasSnap = userDoc.collection("personas").get(Source.SERVER).await()
             val remotePersonaIds = remotePersonasSnap.documents.map { it.id }.toSet()
             if (allowDownload) {
                 for (doc in remotePersonasSnap.documents) {
@@ -451,38 +487,39 @@ class CloudSyncManager(
                                 createdAtMs = doc.getLong("createdAtMs") ?: System.currentTimeMillis(),
                             )
                         )
-                        syncedPersonas++
+                        deltaPersonas++
                     }
                 }
             }
             if (allowUpload) {
                 for (lp in localPersonas.values) {
                     if (lp.id in builtInPersonaIds) continue
-                    if (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD || lp.id !in remotePersonaIds) {
+                    val docId = safeDocId(lp.id, "persona")
+                    if (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD || docId !in remotePersonaIds) {
                         val est = 220L + lp.systemPrompt.take(2000).length
-                        if (byteBudgetRemaining < est + 65_000L) break
+                        if (byteBudgetRemaining < est + 32_000L) break
                         byteBudgetRemaining -= est
-                        userDoc.collection("personas").document(lp.id).set(
+                        userDoc.collection("personas").document(docId).set(
                             mapOf(
                                 "userId" to uid,
-                                "name" to lp.name.take(80),
-                                "iconKey" to lp.iconKey,
+                                "name" to lp.name.trim().ifBlank { "Custom Persona" }.take(80),
+                                "iconKey" to lp.iconKey.ifBlank { "sparkle" },
                                 "tagline" to lp.tagline.take(200),
                                 "systemPrompt" to lp.systemPrompt.take(2000),
-                                "accentHex" to lp.accentHex,
+                                "accentHex" to lp.accentHex.ifBlank { "#A855F7" },
                                 "createdAtMs" to lp.createdAtMs,
                             ),
                             SetOptions.merge(),
                         ).await()
-                        syncedPersonas++
+                        deltaPersonas++
                     }
                 }
             }
 
             // 4. Memories
-            var syncedMemories = 0
+            var deltaMemories = 0
             val localMemories = dao.getAllMemoriesOnce().associateBy { it.id }
-            val remoteMemoriesSnap = userDoc.collection("memories").get().await()
+            val remoteMemoriesSnap = userDoc.collection("memories").get(Source.SERVER).await()
             val remoteMemoryIds = remoteMemoriesSnap.documents.map { it.id }.toSet()
             if (allowDownload) {
                 for (doc in remoteMemoriesSnap.documents) {
@@ -496,35 +533,36 @@ class CloudSyncManager(
                                 createdAtMs = doc.getLong("createdAtMs") ?: System.currentTimeMillis(),
                             )
                         )
-                        syncedMemories++
+                        deltaMemories++
                     }
                 }
             }
             if (allowUpload) {
                 for (lm in localMemories.values) {
-                    if (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD || lm.id !in remoteMemoryIds) {
+                    val docId = safeDocId(lm.id, "mem")
+                    if (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD || docId !in remoteMemoryIds) {
                         val est = 180L + lm.content.take(2000).length
                         if (byteBudgetRemaining < est) break
                         byteBudgetRemaining -= est
-                        userDoc.collection("memories").document(lm.id).set(
+                        userDoc.collection("memories").document(docId).set(
                             mapOf(
                                 "userId" to uid,
-                                "title" to lm.title.take(120),
+                                "title" to lm.title.trim().ifBlank { "Memory" }.take(120),
                                 "content" to lm.content.take(2000),
                                 "enabled" to lm.enabled,
                                 "createdAtMs" to lm.createdAtMs,
                             ),
                             SetOptions.merge(),
                         ).await()
-                        syncedMemories++
+                        deltaMemories++
                     }
                 }
             }
 
             // 5. Slash Prompt Templates
-            var syncedTemplates = 0
+            var deltaTemplates = 0
             val localTemplates = dao.getAllPromptTemplatesOnce().associateBy { it.id }
-            val remoteTemplatesSnap = userDoc.collection("templates").get().await()
+            val remoteTemplatesSnap = userDoc.collection("templates").get(Source.SERVER).await()
             val remoteTemplateIds = remoteTemplatesSnap.documents.map { it.id }.toSet()
             if (allowDownload) {
                 for (doc in remoteTemplatesSnap.documents) {
@@ -538,34 +576,35 @@ class CloudSyncManager(
                                 createdAtMs = doc.getLong("createdAtMs") ?: System.currentTimeMillis(),
                             )
                         )
-                        syncedTemplates++
+                        deltaTemplates++
                     }
                 }
             }
             if (allowUpload) {
                 for (lt in localTemplates.values) {
-                    if (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD || lt.id !in remoteTemplateIds) {
+                    val docId = safeDocId(lt.id, "tpl")
+                    if (mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD || docId !in remoteTemplateIds) {
                         val est = 180L + lt.promptBody.take(2000).length
                         if (byteBudgetRemaining < est) break
                         byteBudgetRemaining -= est
-                        userDoc.collection("templates").document(lt.id).set(
+                        userDoc.collection("templates").document(docId).set(
                             mapOf(
                                 "userId" to uid,
-                                "slashKey" to lt.slashKey,
-                                "title" to lt.title,
+                                "slashKey" to lt.slashKey.trim().ifBlank { "/custom" },
+                                "title" to lt.title.trim().ifBlank { "Template" },
                                 "promptBody" to lt.promptBody.take(2000),
                                 "createdAtMs" to lt.createdAtMs,
                             ),
                             SetOptions.merge(),
                         ).await()
-                        syncedTemplates++
+                        deltaTemplates++
                     }
                 }
             }
 
-            // 6. Sessions & Messages (within remaining 104.9 KB quota budget!)
+            // 6. Sessions & Messages (Fair Two-Pass Sync using ACTUAL message rows, not stale messageCount!)
             val localSessionsById = allSessions.associateBy { it.id }
-            val remoteSessionsSnap = userDoc.collection("sessions").get().await()
+            val remoteSessionsSnap = userDoc.collection("sessions").get(Source.SERVER).await()
             val remoteSessionsById = remoteSessionsSnap.documents.associateBy { it.id }
             var downloaded = 0
             var uploaded = 0
@@ -575,11 +614,14 @@ class CloudSyncManager(
                     val sid = doc.id
                     val remoteUpdated = doc.getLong("updatedAtMs") ?: 0L
                     val local = localSessionsById[sid]
-                    if (mode == CloudSyncMode.KEEP_CLOUD_REPLACE_LOCAL || local == null || remoteUpdated > local.updatedAtMs) {
+                    val remoteMsgs = userDoc.collection("sessions").document(sid).collection("messages").get(Source.SERVER).await()
+                    val localMsgIds = dao.getMessagesForSessionOnce(sid).map { it.id }.toSet()
+                    val hasMissingMsgs = remoteMsgs.documents.any { it.id !in localMsgIds }
+                    if (mode == CloudSyncMode.KEEP_CLOUD_REPLACE_LOCAL || local == null || remoteUpdated > local.updatedAtMs || hasMissingMsgs) {
                         dao.upsertSession(
                             SessionEntity(
                                 id = sid,
-                                title = doc.getString("title") ?: "Chat",
+                                title = doc.getString("title").orEmpty().ifBlank { "Chat" },
                                 personaId = doc.getString("personaId") ?: "default",
                                 providerId = doc.getString("providerId") ?: "preset_pollinations_free",
                                 modelName = doc.getString("modelName").orEmpty(),
@@ -594,15 +636,13 @@ class CloudSyncManager(
                                 arenaModelB = doc.getString("arenaModelB") ?: local?.arenaModelB ?: "openai-fast",
                                 arenaPersonaB = doc.getString("arenaPersonaB") ?: local?.arenaPersonaB ?: "celeste",
                                 activeLeafId = doc.getString("activeLeafId").orEmpty(),
-                                messageCount = (doc.getLong("messageCount") ?: 0L).toInt(),
+                                messageCount = maxOf((doc.getLong("messageCount") ?: 0L).toInt(), remoteMsgs.size()),
                                 tokenCount = doc.getLong("tokenCount") ?: 0L,
                                 lastMessagePreview = doc.getString("lastMessagePreview").orEmpty(),
                                 createdAtMs = doc.getLong("createdAtMs") ?: System.currentTimeMillis(),
                                 updatedAtMs = remoteUpdated.takeIf { it > 0L } ?: System.currentTimeMillis(),
                             )
                         )
-                        val remoteMsgs = userDoc.collection("sessions").document(sid).collection("messages").get().await()
-                        val localMsgIds = dao.getMessagesForSessionOnce(sid).map { it.id }.toSet()
                         for (mdoc in remoteMsgs.documents) {
                             if (mdoc.id !in localMsgIds) {
                                 dao.upsertMessage(
@@ -633,32 +673,33 @@ class CloudSyncManager(
             }
 
             if (allowUpload) {
-                // Two-Pass Fair Budget Sync:
-                // Never upload locked vault sessions or images.
-                // Pass 1 uploads ALL non-locked session headers (up to 50) first so every chat appears in Cloud!
-                // Pass 2 distributes remaining byte budget round-robin across all synced sessions (newest messages first)
-                // so 1-2 massive chats NEVER starve the other 20+ chats out of the quota!
                 val candidateSessions = allSessions
-                    .filter { !it.isLocked && it.messageCount > 0 }
+                    .filter { !it.isLocked }
                     .sortedByDescending { it.updatedAtMs }
                     .take(50)
 
-                val sessionsToSyncMessages = mutableListOf<Pair<SessionEntity, List<MessageEntity>>>()
+                val sessionsToSyncMessages = mutableListOf<Pair<String, List<MessageEntity>>>()
 
                 for (ls in candidateSessions) {
-                    val remoteDoc = remoteSessionsById[ls.id]
+                    val realMsgs = dao.getMessagesForSessionOnce(ls.id)
+                    if (realMsgs.isEmpty()) continue
+                    val sessDocId = safeDocId(ls.id, "chat")
+                    val remoteDoc = remoteSessionsById[sessDocId]
                     val remoteUpdated = remoteDoc?.getLong("updatedAtMs") ?: -1L
+                    val remoteMsgCount = (remoteDoc?.getLong("messageCount") ?: 0L).toInt()
                     val needsUpload = mode == CloudSyncMode.KEEP_LOCAL_REPLACE_CLOUD ||
                         remoteDoc == null ||
-                        ls.updatedAtMs > remoteUpdated
+                        ls.updatedAtMs > remoteUpdated ||
+                        realMsgs.size > remoteMsgCount
                     if (!needsUpload) continue
                     if (byteBudgetRemaining < 320L) break
 
-                    val sessRef = userDoc.collection("sessions").document(ls.id)
+                    val safeTitle = ls.title.trim().ifBlank { "Untitled Chat" }.take(140)
+                    val sessRef = userDoc.collection("sessions").document(sessDocId)
                     sessRef.set(
                         mapOf(
                             "userId" to uid,
-                            "title" to ls.title.take(140),
+                            "title" to safeTitle,
                             "personaId" to ls.personaId,
                             "providerId" to ls.providerId,
                             "modelName" to ls.modelName,
@@ -672,41 +713,39 @@ class CloudSyncManager(
                             "arenaModelB" to ls.arenaModelB,
                             "arenaPersonaB" to ls.arenaPersonaB,
                             "activeLeafId" to ls.activeLeafId,
-                            "messageCount" to ls.messageCount,
+                            "messageCount" to realMsgs.size,
                             "tokenCount" to ls.tokenCount,
                             "lastMessagePreview" to ls.lastMessagePreview.take(160),
                             "createdAtMs" to ls.createdAtMs,
-                            "updatedAtMs" to ls.updatedAtMs,
+                            "updatedAtMs" to maxOf(ls.updatedAtMs, System.currentTimeMillis()),
                         ),
                         SetOptions.merge(),
                     ).await()
                     byteBudgetRemaining -= 280L
                     uploaded++
-                    val msgsNewestFirst = dao.getMessagesForSessionOnce(ls.id).takeLast(14).reversed()
-                    if (msgsNewestFirst.isNotEmpty()) {
-                        sessionsToSyncMessages.add(ls to msgsNewestFirst)
-                    }
+                    sessionsToSyncMessages.add(sessDocId to realMsgs.takeLast(16).reversed())
                 }
 
                 // Pass 2: round-robin messages across all uploaded sessions until byte budget is spent
                 var depth = 0
                 var madeProgress = true
-                while (madeProgress && byteBudgetRemaining >= 260L && depth < 14) {
+                while (madeProgress && byteBudgetRemaining >= 260L && depth < 16) {
                     madeProgress = false
-                    for ((ls, msgs) in sessionsToSyncMessages) {
+                    for ((sessDocId, msgs) in sessionsToSyncMessages) {
                         if (depth >= msgs.size) continue
                         val m = msgs[depth]
+                        val msgDocId = safeDocId(m.id, "msg")
                         val contentSnippet = m.content.take(1100)
                         val thoughtSnippet = m.thought.take(240)
                         val est = 220L + contentSnippet.length + thoughtSnippet.length
                         if (byteBudgetRemaining < est) continue
                         byteBudgetRemaining -= est
                         madeProgress = true
-                        val sessRef = userDoc.collection("sessions").document(ls.id)
-                        sessRef.collection("messages").document(m.id).set(
+                        val sessRef = userDoc.collection("sessions").document(sessDocId)
+                        sessRef.collection("messages").document(msgDocId).set(
                             mapOf(
                                 "userId" to uid,
-                                "sessionId" to ls.id,
+                                "sessionId" to sessDocId,
                                 "parentId" to m.parentId,
                                 "role" to m.role,
                                 "speakerLabel" to m.speakerLabel,
@@ -729,14 +768,36 @@ class CloudSyncManager(
                 }
             }
 
-            val used = (USER_QUOTA_BYTES - byteBudgetRemaining).coerceIn(0L, USER_QUOTA_BYTES)
-            val usedKb = "%.1f".format(used / 1024.0)
+            // Compute REAL live cloud totals after sync so UI never misleadingly prints "0 everything"
+            val storageSummary = inspectCloudStorage().getOrNull()
+            val totalCloudBytes = storageSummary?.usedBytes ?: (USER_QUOTA_BYTES - byteBudgetRemaining).coerceIn(0L, USER_QUOTA_BYTES)
+            val totalCloudChats = storageSummary?.items?.count { it.collection == "sessions" }
+                ?: maxOf(remoteSessionsById.size, uploaded)
+            val totalCloudProviders = storageSummary?.items?.count { it.collection == "providers" }
+                ?: maxOf(remoteProvMap.size, deltaProviders)
+            val totalCloudPersonas = storageSummary?.items?.count { it.collection == "personas" }
+                ?: maxOf(remotePersonaIds.size, deltaPersonas)
+            val totalCloudMemories = storageSummary?.items?.count { it.collection == "memories" }
+                ?: maxOf(remoteMemoryIds.size, deltaMemories)
+
+            val usedKb = "%.1f".format(totalCloudBytes / 1024.0)
             val maxKb = "%.1f".format(USER_QUOTA_BYTES / 1024.0)
-            val summary = "Cloud Synced ($usedKb / $maxKb KB quota): $syncedProviders providers · ↑$uploaded ↓$downloaded chats · $syncedPersonas personas · $syncedMemories memories"
+            val summary = "Cloud Synced ($usedKb / $maxKb KB): $totalCloudChats chats (↑$uploaded ↓$downloaded) · $totalCloudProviders providers · $totalCloudPersonas personas · $totalCloudMemories memories"
             DevLogBuffer.add("INFO", "CloudSync", summary)
-            SyncReport(uploaded, downloaded, syncedProviders, syncedPersonas, syncedMemories, syncedTemplates, used, USER_QUOTA_BYTES, summary)
+            SyncReport(
+                uploadedSessions = uploaded,
+                downloadedSessions = downloaded,
+                syncedProviders = totalCloudProviders,
+                syncedPersonas = totalCloudPersonas,
+                syncedMemories = totalCloudMemories,
+                syncedTemplates = deltaTemplates,
+                usedBytes = totalCloudBytes,
+                quotaBytes = USER_QUOTA_BYTES,
+                message = summary,
+            )
         }.onFailure { err ->
-            DevLogBuffer.add("ERROR", "CloudSync", err.localizedMessage ?: "Cloud sync failed")
+            val detail = err.localizedMessage ?: err.javaClass.simpleName
+            DevLogBuffer.add("ERROR", "CloudSync", "Sync failed (db=${databaseId.ifBlank { "(default)" }}): $detail")
         }
     }
 }

@@ -1,0 +1,84 @@
+1. Let the default Cel voice be the "Grove Synth" and let the pitch limits go higher in both low and high directions 
+
+2. Omg Sync NEVER works, it keeps saying "Successfuly synced 0 chats, 0 blah blah, 0 everything" 😭, Search the web if you don't know the official way of using the latest firebase
+
+3. Cel still can't see an image she generate when this happens:
+""" e.g;
+Henry- Hey Cel generate an Image of a cute girl
+Cel- Here 👇 
+🖼️ image
+Henry- Haha look at the eyes 😹 
+Cel- What eyes? 🤔, I can't see the image, send a screenshot 
+"""
+☝️ Here you can see Cel can't see the image 🥺... I hate this 😭 
+
+
+Also Why can't Cel use the Shizuku or normal commands to see the image;
+*"""
+Oh wait—you meant *literally* read or inspect the image contents / metadata or pull them up, not just list their filenames! 🙈 My bad, Henny! Let me check the file types, dimensions, or details if we need to, or were you wanting me to look closer at a specific one? 
+
+Tell me which file you want me to inspect or what we're doing with these cuties, and I'm totally on it! 😤💖 (｡♥‿♥｡)
+"""*
+
+And in OpenCode or Google Antigravity agent apps, the AI would read the image with no hesitation or complains, it can even read multiple at once, Implement these!
+
+
+4. Follow this: (Assistant Pop-up)
+4a. First Make it so drawing is always on and remove the "circle" button 
+4b. I saw something called "transcribing" when I drew a circle, Is it not just cutting the screenshot to that section?, What is it transcribing?, cuz that's not how Google Gemini does it 
+
+4c. if the user draws, unselect the  screenshot attached so only the cropped image gets uploaded, unless they reselect the screenshot to be uploaded alongside it
+
+4d. when I draw, don't automatically send 😭, I haven't even said anything and it sends!
+
+4e. Let a preview of the circled area be attached to the chat box so you can see the crop perfectly and do another one
+
+4f. Allow Multiple circling, like I can circle multiple spots for sending multiple images 
+
+4g. Make it so we can change Cel's Start-up sound from 22 Presets you will make... or the user can upload their own... cuz those default chimes can get LOUD 👂 📢 (also add a shuffle button if they can't pick one 😹, and a button to delete presets to save storage)
+
+4h. I can bring up Cel by accident, But then close her, but she would still be generating in the background 😹, fix!
+
+4i. Huge issue, When I bring up Cel, but start typing, she doesn't even cancel and just starts Generating from the screenshot even tho I haven't even said anything. It should be if I start typing, it waits so that the send button is there for them cuz if I wasn't typing, it means I'm hands free so the send button is useless since I'm not near the phone, you get?
+
+4j. Make it so that she doesn't show the text until the voice background is done (incase they pick the slow edge or google, or fast Android system)... but it will show what stage it is on so the user doesn't think it's still "thinking"
+
+4k. when a screenshot is attached, also let me be able to see it in chat... I also am seeing a lot of "." in the chat to show accidental STT processing of audio (and it didn't retry to hear the user)
+
+4l. When I turn off auto chat, it shouldn't send the message 😭 
+
+4m. It should be able to run commands so it can know the Time, or to open an App, or to basically do stuff like set an alarm (it's not a must to use Shizuku 🙂‍↕️, I mean how do apps do api's for Android stuff like flashlight and all that 👀, Take this "4m" seriously since it affects how the assistant would run as a quiet agent while floating until it's done and then it can talk)
+
+4n. when I open Cel Assistant Pop-up, then Tap the floating Cel, the Pop-up would still be generating in the background even tho I never said anything, this is relating back to the just screenshot sending even tho I never said anything yet...
+
+4o. When I drag her face to the Hell pit at the bottom, she should switch animation to a random scared/worried animation that is available, and if dragged out, a random relieved or whatever animation and then back to a normal face after 2 seconds 
+
+4p. The Pill beside her face, the "transcribing" or "thinking" floating chat bubble, It is located away from her face cuz the bubble is word wrapping left to right, so since the bubble is at the left, but it fixes itself when the bubble is on the right 
+
+4q. When I turn on auto mode, I expect it to be ALWAYS LISTENING, so when I actually want to talk, I unfortunately have to tap her face and turn off and on auto mode
+
+4r. Make sure persona still works in the live mode/floating mode 🥺 
+
+4s. Make it so I can quickly change the chat that Cel is reading from in live/float mode so I can change the chat or create new chat without ending and restarting live/float
+
+4t. I want the settings in voice to be split, so we can pick Cel's voice for Normal Chat when you press speaker, and Cel's voice in live mode or float mode, and yes please allow us to make the voice the Synth sounds too so we can see the typing animation in the floating/live (when it is picked for specifically live and the "hide" eye is enabled, let the bubble of my chat and cel chat still show so we can see what it's saying... and ofcuz the typing chat box too
+
+4u. You know how Gemini has that share camera with it (front or back) so Gemini can see your real world in live mode?, Add it seamlessly and perfectly to cel
+
+4v. I turned off my Internet to see what will happen, it  said busy 1/3, then failed, But there was no retry Button so that message was lost when I turned back on my Internet, so fix this perfectly 
+
+4w. And lastly, since we're in "w", Let me stop here, in this screenshot, you can see that the pixels are "spiraling" on animations and it moves so much it disorients her pixel face...
+
+4x. Okay "x" is the last, I noticed the pixels on the floating Cel is not animated 
+
+
+5. "Okay Cel" still doesn't work, and I am still seeing a green dot up there like my microphone is on 24/7, this is not how Google does it is it?... Isn't there research on how to do this on Android phones?
+
+6. The app is not telling me what Voice is currently selected at the top in settings 
+
+7. Number 4 has so many bugs so fix all that first, take your time okay? (˶ > ₃ < ˶)
+
+
+
+
+

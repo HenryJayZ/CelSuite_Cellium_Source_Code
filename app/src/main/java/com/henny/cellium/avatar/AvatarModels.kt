@@ -91,6 +91,16 @@ val AVATAR_MOODS: Map<String, List<String>> = mapOf(
     "talk" to listOf("Happy", "Kawaii", "UwU"),
     "pleading" to listOf("Pleading", "Sad", "UwU"),
     "proud" to listOf("Smug", "Feeling Cool", "Happy"),
+    "scared" to listOf("Scared", "Fearful", "Terrified", "Nervous", "MonkaS", "Shocked", "Pleading"),
+    "relieved" to listOf("Relieved", "Happy", "Chibi Joy", "Kawaii", "UwU", "Nervous Smile"),
+)
+
+val HELL_PIT_SCARED_EXPRESSIONS = listOf(
+    "Scared", "Fearful", "Terrified", "Nervous", "MonkaS", "Shocked", "Pleading", "Crying",
+)
+
+val HELL_PIT_RELIEVED_EXPRESSIONS = listOf(
+    "Relieved", "Happy", "Chibi Joy", "Kawaii", "UwU", "Blushing", "Nervous Smile",
 )
 
 val PET_PAT_GREETINGS = listOf(

@@ -3,11 +3,13 @@ package com.henny.cellium.ui.chat
 import android.app.Application
 import android.content.ContentValues
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.security.MessageDigest
@@ -22,6 +24,7 @@ import com.henny.cellium.ai.ProviderCatalogEntry
 import com.henny.cellium.ai.ProviderPresets
 import com.henny.cellium.ai.UniversalLlmClient
 import com.henny.cellium.ai.WebToolsClient
+import com.henny.cellium.assistant.AndroidDeviceActions
 import com.henny.cellium.avatar.MoodDetector
 import com.henny.cellium.core.CelliumNotificationManager
 import com.henny.cellium.core.CelliumPreferences
@@ -168,7 +171,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
 
     val prefsStore = PreferencesStore(appContext)
     val soundEngine = CelliumSoundEngine(appContext)
-    val ttsEngine = CelliumTtsEngine(appContext)
+    val ttsEngine = CelliumTtsEngine(appContext, sharedSoundEngine = soundEngine)
     val sttEngine = CelliumSttEngine(appContext)
     val shizukuBridge = ShizukuBridge(appContext)
     val llmClient = UniversalLlmClient()
@@ -239,6 +242,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         text: String,
         onStart: (() -> Unit)? = null,
         onComplete: (() -> Unit)? = null,
+        onSynthCharProgress: ((Int) -> Unit)? = null,
     ) {
         val p = preferences.value
         ttsEngine.speak(
@@ -249,6 +253,26 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             speechRate = p.ttsSpeechRate,
             onStart = onStart,
             onComplete = onComplete,
+            onSynthCharProgress = onSynthCharProgress,
+        )
+    }
+
+    fun speakLiveText(
+        text: String,
+        onStart: (() -> Unit)? = null,
+        onComplete: (() -> Unit)? = null,
+        onSynthCharProgress: ((Int) -> Unit)? = null,
+    ) {
+        val p = preferences.value
+        ttsEngine.speak(
+            rawText = text,
+            engine = p.liveTtsEngine,
+            voiceName = p.liveTtsVoiceName,
+            pitch = p.liveTtsPitch,
+            speechRate = p.liveTtsSpeechRate,
+            onStart = onStart,
+            onComplete = onComplete,
+            onSynthCharProgress = onSynthCharProgress,
         )
     }
 
@@ -450,6 +474,8 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 soundEngine.masterVolume = p.sfxVolume
                 soundEngine.typingSoundStyle = p.typingSoundStyle
                 soundEngine.typingSoundPitch = p.typingSoundPitch
+                soundEngine.startupSoundId = p.startupSoundId
+                soundEngine.startupSoundCustomPath = p.startupSoundCustomPath
 
                 if (p.activeProviderId != lastActiveProviderId) {
                     lastActiveProviderId = p.activeProviderId
@@ -877,12 +903,15 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 val file = if (original.attachmentFileName.isNotBlank()) {
                     AttachedTextFile(original.attachmentFileName, original.attachmentFileContent)
                 } else null
+                val reloadedBitmaps = withContext(Dispatchers.IO) {
+                    loadBitmapsFromAttachmentPaths(original.attachmentPath)
+                }
                 runAssistantGeneration(
                     sessionId = original.sessionId,
                     parentMessageId = original.id,
                     historyBeforePrompt = historyBefore,
                     promptText = clean,
-                    attachmentBitmaps = emptyList(),
+                    attachmentBitmaps = reloadedBitmaps,
                     attachedFile = file,
                 )
             }
@@ -951,12 +980,15 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             val file = if (parentUser.attachmentFileName.isNotBlank()) {
                 AttachedTextFile(parentUser.attachmentFileName, parentUser.attachmentFileContent)
             } else null
+            val reloadedBitmaps = withContext(Dispatchers.IO) {
+                loadBitmapsFromAttachmentPaths(parentUser.attachmentPath)
+            }
             runAssistantGeneration(
                 sessionId = assistantMsg.sessionId,
                 parentMessageId = parentUser.id,
                 historyBeforePrompt = branchBeforeUser,
                 promptText = parentUser.content,
-                attachmentBitmaps = emptyList(),
+                attachmentBitmaps = reloadedBitmaps,
                 attachedFile = file,
             )
         }
@@ -978,12 +1010,15 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             val file = if (lastUser.attachmentFileName.isNotBlank()) {
                 AttachedTextFile(lastUser.attachmentFileName, lastUser.attachmentFileContent)
             } else null
+            val reloadedBitmaps = withContext(Dispatchers.IO) {
+                loadBitmapsFromAttachmentPaths(lastUser.attachmentPath)
+            }
             runAssistantGeneration(
                 sessionId = lastUser.sessionId,
                 parentMessageId = lastUser.id,
                 historyBeforePrompt = before,
                 promptText = lastUser.content,
-                attachmentBitmaps = emptyList(),
+                attachmentBitmaps = reloadedBitmaps,
                 attachedFile = file,
             )
         }
@@ -1256,6 +1291,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             agentWorkspacePath = prefs.agentWorkspacePath,
             moodMethod = if (saveAsCompactSummary) "none" else prefs.moodMethod,
             contextConfig = ctxCfg,
+            includeDeviceActions = !saveAsCompactSummary,
         )
 
         activeStreamSessionId = sessionId
@@ -1528,6 +1564,91 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     }
                     // Strip any leftover [WEB_SEARCH] tag if the model still emitted one after max rounds
                     finalBody = UniversalLlmClient.extractWebSearchQuery(finalBody).second
+
+                    // Autonomous multi-image local inspection loop ([VIEW_IMAGE], up to 2 rounds, 5 images per round)
+                    var viewRound = 0
+                    while (viewRound < 2 && prov.protocol != "on_device") {
+                        val (imgPaths, bodyWithoutViewTags) = UniversalLlmClient.extractViewImagePaths(finalBody, maxCount = 5)
+                        if (imgPaths.isEmpty()) break
+                        viewRound++
+                        _uiState.value = _uiState.value.copy(
+                            retryStatusText = "Inspecting ${imgPaths.size} local image(s)...",
+                        )
+                        val loaded = mutableListOf<Pair<String, Bitmap>>()
+                        val missing = mutableListOf<String>()
+                        for (rawPath in imgPaths) {
+                            val bmp = withContext(Dispatchers.IO) {
+                                loadLocalOrShizukuBitmap(rawPath, shizukuConnected)
+                            }
+                            if (bmp != null) loaded.add(rawPath to bmp) else missing.add(rawPath)
+                        }
+                        if (loaded.isEmpty()) {
+                            finalBody = bodyWithoutViewTags
+                            break
+                        }
+                        val inspectPrompt = buildString {
+                            append(promptText)
+                            append("\n\n[Visual Image Inspection Loaded]\n")
+                            append("Attached are ${loaded.size} requested image(s) in exact order:\n")
+                            loaded.forEachIndexed { idx, (p, _) ->
+                                append("${idx + 1}. $p\n")
+                            }
+                            if (missing.isNotEmpty()) {
+                                append("Unreadable/missing paths: ${missing.joinToString(", ")}\n")
+                            }
+                            append("Directly inspect the attached image pixels and answer the user naturally and thoroughly. Do NOT emit another [VIEW_IMAGE] tag for these already-loaded images.")
+                        }
+                        streamSinglePass(
+                            passHistory = effectiveHistory,
+                            passPrompt = inspectPrompt,
+                            passBitmaps = loaded.map { it.second },
+                            passFile = attachedFile,
+                            resetDisplay = true,
+                        )
+                        parsedThoughtAndBody = ProviderPresets.parseThoughts(rawContent.toString())
+                        parsedMoodAndBody = MoodDetector.extractInlineMoodTag(parsedThoughtAndBody.second)
+                        mergedThought = listOf(rawThought.toString().trim(), parsedThoughtAndBody.first)
+                            .filter { it.isNotEmpty() }.joinToString("\n\n")
+                        inlineMood = parsedMoodAndBody.first
+                        finalBody = parsedMoodAndBody.second.ifBlank { parsedThoughtAndBody.second.ifBlank { rawContent.toString().trim() } }
+                    }
+                    finalBody = UniversalLlmClient.extractViewImagePaths(finalBody, maxCount = 5).second
+
+                    // Native Android SDK [DEVICE_ACTION] execution loop (up to 2 rounds, no Shizuku required)
+                    var actionRound = 0
+                    val accumulatedActionBlocks = StringBuilder()
+                    while (actionRound < 2) {
+                        val actionPayloads = AndroidDeviceActions.extractActionPayloads(finalBody)
+                        if (actionPayloads.isEmpty()) break
+                        actionRound++
+                        _uiState.value = _uiState.value.copy(
+                            retryStatusText = "Running Android action...",
+                        )
+                        for (payload in actionPayloads.take(3)) {
+                            val res = AndroidDeviceActions.executePayload(appContext, payload, webTools)
+                            accumulatedActionBlocks.append("[Device Action Result (${res.action}): ${if (res.success) "OK" else "FAILED"}] ${res.output}\n")
+                        }
+                        val groundedPrompt = buildString {
+                            append(promptText)
+                            append("\n\n")
+                            append(accumulatedActionBlocks.toString())
+                            append("Use the real device action results above to reply naturally and concisely. Do NOT emit another [DEVICE_ACTION] tag unless another distinct action is needed.")
+                        }
+                        streamSinglePass(
+                            passHistory = effectiveHistory,
+                            passPrompt = groundedPrompt,
+                            passBitmaps = emptyList(),
+                            passFile = attachedFile,
+                            resetDisplay = true,
+                        )
+                        parsedThoughtAndBody = ProviderPresets.parseThoughts(rawContent.toString())
+                        parsedMoodAndBody = MoodDetector.extractInlineMoodTag(parsedThoughtAndBody.second)
+                        mergedThought = listOf(rawThought.toString().trim(), parsedThoughtAndBody.first)
+                            .filter { it.isNotEmpty() }.joinToString("\n\n")
+                        inlineMood = parsedMoodAndBody.first
+                        finalBody = parsedMoodAndBody.second.ifBlank { parsedThoughtAndBody.second.ifBlank { rawContent.toString().trim() } }
+                    }
+                    finalBody = AndroidDeviceActions.stripActionTags(finalBody)
                 }
 
                 // Let typewriter finish revealing the remaining buffered text cleanly before finalizing
@@ -1877,9 +1998,17 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
 
     // ── Live Voice Mode & Floating Assistant Reply ───────────────────────
 
+    fun cancelLiveStream() {
+        liveStreamJob?.cancel()
+        liveStreamJob = null
+        llmClient.cancelActiveRequests()
+    }
+
     fun streamLiveReply(
         transcript: String,
         screenBitmap: Bitmap? = null,
+        isRetry: Boolean = false,
+        onStageChanged: (String) -> Unit = {},
         onDelta: (String) -> Unit,
         onMoodChanged: (String) -> Unit = {},
         onComplete: (String) -> Unit,
@@ -1904,7 +2033,8 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 includeAgentInstructions = false,
                 includeMoodInstructions = prefs.moodMethod == "inline_tag",
             ),
-            extraInstruction = "[Live Voice Mode] Reply naturally in 1 to 3 concise spoken sentences without markdown formatting or asterisks. Remember the conversation history.",
+            includeDeviceActions = true,
+            extraInstruction = "[Live Voice Mode] Reply naturally in 1 to 3 concise spoken sentences without markdown formatting or asterisks. Remember the conversation history and active persona.",
         )
 
         // Cancel any previous in-flight live request so Pollinations Classic API never throws HTTP 429 overlap
@@ -1913,76 +2043,148 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             val sb = StringBuilder()
             val startMs = System.currentTimeMillis()
             try {
+                onStageChanged("Thinking...")
                 val sid = ensureActiveSession("Live · ${persona.name}")
                 val allBefore = dao.getMessagesForSessionOnce(sid)
                 val currentLeafId = _selectedLeafBySession.value[sid]
                     ?: dao.getSession(sid)?.activeLeafId?.takeIf { it.isNotBlank() }
                     ?: allBefore.lastOrNull()?.id
-                val ancestorHistory = sliceHistoryFromLatestCompact(
-                    ChatTreeHelper.buildAncestorPath(allBefore, currentLeafId)
-                )
 
-                val userMsgId = UUID.randomUUID().toString()
-                dao.upsertMessage(
-                    MessageEntity(
-                        id = userMsgId,
-                        sessionId = sid,
-                        parentId = currentLeafId,
-                        role = "user",
-                        content = cleanTranscript,
-                        tokenEstimate = ProviderPresets.estimateTokens(cleanTranscript),
+                val existingLeafMsg = allBefore.firstOrNull { it.id == currentLeafId }
+                val reuseExistingUserMsg = isRetry &&
+                    existingLeafMsg != null &&
+                    existingLeafMsg.role == "user" &&
+                    existingLeafMsg.content == cleanTranscript
+
+                val ancestorHistory: List<MessageEntity>
+                val userMsgId: String
+                if (reuseExistingUserMsg && existingLeafMsg != null) {
+                    userMsgId = existingLeafMsg.id
+                    ancestorHistory = sliceHistoryFromLatestCompact(
+                        ChatTreeHelper.buildAncestorPath(allBefore, existingLeafMsg.parentId)
                     )
-                )
-                _selectedLeafBySession.value = _selectedLeafBySession.value + (sid to userMsgId)
-                refreshSessionStats(sid)
+                } else {
+                    ancestorHistory = sliceHistoryFromLatestCompact(
+                        ChatTreeHelper.buildAncestorPath(allBefore, currentLeafId)
+                    )
+                    val savedAttachmentPath = if (screenBitmap != null) {
+                        withContext(Dispatchers.IO) { saveAttachmentLocally(screenBitmap) }
+                    } else ""
+                    userMsgId = UUID.randomUUID().toString()
+                    dao.upsertMessage(
+                        MessageEntity(
+                            id = userMsgId,
+                            sessionId = sid,
+                            parentId = currentLeafId,
+                            role = "user",
+                            content = cleanTranscript,
+                            attachmentPath = savedAttachmentPath,
+                            tokenEstimate = ProviderPresets.estimateTokens(cleanTranscript),
+                        )
+                    )
+                    _selectedLeafBySession.value = _selectedLeafBySession.value + (sid to userMsgId)
+                    refreshSessionStats(sid)
+                }
 
                 dao.incrementProviderUsage(prov.id)
                 val maxRetries = if (prov.protocol == "on_device") 0 else prefs.maxAutoRetries.coerceIn(0, 4)
-                var attempt = 0
-                while (true) {
-                    sb.clear()
-                    try {
-                        val flow = if (prov.protocol == "on_device") {
-                            onDeviceEngine.streamReply(
-                                systemPrompt = systemPrompt,
-                                history = ancestorHistory,
-                                userPrompt = cleanTranscript,
-                                historyLimit = ctxCfg.historyLimit,
-                            )
-                        } else {
-                            llmClient.streamChat(
-                                provider = prov,
-                                systemPrompt = systemPrompt,
-                                history = ancestorHistory,
-                                userPrompt = cleanTranscript,
-                                imageBitmap = screenBitmap,
-                                historyLimit = ctxCfg.historyLimit,
-                            )
-                        }
-                        flow.collect { chunk ->
-                            if (chunk.contentDelta.isNotEmpty()) {
-                                sb.append(chunk.contentDelta)
-                                val (_, clean) = ProviderPresets.parseThoughts(sb.toString())
-                                val (tagMood, bodyNoMood) = MoodDetector.extractInlineMoodTag(clean)
-                                if (tagMood != null) onMoodChanged(tagMood)
-                                onDelta(bodyNoMood)
+
+                suspend fun runLivePass(passPrompt: String, passBmp: Bitmap?): String {
+                    var attempt = 0
+                    while (true) {
+                        sb.clear()
+                        try {
+                            val flow = if (prov.protocol == "on_device") {
+                                onDeviceEngine.streamReply(
+                                    systemPrompt = systemPrompt,
+                                    history = ancestorHistory,
+                                    userPrompt = passPrompt,
+                                    historyLimit = ctxCfg.historyLimit,
+                                )
+                            } else {
+                                llmClient.streamChat(
+                                    provider = prov,
+                                    systemPrompt = systemPrompt,
+                                    history = ancestorHistory,
+                                    userPrompt = passPrompt,
+                                    imageBitmap = passBmp,
+                                    historyLimit = ctxCfg.historyLimit,
+                                )
                             }
+                            flow.collect { chunk ->
+                                if (chunk.contentDelta.isNotEmpty()) {
+                                    sb.append(chunk.contentDelta)
+                                    val (_, clean) = ProviderPresets.parseThoughts(sb.toString())
+                                    val (tagMood, bodyNoMood) = MoodDetector.extractInlineMoodTag(clean)
+                                    if (tagMood != null) onMoodChanged(tagMood)
+                                    onDelta(bodyNoMood)
+                                }
+                            }
+                            return sb.toString()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            val retryable = prov.protocol != "on_device" && UniversalLlmClient.isRetryableError(e)
+                            if (!retryable || attempt >= maxRetries) throw e
+                            attempt++
+                            onStageChanged("Busy — retrying ($attempt/$maxRetries)...")
+                            delay((1300L * attempt).coerceAtMost(5000L))
                         }
-                        break
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        val retryable = prov.protocol != "on_device" && UniversalLlmClient.isRetryableError(e)
-                        if (!retryable || attempt >= maxRetries) throw e
-                        attempt++
-                        onDelta("Busy — retrying ($attempt/$maxRetries)...")
-                        delay((1300L * attempt).coerceAtMost(5000L))
                     }
                 }
 
-                val (_, finalClean) = ProviderPresets.parseThoughts(sb.toString())
-                val (tagMood, finalBody) = MoodDetector.extractInlineMoodTag(finalClean)
-                val out = finalBody.ifBlank { finalClean.ifBlank { sb.toString().trim() } }
+                var rawOut = runLivePass(cleanTranscript, screenBitmap)
+                var (_, finalClean) = ProviderPresets.parseThoughts(rawOut)
+                var (tagMood, finalBody) = MoodDetector.extractInlineMoodTag(finalClean)
+                var out = finalBody.ifBlank { finalClean.ifBlank { rawOut.trim() } }
+
+                // Quiet autonomous [DEVICE_ACTION] / [WEB_SEARCH] loop before speaking
+                val toolResults = StringBuilder()
+                var round = 0
+                while (round < 2) {
+                    val actionPayloads = AndroidDeviceActions.extractActionPayloads(out)
+                    val (webQuery, _) = UniversalLlmClient.extractWebSearchQuery(out)
+                    if (actionPayloads.isEmpty() && webQuery.isNullOrBlank()) break
+                    round++
+                    if (actionPayloads.isNotEmpty()) {
+                        onStageChanged("Running action...")
+                        for (payload in actionPayloads.take(3)) {
+                            val res = AndroidDeviceActions.executePayload(appContext, payload, webTools)
+                            toolResults.append("[Device Action (${res.action}): ${if (res.success) "OK" else "FAILED"}] ${res.output}\n")
+                        }
+                    }
+                    if (!webQuery.isNullOrBlank()) {
+                        onStageChanged("Searching web...")
+                        val searchRes = webTools.searchWeb(webQuery, maxResults = 4)
+                        val block = searchRes.fold(
+                            onSuccess = { items ->
+                                if (items.isEmpty()) "No web results for $webQuery."
+                                else items.joinToString("\n") { "${it.title}: ${it.snippet}" }
+                            },
+                            onFailure = { "Web search error: ${it.localizedMessage}" },
+                        )
+                        toolResults.append("[Web Search \"$webQuery\"]\n$block\n")
+                    }
+                    onStageChanged("Thinking...")
+                    val followPrompt = buildString {
+                        append(cleanTranscript)
+                        append("\n\n")
+                        append(toolResults.toString())
+                        append("Reply in 1 to 3 natural spoken sentences using the live results above. Do NOT emit another [DEVICE_ACTION] or [WEB_SEARCH] tag.")
+                    }
+                    rawOut = runLivePass(followPrompt, null)
+                    val parsed = ProviderPresets.parseThoughts(rawOut)
+                    finalClean = parsed.second
+                    val moodSplit = MoodDetector.extractInlineMoodTag(finalClean)
+                    tagMood = moodSplit.first
+                    finalBody = moodSplit.second
+                    out = finalBody.ifBlank { finalClean.ifBlank { rawOut.trim() } }
+                }
+
+                out = AndroidDeviceActions.stripActionTags(
+                    UniversalLlmClient.extractWebSearchQuery(out).second
+                ).ifBlank { "Done!" }
+
                 val mood = tagMood ?: MoodDetector.detectMood(out)
                 val latency = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                 val estTokens = ProviderPresets.estimateTokens(out)
@@ -1994,7 +2196,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     parentId = userMsgId,
                     role = "assistant",
                     speakerLabel = persona.name,
-                    content = out.ifBlank { "(Empty response)" },
+                    content = out,
                     mood = mood,
                     providerName = prov.name,
                     modelName = prov.selectedModel,
@@ -2833,6 +3035,60 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         FileOutputStream(f).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }
         f.absolutePath
     }.getOrDefault("")
+
+    private fun decodeScaledBitmapFromFile(file: File, maxDim: Int = 1280): Bitmap? = runCatching {
+        if (!file.exists() || !file.canRead() || file.length() <= 0L) return@runCatching null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+        var sample = 1
+        while (bounds.outWidth / sample > maxDim * 2 || bounds.outHeight / sample > maxDim * 2) {
+            sample *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        BitmapFactory.decodeFile(file.absolutePath, opts)
+    }.getOrNull()
+
+    private fun loadBitmapsFromAttachmentPaths(attachmentPath: String): List<Bitmap> {
+        if (attachmentPath.isBlank()) return emptyList()
+        return attachmentPath.lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .take(5)
+            .mapNotNull { decodeScaledBitmapFromFile(File(it)) }
+    }
+
+    private suspend fun loadLocalOrShizukuBitmap(rawPath: String, shizukuConnected: Boolean): Bitmap? {
+        val trimmed = rawPath.trim()
+        if (trimmed.isEmpty()) return null
+        val directFile = File(trimmed)
+        if (directFile.exists() && directFile.canRead()) {
+            decodeScaledBitmapFromFile(directFile)?.let { return it }
+        }
+        val wsCandidate = File(resolveLocalWorkspaceDir(), trimmed.removePrefix("/"))
+        if (wsCandidate.exists() && wsCandidate.canRead()) {
+            decodeScaledBitmapFromFile(wsCandidate)?.let { return it }
+        }
+        if (shizukuConnected) {
+            val escaped = trimmed.replace("'", "'\\''")
+            val res = shizukuBridge.runCommand("base64 -w 0 '$escaped' 2>/dev/null || base64 '$escaped'", timeoutSec = 10)
+            val b64 = res.getOrNull()?.replace(Regex("\\s+"), "").orEmpty()
+            if (b64.isNotBlank() && b64.length < 16_000_000) {
+                return runCatching {
+                    val bytes = Base64.decode(b64, Base64.DEFAULT)
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+                    var sample = 1
+                    while (bounds.outWidth / sample > 2560 || bounds.outHeight / sample > 2560) {
+                        sample *= 2
+                    }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+                }.getOrNull()
+            }
+        }
+        return null
+    }
 
     private fun resolveUriDisplayName(uri: Uri): String {
         appContext.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
