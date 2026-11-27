@@ -1,0 +1,5 @@
+Cel.Cellium Release Build
+Version: v2611.27.1 (versionCode 10)
+APK: apk/Cel.Cellium-v2611.27.1-release.apk
+Size: 32,193,935 bytes (~30.7 MB)
+SHA-256: bbc80144d9b718895f1b492759fb1ce38fb9cd6e04363c60e859e186f0a48cba
