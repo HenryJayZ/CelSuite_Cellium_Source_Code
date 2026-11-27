@@ -41,6 +41,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -188,6 +189,15 @@ fun CelliumApp(
 
     var currentTab by rememberSaveable { mutableStateOf(CelliumTab.CHAT) }
     var subOverlay by remember { mutableStateOf<SubOverlay>(SubOverlay.None) }
+    var requestedSettingsCategory by remember { mutableStateOf<String?>(null) }
+    var requestedSettingsNonce by remember { mutableLongStateOf(0L) }
+
+    fun openSettingsCategory(categoryKey: String) {
+        subOverlay = SubOverlay.None
+        requestedSettingsCategory = categoryKey
+        requestedSettingsNonce++
+        currentTab = CelliumTab.SETTINGS
+    }
 
     LaunchedEffect(externalChatOpenNonce) {
         if (externalChatOpenNonce > 0L) {
@@ -211,6 +221,7 @@ fun CelliumApp(
             LiveModeScreen(
                 viewModel = viewModel,
                 onClose = { currentTab = CelliumTab.CHAT },
+                onOpenVoiceSettings = { openSettingsCategory("VOICE") },
             )
         }
         return
@@ -223,10 +234,7 @@ fun CelliumApp(
                     viewModel = viewModel,
                     initialSessionId = overlay.sessionId,
                     onBack = { subOverlay = SubOverlay.None },
-                    onOpenSettingsProviders = {
-                        subOverlay = SubOverlay.None
-                        currentTab = CelliumTab.SETTINGS
-                    },
+                    onOpenSettingsProviders = { openSettingsCategory("PROVIDERS") },
                 )
                 return@CelliumBackground
             }
@@ -341,16 +349,19 @@ fun CelliumApp(
                                 viewModel = viewModel,
                                 onOpenArena = { subOverlay = SubOverlay.Arena(null) },
                                 onOpenArenaSession = { sid -> subOverlay = SubOverlay.Arena(sid) },
-                                onOpenSettingsProviders = { currentTab = CelliumTab.SETTINGS },
+                                onOpenSettingsProviders = { openSettingsCategory("PROVIDERS") },
                             )
                             CelliumTab.LIVE -> LiveModeScreen(
                                 viewModel = viewModel,
                                 onClose = { currentTab = CelliumTab.CHAT },
+                                onOpenVoiceSettings = { openSettingsCategory("VOICE") },
                             )
                             CelliumTab.SETTINGS -> SettingsScreen(
                                 viewModel = viewModel,
                                 user = currentUser,
                                 googleAuthBusy = googleBusy,
+                                initialCategoryKey = requestedSettingsCategory,
+                                initialCategoryNonce = requestedSettingsNonce,
                                 onSignInWithGoogle = { triggerGoogleSignIn() },
                                 onSignOutGoogle = {
                                     scope.launch {

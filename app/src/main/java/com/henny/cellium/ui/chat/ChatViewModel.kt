@@ -2130,6 +2130,82 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         llmClient.cancelActiveRequests()
     }
 
+    private fun detectUserEndCallIntent(transcript: String): Boolean {
+        val lower = transcript.lowercase()
+            .replace(Regex("[^a-z0-9\\s']"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        if (lower.isBlank()) return false
+        val exactPhrases = listOf(
+            "end the call",
+            "end call",
+            "end this call",
+            "hang up",
+            "hang up the call",
+            "close live mode",
+            "exit live mode",
+            "stop live mode",
+            "leave live mode",
+            "quit live mode",
+            "turn off live mode",
+            "shut down live mode",
+            "end live mode",
+            "end live call",
+            "close the call",
+            "disconnect the call",
+            "disconnect call",
+            "bye hang up",
+            "goodbye hang up",
+            "goodbye end the call",
+            "bye end the call",
+        )
+        return exactPhrases.any { lower == it || lower.contains(it) }
+    }
+
+    private fun sanitizeLiveVoiceReply(raw: String): String {
+        var cleaned = raw
+            .replace(Regex("\\[END_CALL]", RegexOption.IGNORE_CASE), "")
+            .replace("\r\n", "\n")
+        // Replace markdown links [label](url) with readable text
+        cleaned = cleaned.replace(Regex("\\[([^\\]]+)]\\((https?://[^)]+)\\)")) { m ->
+            val label = m.groupValues[1].trim()
+            val url = m.groupValues[2].trim()
+            if (label.startsWith("http", ignoreCase = true) || label.isBlank()) {
+                url.removePrefix("https://").removePrefix("http://").removePrefix("www.").substringBefore("/")
+            } else {
+                label
+            }
+        }
+        // Strip fenced code blocks markers & inline backticks
+        cleaned = cleaned.replace(Regex("```[a-zA-Z0-9_-]*\\n?"), "")
+        cleaned = cleaned.replace("`", "")
+        // Strip bold / italic / strikethrough markdown markers
+        cleaned = cleaned.replace(Regex("\\*\\*(.+?)\\*\\*"), "$1")
+        cleaned = cleaned.replace(Regex("__(.+?)__"), "$1")
+        cleaned = cleaned.replace(Regex("~~(.+?)~~"), "$1")
+        cleaned = cleaned.replace(Regex("(?<!\\w)\\*([^*\n]+?)\\*(?!\\w)"), "$1")
+        cleaned = cleaned.replace(Regex("(?<!\\w)_([^_\n]+?)_(?!\\w)"), "$1")
+        // Strip headings, bullets, numbered list markers, and collapse paragraph walls into smooth spoken lines
+        val rawLines = cleaned.split('\n').mapNotNull { line ->
+            val stripped = line.trim()
+                .replace(Regex("^#{1,6}\\s+"), "")
+                .replace(Regex("^[-*•+]\\s+"), "")
+                .replace(Regex("^\\d+[.)]\\s+"), "")
+                .replace(Regex("^>\\s*"), "")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            stripped.takeIf { it.isNotEmpty() }
+        }
+        // Cap strictly at 50 lines max so Live Mode never overflows past the screen
+        val cappedLines = rawLines.take(50)
+        val joined = cappedLines.joinToString(" ")
+        return if (joined.length > 2400) {
+            joined.take(2397).substringBeforeLast(' ', joined.take(2397)) + "..."
+        } else {
+            joined
+        }
+    }
+
     fun streamLiveReply(
         transcript: String,
         screenBitmap: Bitmap? = null,
@@ -2137,6 +2213,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         onStageChanged: (String) -> Unit = {},
         onDelta: (String) -> Unit,
         onMoodChanged: (String) -> Unit = {},
+        onEndCallRequested: () -> Unit = {},
         onComplete: (String) -> Unit,
         onError: (String) -> Unit,
     ) {
@@ -2160,7 +2237,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 includeMoodInstructions = prefs.moodMethod == "inline_tag",
             ),
             includeDeviceActions = true,
-            extraInstruction = "[Live Voice Mode] Reply naturally in 1 to 3 concise spoken sentences without markdown formatting or asterisks. Remember the conversation history and active persona.",
+            extraInstruction = "[Live Voice Mode] Output PURE SPOKEN PLAIN TEXT ONLY. NEVER format text with markdown: zero **bold**, zero *italics*, zero backticks, zero # headings, zero bullet points, zero numbered lists, and zero paragraph breaks. Keep responses as short and conversational as possible (1 to 3 quick spoken sentences by default) unless the user specifically asks for a longer explanation, and NEVER exceed 50 lines. Remember the conversation history and active persona. If the user asks to end the call, hang up, stop, or close Live Mode, say a brief friendly goodbye and append [END_CALL] at the very end.",
         )
 
         // Cancel any previous in-flight live request so Pollinations Classic API never throws HTTP 429 overlap
@@ -2243,7 +2320,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                                     val (_, clean) = ProviderPresets.parseThoughts(sb.toString())
                                     val (tagMood, bodyNoMood) = MoodDetector.extractInlineMoodTag(clean)
                                     if (tagMood != null) onMoodChanged(tagMood)
-                                    onDelta(bodyNoMood)
+                                    onDelta(sanitizeLiveVoiceReply(bodyNoMood))
                                 }
                             }
                             return sb.toString()
@@ -2307,7 +2384,12 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     out = finalBody.ifBlank { finalClean.ifBlank { rawOut.trim() } }
                 }
 
-                out = UniversalLlmClient.sanitizeVisibleReply(out).ifBlank { "Done!" }
+                val endCallTagged = out.contains("[END_CALL]", ignoreCase = true) ||
+                    rawOut.contains("[END_CALL]", ignoreCase = true) ||
+                    detectUserEndCallIntent(cleanTranscript)
+
+                out = sanitizeLiveVoiceReply(UniversalLlmClient.sanitizeVisibleReply(out))
+                    .ifBlank { if (endCallTagged) "Alright, talk to you soon!" else "Done!" }
 
                 val mood = tagMood ?: MoodDetector.detectMood(out)
                 val latency = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
@@ -2332,6 +2414,9 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 refreshSessionStats(sid)
 
                 onMoodChanged(mood)
+                if (endCallTagged) {
+                    onEndCallRequested()
+                }
                 onComplete(out)
 
                 val isKeylessPollinations = prov.id == ProviderPresets.ID_POLLINATIONS_FREE && prov.apiKey.isBlank()

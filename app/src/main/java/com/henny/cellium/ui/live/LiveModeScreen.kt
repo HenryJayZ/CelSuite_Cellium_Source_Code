@@ -58,6 +58,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -78,6 +79,7 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.VideocamOff
 import androidx.compose.material.icons.rounded.Visibility
@@ -107,11 +109,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -120,6 +129,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -349,10 +359,13 @@ private class LiveCameraController(
 fun LiveModeScreen(
     viewModel: CelliumViewModel,
     onClose: () -> Unit,
+    onOpenVoiceSettings: () -> Unit = {},
 ) {
     val visuals = LocalCelliumVisuals.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val prefs by viewModel.preferences.collectAsStateWithLifecycle()
     val isFloating by FloatingCelOverlayService.isRunning.collectAsStateWithLifecycle()
@@ -361,6 +374,7 @@ fun LiveModeScreen(
     val introAnim = remember { Animatable(0f) }
     val outroAnim = remember { Animatable(0f) }
     var isExiting by remember { mutableStateOf(false) }
+    var pendingEndCall by remember { mutableStateOf(false) }
 
     // Immersive OLED Eye toggle
     var guiHidden by remember { mutableStateOf(false) }
@@ -386,7 +400,7 @@ fun LiveModeScreen(
         return null
     }
 
-    // #1: True Android edge-to-edge immersive fullscreen when Hide Eye is ON (restores bars on toggle or exit)
+    // True Android edge-to-edge immersive fullscreen when Hide Eye is ON (restores bars on toggle or exit)
     DisposableEffect(guiHidden) {
         val activity = findHostActivity(context)
         val controller = activity?.let { WindowCompat.getInsetsController(it.window, it.window.decorView) }
@@ -403,19 +417,31 @@ fun LiveModeScreen(
         }
     }
 
-    // Retry preservation on offline / network failure (#4v)
+    // Retry preservation on offline / network failure
     var failedPrompt by remember { mutableStateOf<String?>(null) }
     var failedBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
-    // In-place Pickers (#4r, #4s)
+    // In-place Pickers
     var showPersonaPicker by remember { mutableStateOf(false) }
     var showChatSwitcher by remember { mutableStateOf(false) }
 
-    // Live Typing Input (#4t)
-    var showTypingInput by remember { mutableStateOf(false) }
+    val isSynthLive = prefs.liveTtsEngine == CelliumTtsEngine.ENGINE_SYNTH
+
+    // Live Typing Input — Synth starts with input ready, and Keyboard button ALWAYS toggles ON/OFF + summons IME!
+    var showTypingInput by remember(isSynthLive) { mutableStateOf(isSynthLive) }
+    var typingFocusNonce by remember { mutableIntStateOf(0) }
+    val typingFocusRequester = remember { FocusRequester() }
     var typedInput by remember { mutableStateOf("") }
 
-    // Gemini-Live Style Camera Sharing (#4u)
+    LaunchedEffect(showTypingInput, typingFocusNonce) {
+        if (showTypingInput && typingFocusNonce > 0) {
+            delay(80L)
+            runCatching { typingFocusRequester.requestFocus() }
+            keyboardController?.show()
+        }
+    }
+
+    // Gemini-Live Style Camera Sharing
     var cameraEnabled by remember { mutableStateOf(false) }
     var useFrontCamera by remember { mutableStateOf(false) }
     var hasCameraPerm by remember {
@@ -430,8 +456,6 @@ fun LiveModeScreen(
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
     var cloudSttJob by remember { mutableStateOf<Job?>(null) }
 
-    val isSynthLive = prefs.liveTtsEngine == CelliumTtsEngine.ENGINE_SYNTH
-
     fun cancelAllListeningWithoutSending() {
         userStoppedDeviceStt = true
         cloudSttJob?.cancel()
@@ -445,9 +469,11 @@ fun LiveModeScreen(
         }
     }
 
-    fun triggerExit() {
+    fun triggerExit(afterExit: () -> Unit = onClose) {
         if (isExiting) return
         isExiting = true
+        pendingEndCall = false
+        keyboardController?.hide()
         cancelAllListeningWithoutSending()
         viewModel.cancelLiveStream()
         viewModel.ttsEngine.stop()
@@ -455,7 +481,7 @@ fun LiveModeScreen(
         cameraController.release()
         scope.launch {
             outroAnim.animateTo(1f, tween(durationMillis = 320, easing = FastOutLinearInEasing))
-            onClose()
+            afterExit()
         }
     }
 
@@ -502,6 +528,7 @@ fun LiveModeScreen(
             return
         }
         val frameBitmap = explicitBitmap ?: if (cameraEnabled) cameraController.captureFrameBitmap() else null
+        pendingEndCall = false
         userTranscript = spoken
         celReply = ""
         errorMsg = null
@@ -527,10 +554,13 @@ fun LiveModeScreen(
                 }
             },
             onDelta = { _ ->
-                // Hold celReply hidden until TTS voice actually starts (#4j)
+                // Hold celReply hidden until TTS voice actually starts
             },
             onMoodChanged = { detected ->
                 scope.launch(Dispatchers.Main) { mood = detected }
+            },
+            onEndCallRequested = {
+                scope.launch(Dispatchers.Main) { pendingEndCall = true }
             },
             onComplete = { finalReply ->
                 scope.launch(Dispatchers.Main) {
@@ -569,7 +599,13 @@ fun LiveModeScreen(
                                 phase = LivePhase.IDLE
                                 stageLabel = ""
                                 mouthOpenness = 0.05f
-                                // #2d: Hold emotional expression naturally before relaxing back to idle
+                                if (pendingEndCall) {
+                                    pendingEndCall = false
+                                    delay(380L)
+                                    triggerExit()
+                                    return@launch
+                                }
+                                // Hold emotional expression naturally before relaxing back to idle
                                 moodHoldJob?.cancel()
                                 val holdMs = ExpressionDirector.holdDurationMsForMood(mood)
                                 moodHoldJob = scope.launch {
@@ -592,6 +628,7 @@ fun LiveModeScreen(
             onError = { err ->
                 scope.launch(Dispatchers.Main) {
                     if (isExiting) return@launch
+                    pendingEndCall = false
                     errorMsg = err
                     failedPrompt = spoken
                     failedBitmap = frameBitmap
@@ -872,125 +909,37 @@ fun LiveModeScreen(
             }
         }
 
-        // Centered Dot-Matrix Avatar (always visible even when GUI is hidden! Anti-repetition ExpressionDirector)
+        // Resolve active Dot-Matrix expression (anti-repetition ExpressionDirector)
         val liveExpr = remember(avatarLibrary, prefs.avatarGender, mood) {
             val picked = ExpressionDirector.pickExpressionForMood(mood)
             avatarLibrary?.get(prefs.avatarGender, picked, "Base")
                 ?: avatarLibrary?.getForMood(prefs.avatarGender, mood)
                 ?: avatarLibrary?.get(prefs.avatarGender, MoodDetector.moodToExpressionName(mood), "Base")
         }
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    scaleX = avatarScale
-                    scaleY = avatarScale
-                    alpha = contentAlpha
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            val faceSize = (minOf(maxWidth, maxHeight) * if (guiHidden && !isSynthLive) 0.88f else 0.72f).coerceIn(210.dp, 420.dp)
-            Box(
-                modifier = Modifier
-                    .size(faceSize)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                    ) {
-                        if (guiHidden) {
-                            eyePokeNonce++
-                        }
-                        if (phase == LivePhase.SPEAKING) {
-                            viewModel.ttsEngine.stop()
-                            startListening()
-                        } else if (phase == LivePhase.IDLE && guiHidden) {
-                            if (!hasAudioPerm) {
-                                audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            } else {
-                                startListening()
-                            }
-                        } else {
-                            viewModel.soundEngine.playAnimalesePurr()
-                            mood = "happy"
-                        }
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                DotMatrixAvatarCanvas(
-                    expression = liveExpr,
-                    scale = if (guiHidden && !isSynthLive) 1.24f else 1.12f,
-                    mouthOpenness = mouthOpenness,
-                    highFps = prefs.highFpsMode,
-                    onPetted = {
-                        viewModel.soundEngine.playAnimalesePurr()
-                        mood = "love"
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
+        val activeAnimDisplayName = remember(liveExpr, mood) {
+            liveExpr?.name?.takeIf { it.isNotBlank() } ?: MoodDetector.moodToExpressionName(mood)
+        }
+        val topLeftStatusText = when {
+            stageLabel.isNotBlank() && phase != LivePhase.SPEAKING -> stageLabel
+            phase == LivePhase.PREPARING_MIC -> "Starting mic..."
+            phase == LivePhase.LISTENING -> if (cameraEnabled) "Listening · Cam ON" else "Listening..."
+            phase == LivePhase.TRANSCRIBING -> "Transcribing..."
+            phase == LivePhase.THINKING -> "Thinking..."
+            phase == LivePhase.RUNNING_ACTION -> "Running action..."
+            phase == LivePhase.PREPARING_VOICE -> "Preparing voice..."
+            phase == LivePhase.SPEAKING -> "Speaking..."
+            else -> ""
+        }
+        val statusDotColor = when (phase) {
+            LivePhase.PREPARING_MIC, LivePhase.TRANSCRIBING, LivePhase.PREPARING_VOICE -> CelAmber
+            LivePhase.LISTENING -> CelEmeraldThought
+            LivePhase.SPEAKING -> visuals.secondary
+            LivePhase.THINKING, LivePhase.RUNNING_ACTION -> visuals.primary
+            LivePhase.IDLE -> CelTextSecondary
         }
 
-        // Live Camera PiP Preview (Gemini-Live style, top-right below Eye toggle) (#4u)
-        if (cameraEnabled && hasCameraPerm) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .statusBarsPadding()
-                    .padding(top = 60.dp, end = 14.dp)
-                    .size(width = 112.dp, height = 152.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(Color(0xFF0A0812))
-                    .border(1.5.dp, visuals.primary.copy(alpha = 0.75f), RoundedCornerShape(18.dp)),
-            ) {
-                AndroidView(
-                    factory = { ctx ->
-                        TextureView(ctx).also { tv ->
-                            cameraController.attach(tv, useFrontCamera)
-                        }
-                    },
-                    update = {
-                        cameraController.switchLens(useFrontCamera)
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
-                // LIVE CAM indicator badge
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(6.dp)
-                        .clip(RoundedCornerShape(99.dp))
-                        .background(Color(0xB8000000))
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Box(Modifier.size(6.dp).clip(CircleShape).background(CelEmeraldThought))
-                    Text("CAM", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                }
-                // Flip lens button overlaid on PiP
-                IconButton(
-                    onClick = {
-                        viewModel.soundEngine.playClick()
-                        useFrontCamera = !useFrontCamera
-                    },
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(4.dp)
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xB8000000)),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Cameraswitch,
-                        contentDescription = "Flip Camera",
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-            }
-        }
-
-        // Foreground HUD overlay (goes true edge-to-edge when Hide Eye is ON!)
+        // Foreground layout — Cel's dot-matrix face lives inside weight(1f) ABOVE the chat bubble so
+        // the chat bubble NEVER covers Cel's face, gracefully framing around her!
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -998,14 +947,13 @@ fun LiveModeScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp)
                 .graphicsLayer { alpha = contentAlpha },
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween,
         ) {
-            // Top Status Bar (hidden when Hide Eye is ON)
+            // Top Status Bar (hidden when Hide Eye is ON; leaves room for Voice Settings + Eye buttons at top-right)
             AnimatedVisibility(
                 visible = !guiHidden,
                 enter = fadeIn(tween(240)) + slideInVertically(tween(260)) { -it / 2 },
                 exit = fadeOut(tween(220)) + slideOutVertically(tween(220)) { -it / 2 },
-                modifier = Modifier.fillMaxWidth().padding(end = 48.dp),
+                modifier = Modifier.fillMaxWidth().padding(end = 94.dp),
             ) {
                 Row(
                     modifier = Modifier
@@ -1020,15 +968,7 @@ fun LiveModeScreen(
                             modifier = Modifier
                                 .size(8.dp)
                                 .clip(CircleShape)
-                                .background(
-                                    when (phase) {
-                                        LivePhase.PREPARING_MIC, LivePhase.TRANSCRIBING, LivePhase.PREPARING_VOICE -> CelAmber
-                                        LivePhase.LISTENING -> CelEmeraldThought
-                                        LivePhase.SPEAKING -> visuals.secondary
-                                        LivePhase.THINKING, LivePhase.RUNNING_ACTION -> visuals.primary
-                                        LivePhase.IDLE -> CelTextSecondary
-                                    }
-                                )
+                                .background(statusDotColor)
                         )
                         Icon(
                             imageVector = CelliumIcons.resolve(provIconKey),
@@ -1060,7 +1000,7 @@ fun LiveModeScreen(
                         )
                     }
 
-                    // Quick Chat Switcher Pill (#4s)
+                    // Quick Chat Switcher Pill
                     GlassPill(onClick = { showChatSwitcher = true }) {
                         Icon(
                             imageVector = Icons.Rounded.ChatBubbleOutline,
@@ -1078,7 +1018,7 @@ fun LiveModeScreen(
                         )
                     }
 
-                    // Active Persona Pill (#4r)
+                    // Active Persona Pill
                     GlassPill(onClick = { showPersonaPicker = true }) {
                         Icon(
                             imageVector = CelliumIcons.resolve(persona.iconKey),
@@ -1133,12 +1073,11 @@ fun LiveModeScreen(
                         )
                     }
 
-                    // Auto / Manual Mode Toggle (#4l, #4q)
+                    // Auto / Manual Mode Toggle
                     GlassPill(
                         onClick = {
                             val nextAuto = !prefs.liveHandsFreeLoop
                             if (!nextAuto) {
-                                // Turning Auto OFF cancels recording without sending! (#4l)
                                 cancelAllListeningWithoutSending()
                             }
                             scope.launch {
@@ -1171,73 +1110,85 @@ fun LiveModeScreen(
                 }
             }
 
-            Spacer(Modifier.weight(1f))
+            // Cel's Dedicated Unobstructed Dot-Matrix Face Stage (auto-fits cleanly above the chat bubble!)
+            BoxWithConstraints(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                        scaleX = avatarScale
+                        scaleY = avatarScale
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                val maxAvailable = minOf(maxWidth, maxHeight)
+                val faceSize = (maxAvailable * if (guiHidden && !isSynthLive) 0.90f else 0.88f)
+                    .coerceIn(136.dp, 400.dp)
+                Box(
+                    modifier = Modifier
+                        .size(faceSize)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) {
+                            if (guiHidden) {
+                                eyePokeNonce++
+                            }
+                            if (phase == LivePhase.SPEAKING) {
+                                viewModel.ttsEngine.stop()
+                                startListening()
+                            } else if (phase == LivePhase.IDLE && guiHidden) {
+                                if (!hasAudioPerm) {
+                                    audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                } else {
+                                    startListening()
+                                }
+                            } else {
+                                viewModel.soundEngine.playAnimalesePurr()
+                                mood = "happy"
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    DotMatrixAvatarCanvas(
+                        expression = liveExpr,
+                        scale = if (guiHidden && !isSynthLive) 1.24f else 1.12f,
+                        mouthOpenness = mouthOpenness,
+                        highFps = prefs.highFpsMode,
+                        onPetted = {
+                            viewModel.soundEngine.playAnimalesePurr()
+                            mood = "love"
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
 
-            // Synth Hide-Eye Minimal Bubbles + Typing Box (#4t): stays visible on OLED black when Synth voice is active!
+            // Synth Hide-Eye Minimal Bubble + Typing Box: ONLY shown during guiHidden if user picked Synth voice!
+            // For all non-Synth voices, Hide Eye hides EVERY HUD element including the chat bubble!
             if (guiHidden && isSynthLive) {
                 Column(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    if (userTranscript.isNotBlank() || celReply.isNotBlank() || stageLabel.isNotBlank() || errorMsg != null) {
-                        GlassCard(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(18.dp),
-                            highlighted = phase != LivePhase.IDLE,
-                        ) {
-                            if (userTranscript.isNotBlank()) {
-                                Text(
-                                    text = "You: $userTranscript",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = CelTextSecondary,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                            if (stageLabel.isNotBlank() && celReply.isBlank()) {
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    text = stageLabel,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = CelAmber,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                            if (celReply.isNotBlank()) {
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    text = celReply,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = CelTextPrimary,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                            if (errorMsg != null) {
-                                Spacer(Modifier.height(6.dp))
-                                Text(
-                                    text = errorMsg!!,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = CelDangerRed,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                                if (failedPrompt != null) {
-                                    Spacer(Modifier.height(6.dp))
-                                    Button(
-                                        onClick = {
-                                            val retryText = failedPrompt ?: return@Button
-                                            val retryBmp = failedBitmap
-                                            sendLivePrompt(retryText, explicitBitmap = retryBmp, isRetry = true)
-                                        },
-                                        colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
-                                        shape = RoundedCornerShape(12.dp),
-                                    ) {
-                                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Retry", maxLines = 1, softWrap = false)
-                                    }
-                                }
-                            }
-                        }
+                    if (userTranscript.isNotBlank() || celReply.isNotBlank() || errorMsg != null) {
+                        LiveSmartChatBubble(
+                            userTranscript = userTranscript,
+                            celReply = celReply,
+                            errorMsg = errorMsg,
+                            failedPrompt = failedPrompt,
+                            isActivePhase = phase != LivePhase.IDLE,
+                            isSpeaking = phase == LivePhase.SPEAKING,
+                            maxBubbleHeight = 165.dp,
+                            idleHint = "",
+                            accent = visuals.primary,
+                            onRetry = {
+                                val retryText = failedPrompt ?: return@LiveSmartChatBubble
+                                val retryBmp = failedBitmap
+                                sendLivePrompt(retryText, explicitBitmap = retryBmp, isRetry = true)
+                            },
+                        )
                     }
 
                     LiveTypingBar(
@@ -1257,11 +1208,12 @@ fun LiveModeScreen(
                             }
                         },
                         accent = visuals.primary,
+                        focusRequester = typingFocusRequester,
                     )
                 }
             }
 
-            // Full Bottom Transcript, Retry, Typing Bar & Camera/Mic/Hangup Controls (visible when GUI is NOT hidden)
+            // Full Bottom Smart Chat Bubble, Typing Bar & Liquid Glass Controls (hidden completely when Hide Eye is ON)
             AnimatedVisibility(
                 visible = !guiHidden,
                 enter = fadeIn(tween(240)) + slideInVertically(tween(260)) { it / 2 },
@@ -1271,72 +1223,27 @@ fun LiveModeScreen(
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    GlassCard(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(20.dp),
-                        highlighted = phase != LivePhase.IDLE,
-                    ) {
-                        val headerText = when {
-                            stageLabel.isNotBlank() && phase != LivePhase.SPEAKING -> stageLabel
-                            phase == LivePhase.PREPARING_MIC -> "Starting mic ($sttLabel)..."
-                            phase == LivePhase.LISTENING && userTranscript.isBlank() ->
-                                if (cameraEnabled) "Listening ($sttLabel) · Camera Vision ON" else "Listening ($sttLabel)... take your time"
-                            phase == LivePhase.TRANSCRIBING -> "Transcribing via $sttLabel..."
-                            userTranscript.isNotBlank() -> "\"$userTranscript\""
-                            else -> "Tap mic to talk to ${persona.name} · Voice: ${CelliumTtsEngine.engineLabel(prefs.liveTtsEngine)}"
-                        }
-                        Text(
-                            text = headerText,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = if (phase == LivePhase.PREPARING_VOICE || phase == LivePhase.RUNNING_ACTION) CelAmber else CelTextPrimary,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        if (celReply.isNotBlank()) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = celReply,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = CelLavender,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                        if (errorMsg != null) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = errorMsg!!,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = CelDangerRed,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                            if (failedPrompt != null) {
-                                Spacer(Modifier.height(8.dp))
-                                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                    Button(
-                                        onClick = {
-                                            viewModel.soundEngine.playClick()
-                                            val retryText = failedPrompt ?: return@Button
-                                            val retryBmp = failedBitmap
-                                            sendLivePrompt(retryText, explicitBitmap = retryBmp, isRetry = true)
-                                        },
-                                        colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier.testTag("live_retry_button"),
-                                    ) {
-                                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Retry Message", maxLines = 1, softWrap = false)
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    LiveSmartChatBubble(
+                        userTranscript = userTranscript,
+                        celReply = celReply,
+                        errorMsg = errorMsg,
+                        failedPrompt = failedPrompt,
+                        isActivePhase = phase != LivePhase.IDLE,
+                        isSpeaking = phase == LivePhase.SPEAKING,
+                        maxBubbleHeight = if (showTypingInput) 155.dp else 210.dp,
+                        idleHint = "Tap mic to talk to ${persona.name} · ${CelliumTtsEngine.engineLabel(prefs.liveTtsEngine)}",
+                        accent = visuals.primary,
+                        onRetry = {
+                            viewModel.soundEngine.playClick()
+                            val retryText = failedPrompt ?: return@LiveSmartChatBubble
+                            val retryBmp = failedBitmap
+                            sendLivePrompt(retryText, explicitBitmap = retryBmp, isRetry = true)
+                        },
+                    )
 
-                    if (showTypingInput || isSynthLive) {
+                    if (showTypingInput) {
                         LiveTypingBar(
                             value = typedInput,
                             onValueChange = { next ->
@@ -1354,15 +1261,17 @@ fun LiveModeScreen(
                                 }
                             },
                             accent = visuals.primary,
+                            focusRequester = typingFocusRequester,
                         )
                     }
 
+                    // Liquid Glass Control Dock
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        // Camera Sharing Toggle (#4u)
-                        IconButton(
+                        // Camera Sharing Toggle (Liquid Glass)
+                        LiquidGlassCircleButton(
                             onClick = {
                                 viewModel.soundEngine.playClick()
                                 if (cameraEnabled) {
@@ -1374,23 +1283,22 @@ fun LiveModeScreen(
                                     cameraPermLauncher.launch(Manifest.permission.CAMERA)
                                 }
                             },
-                            modifier = Modifier
-                                .size(52.dp)
-                                .clip(CircleShape)
-                                .background(if (cameraEnabled) CelEmeraldThought else Color(0xFF1A1426))
-                                .border(1.5.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                                .testTag("live_camera_button"),
-                        ) {
-                            Icon(
-                                imageVector = if (cameraEnabled) Icons.Rounded.Videocam else Icons.Rounded.VideocamOff,
-                                contentDescription = if (cameraEnabled) "Stop camera sharing" else "Share camera with Cel",
-                                tint = Color.White,
-                                modifier = Modifier.size(24.dp),
-                            )
-                        }
+                            icon = if (cameraEnabled) Icons.Rounded.Videocam else Icons.Rounded.VideocamOff,
+                            contentDescription = if (cameraEnabled) "Stop camera sharing" else "Share camera with Cel",
+                            tint = if (cameraEnabled) CelEmeraldThought else Color(0xFF9E8CFF),
+                            active = cameraEnabled,
+                            size = 54.dp,
+                            iconSize = 23.dp,
+                            modifier = Modifier.testTag("live_camera_button"),
+                        )
 
-                        // Primary Mic Button
-                        IconButton(
+                        // Primary Mic Button (Liquid Glass)
+                        val micTint = when (phase) {
+                            LivePhase.LISTENING -> CelEmeraldThought
+                            LivePhase.PREPARING_MIC, LivePhase.TRANSCRIBING, LivePhase.PREPARING_VOICE -> CelAmber
+                            else -> visuals.primary
+                        }
+                        LiquidGlassCircleButton(
                             onClick = {
                                 viewModel.soundEngine.playClick()
                                 if (!hasAudioPerm) {
@@ -1408,103 +1316,256 @@ fun LiveModeScreen(
                                     startListening()
                                 }
                             },
-                            modifier = Modifier
-                                .size(66.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    when (phase) {
-                                        LivePhase.LISTENING -> CelEmeraldThought
-                                        LivePhase.PREPARING_MIC, LivePhase.TRANSCRIBING, LivePhase.PREPARING_VOICE -> CelAmber
-                                        else -> visuals.primary
-                                    }
-                                )
-                                .border(2.dp, Color.White.copy(alpha = 0.25f), CircleShape)
-                                .testTag("live_mic_button"),
-                        ) {
-                            Icon(
-                                imageVector = if (phase == LivePhase.LISTENING || phase == LivePhase.PREPARING_MIC) Icons.Rounded.MicOff else Icons.Rounded.Mic,
-                                contentDescription = "Toggle microphone",
-                                tint = Color.White,
-                                modifier = Modifier.size(30.dp),
-                            )
-                        }
+                            icon = if (phase == LivePhase.LISTENING || phase == LivePhase.PREPARING_MIC) Icons.Rounded.MicOff else Icons.Rounded.Mic,
+                            contentDescription = "Toggle microphone",
+                            tint = micTint,
+                            active = true,
+                            size = 66.dp,
+                            iconSize = 30.dp,
+                            modifier = Modifier.testTag("live_mic_button"),
+                        )
 
-                        // Keyboard / Type Bar Toggle
-                        IconButton(
+                        // Keyboard / Type Bar Toggle (Liquid Glass — now toggles & pops up IME reliably!)
+                        LiquidGlassCircleButton(
                             onClick = {
                                 viewModel.soundEngine.playClick()
-                                showTypingInput = !showTypingInput
+                                val next = !showTypingInput
+                                showTypingInput = next
+                                if (next) {
+                                    typingFocusNonce++
+                                } else {
+                                    keyboardController?.hide()
+                                    focusManager.clearFocus()
+                                }
                             },
-                            modifier = Modifier
-                                .size(52.dp)
-                                .clip(CircleShape)
-                                .background(if (showTypingInput || isSynthLive) visuals.secondary else Color(0xFF1A1426))
-                                .border(1.5.dp, Color.White.copy(alpha = 0.2f), CircleShape),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Keyboard,
-                                contentDescription = "Type in Live Mode",
-                                tint = Color.White,
-                                modifier = Modifier.size(22.dp),
-                            )
-                        }
+                            icon = Icons.Rounded.Keyboard,
+                            contentDescription = "Type in Live Mode",
+                            tint = if (showTypingInput) visuals.secondary else Color(0xFF9E8CFF),
+                            active = showTypingInput,
+                            size = 54.dp,
+                            iconSize = 22.dp,
+                            modifier = Modifier.testTag("live_keyboard_button"),
+                        )
 
-                        // Hang Up
-                        IconButton(
+                        // Hang Up (Liquid Glass Red)
+                        LiquidGlassCircleButton(
                             onClick = {
                                 viewModel.soundEngine.playClick()
                                 triggerExit()
                             },
-                            modifier = Modifier
-                                .size(60.dp)
-                                .clip(CircleShape)
-                                .background(CelDangerRed)
-                                .testTag("live_hangup_button"),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.CallEnd,
-                                contentDescription = "End Live Mode",
-                                tint = Color.White,
-                                modifier = Modifier.size(26.dp),
-                            )
-                        }
+                            icon = Icons.Rounded.CallEnd,
+                            contentDescription = "End Live Mode",
+                            tint = CelDangerRed,
+                            active = true,
+                            size = 60.dp,
+                            iconSize = 26.dp,
+                            modifier = Modifier.testTag("live_hangup_button"),
+                        )
                     }
                 }
             }
         }
 
-        // Top-End Immersive Eye Toggle (fades out after hiding GUI; wakes on screen tap)
+        // Independent Top-Left Live Status Bubble ("Listening...", "Transcribing...", "Thinking...", etc.)
+        // Completely decoupled from the chat bubble so status transitions NEVER jump or resize the chat bubble!
         Box(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .statusBarsPadding()
+                .padding(top = 60.dp, start = 16.dp)
+                .graphicsLayer { alpha = contentAlpha },
+        ) {
+            AnimatedVisibility(
+                visible = !guiHidden && topLeftStatusText.isNotBlank(),
+                enter = fadeIn(tween(180)) + slideInVertically(tween(200)) { -it / 2 },
+                exit = fadeOut(tween(180)),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(99.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    statusDotColor.copy(alpha = 0.24f),
+                                    Color(0xCC0D0A1A),
+                                )
+                            )
+                        )
+                        .border(
+                            width = 1.dp,
+                            brush = Brush.verticalGradient(
+                                listOf(
+                                    Color.White.copy(alpha = 0.42f),
+                                    statusDotColor.copy(alpha = 0.45f),
+                                )
+                            ),
+                            shape = RoundedCornerShape(99.dp),
+                        )
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .testTag("live_status_pill"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(statusDotColor)
+                    )
+                    Text(
+                        text = topLeftStatusText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CelTextPrimary,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+
+        // Optional Top-Right Cel Face Animation Name HUD Badge (toggled next to Dev Logs)
+        if (prefs.showAvatarAnimName && !guiHidden) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(
+                        top = 60.dp,
+                        end = if (cameraEnabled && hasCameraPerm) 134.dp else 14.dp,
+                    )
+                    .graphicsLayer { alpha = contentAlpha }
+                    .clip(RoundedCornerShape(99.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                visuals.primary.copy(alpha = 0.22f),
+                                Color(0xCC0C0918),
+                            )
+                        )
+                    )
+                    .border(1.dp, visuals.primary.copy(alpha = 0.45f), RoundedCornerShape(99.dp))
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .testTag("live_anim_name_badge"),
+            ) {
+                Text(
+                    text = "${prefs.avatarGender} · $activeAnimDisplayName",
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                    color = CelLavender,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        // Live Camera PiP Preview (Gemini-Live style, top-right below top controls)
+        if (cameraEnabled && hasCameraPerm && !guiHidden) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(top = 60.dp, end = 14.dp)
+                    .size(width = 112.dp, height = 152.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color(0xFF0A0812))
+                    .border(1.5.dp, visuals.primary.copy(alpha = 0.75f), RoundedCornerShape(18.dp)),
+            ) {
+                AndroidView(
+                    factory = { ctx ->
+                        TextureView(ctx).also { tv ->
+                            cameraController.attach(tv, useFrontCamera)
+                        }
+                    },
+                    update = {
+                        cameraController.switchLens(useFrontCamera)
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(99.dp))
+                        .background(Color(0xB8000000))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Box(Modifier.size(6.dp).clip(CircleShape).background(CelEmeraldThought))
+                    Text("CAM", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                }
+                IconButton(
+                    onClick = {
+                        viewModel.soundEngine.playClick()
+                        useFrontCamera = !useFrontCamera
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(4.dp)
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xB8000000)),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Cameraswitch,
+                        contentDescription = "Flip Camera",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+        }
+
+        // Top-End Liquid Glass Controls: Voice Settings Shortcut + Immersive Hide Eye Toggle
+        Row(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .statusBarsPadding()
                 .padding(top = 12.dp, end = 14.dp)
                 .graphicsLayer { alpha = contentAlpha },
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
+            AnimatedVisibility(
+                visible = !guiHidden,
+                enter = fadeIn(tween(180)),
+                exit = fadeOut(tween(180)),
+            ) {
+                LiquidGlassCircleButton(
+                    onClick = {
+                        viewModel.soundEngine.playClick()
+                        triggerExit(afterExit = onOpenVoiceSettings)
+                    },
+                    icon = Icons.Rounded.Settings,
+                    contentDescription = "Voice Settings",
+                    tint = visuals.primary,
+                    active = false,
+                    size = 40.dp,
+                    iconSize = 19.dp,
+                    modifier = Modifier.testTag("live_voice_settings_button"),
+                )
+            }
+
             AnimatedVisibility(
                 visible = eyeVisible,
                 enter = fadeIn(tween(180)),
                 exit = fadeOut(tween(260)),
             ) {
-                IconButton(
+                LiquidGlassCircleButton(
                     onClick = {
                         viewModel.soundEngine.playClick()
                         guiHidden = !guiHidden
                     },
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xB80E0A1C))
-                        .border(1.dp, visuals.primary.copy(alpha = 0.55f), CircleShape)
-                        .testTag("live_eye_toggle"),
-                ) {
-                    Icon(
-                        imageVector = if (guiHidden) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                        contentDescription = if (guiHidden) "Show Live GUI" else "Hide Live GUI",
-                        tint = if (guiHidden) CelLavender else Color.White,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
+                    icon = if (guiHidden) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                    contentDescription = if (guiHidden) "Show Live GUI" else "Hide Live GUI",
+                    tint = if (guiHidden) CelLavender else visuals.primary,
+                    active = guiHidden,
+                    size = 40.dp,
+                    iconSize = 20.dp,
+                    modifier = Modifier.testTag("live_eye_toggle"),
+                )
             }
         }
     }
@@ -1618,11 +1679,235 @@ fun LiveModeScreen(
 }
 
 @Composable
+private fun LiveSmartChatBubble(
+    userTranscript: String,
+    celReply: String,
+    errorMsg: String?,
+    failedPrompt: String?,
+    isActivePhase: Boolean,
+    isSpeaking: Boolean,
+    maxBubbleHeight: Dp,
+    idleHint: String,
+    accent: Color,
+    onRetry: () -> Unit,
+) {
+    val scrollState = rememberScrollState()
+    val hasContent = userTranscript.isNotBlank() || celReply.isNotBlank() || errorMsg != null
+
+    // Keep the newest spoken lines anchored cleanly at the bottom while Cel speaks/types;
+    // older lines gracefully slide up behind the top "..." ellipsis fade until Cel finishes!
+    LaunchedEffect(celReply, userTranscript, errorMsg, isSpeaking) {
+        if (scrollState.maxValue > 0) {
+            scrollState.scrollTo(scrollState.maxValue)
+        }
+    }
+
+    if (!hasContent && idleHint.isBlank()) return
+
+    val bubbleShape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 20.dp, bottomEnd = 20.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(bubbleShape)
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        Color(0xD8140E24),
+                        Color(0xE80A0714),
+                    )
+                )
+            )
+            .border(
+                width = if (isActivePhase) 1.35.dp else 1.dp,
+                brush = Brush.verticalGradient(
+                    listOf(
+                        if (isActivePhase) accent.copy(alpha = 0.80f) else Color.White.copy(alpha = 0.28f),
+                        accent.copy(alpha = 0.30f),
+                    )
+                ),
+                shape = bubbleShape,
+            ),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = maxBubbleHeight)
+                .verticalScroll(scrollState)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (!hasContent) {
+                Text(
+                    text = idleHint,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = CelTextSecondary,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                if (userTranscript.isNotBlank()) {
+                    Text(
+                        text = "\"$userTranscript\"",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = CelTextSecondary,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (celReply.isNotBlank()) {
+                    Text(
+                        text = celReply,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = CelLavender,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (errorMsg != null) {
+                    Text(
+                        text = errorMsg,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CelDangerRed,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (failedPrompt != null) {
+                        Spacer(Modifier.height(2.dp))
+                        Button(
+                            onClick = onRetry,
+                            colors = ButtonDefaults.buttonColors(containerColor = accent),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("live_retry_button"),
+                        ) {
+                            Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Retry Message", maxLines = 1, softWrap = false)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Top ellipsis fade mask whenever older text has scrolled past the top edge
+        if (scrollState.value > 6) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(34.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color(0xF5120C21),
+                                Color(0xAA120C21),
+                                Color.Transparent,
+                            )
+                        )
+                    ),
+                contentAlignment = Alignment.TopCenter,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 3.dp)
+                        .clip(RoundedCornerShape(99.dp))
+                        .background(Color(0xD81B1330))
+                        .border(0.8.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(99.dp))
+                        .padding(horizontal = 10.dp, vertical = 1.dp),
+                ) {
+                    Text(
+                        text = "...",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = CelLavender,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiquidGlassCircleButton(
+    onClick: () -> Unit,
+    icon: ImageVector,
+    contentDescription: String,
+    tint: Color,
+    active: Boolean,
+    size: Dp,
+    iconSize: Dp,
+    modifier: Modifier = Modifier,
+) {
+    val fillBrush = remember(tint, active) {
+        if (active) {
+            Brush.verticalGradient(
+                listOf(
+                    Color.White.copy(alpha = 0.30f),
+                    tint.copy(alpha = 0.62f),
+                    tint.copy(alpha = 0.36f),
+                )
+            )
+        } else {
+            Brush.verticalGradient(
+                listOf(
+                    Color.White.copy(alpha = 0.16f),
+                    tint.copy(alpha = 0.18f),
+                    Color(0x99110D1E),
+                )
+            )
+        }
+    }
+    val rimBrush = remember(tint, active) {
+        Brush.verticalGradient(
+            listOf(
+                Color.White.copy(alpha = if (active) 0.72f else 0.48f),
+                tint.copy(alpha = if (active) 0.65f else 0.32f),
+                Color.White.copy(alpha = 0.14f),
+            )
+        )
+    }
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(fillBrush)
+            .border(1.35.dp, rimBrush, CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        // Specular optical glass dome sheen along the top curve
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = this.size.width
+            val h = this.size.height
+            drawOval(
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = if (active) 0.34f else 0.22f),
+                        Color.Transparent,
+                    ),
+                    startY = 0f,
+                    endY = h * 0.52f,
+                ),
+                topLeft = Offset(w * 0.14f, h * 0.05f),
+                size = Size(w * 0.72f, h * 0.44f),
+            )
+        }
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = Color.White,
+            modifier = Modifier.size(iconSize),
+        )
+    }
+}
+
+@Composable
 private fun LiveTypingBar(
     value: String,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
     accent: Color,
+    focusRequester: FocusRequester,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1645,23 +1930,20 @@ private fun LiveTypingBar(
             ),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = { onSend() }),
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .focusRequester(focusRequester),
         )
         if (value.isNotBlank()) {
-            IconButton(
+            LiquidGlassCircleButton(
                 onClick = onSend,
-                modifier = Modifier
-                    .size(46.dp)
-                    .clip(CircleShape)
-                    .background(accent),
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Rounded.Send,
-                    contentDescription = "Send typed prompt",
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
+                icon = Icons.AutoMirrored.Rounded.Send,
+                contentDescription = "Send typed prompt",
+                tint = accent,
+                active = true,
+                size = 46.dp,
+                iconSize = 20.dp,
+            )
         }
     }
 }

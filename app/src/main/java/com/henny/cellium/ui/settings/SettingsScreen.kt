@@ -159,6 +159,8 @@ fun SettingsScreen(
     viewModel: CelliumViewModel,
     user: UserProfile?,
     googleAuthBusy: Boolean,
+    initialCategoryKey: String? = null,
+    initialCategoryNonce: Long = 0L,
     onSignInWithGoogle: () -> Unit,
     onSignOutGoogle: () -> Unit,
     onOpenAvatarStudio: () -> Unit,
@@ -174,6 +176,22 @@ fun SettingsScreen(
 
     var activeCategory by remember { mutableStateOf<SettingsCategory?>(null) }
     var hubSearch by remember { mutableStateOf("") }
+
+    fun openCategory(cat: SettingsCategory) {
+        viewModel.soundEngine.playClick()
+        activeCategory = cat
+        scope.launch { viewModel.prefsStore.recordSettingsCategoryVisit(cat.name) }
+    }
+
+    LaunchedEffect(initialCategoryKey, initialCategoryNonce) {
+        if (initialCategoryNonce > 0L && !initialCategoryKey.isNullOrBlank()) {
+            val match = SettingsCategory.entries.firstOrNull { it.name.equals(initialCategoryKey, ignoreCase = true) }
+            if (match != null) {
+                activeCategory = match
+                viewModel.prefsStore.recordSettingsCategoryVisit(match.name)
+            }
+        }
+    }
 
     // Persona / Memory / Template dialogs
     var editingPersona by remember { mutableStateOf<CustomPersonaEntity?>(null) }
@@ -267,13 +285,30 @@ fun SettingsScreen(
     }
 
     if (activeCategory == null) {
-        // ── CLEAN BREATHABLE GROUPED SETTINGS HUB WITH SIMPLE / ADVANCED TOGGLE (#3) ──
+        // ── MINIMAL ZERO-CLUTTER SETTINGS HUB: "Simple" (Most Visited) vs "All" (2-Column Grid) ──
         val searchQuery = hubSearch.trim().lowercase()
         val searchMatches = remember(searchQuery) {
             if (searchQuery.isEmpty()) emptyList()
             else SettingsCategory.entries.filter {
                 it.title.lowercase().contains(searchQuery) || it.keywords.contains(searchQuery)
             }
+        }
+        val visitCounts = remember(prefs.settingsVisitCountsJson) {
+            viewModel.prefsStore.decodeSettingsVisitCounts(prefs.settingsVisitCountsJson)
+        }
+        val mostVisitedTop4 = remember(visitCounts) {
+            val defaultPriority = mapOf(
+                SettingsCategory.PROVIDERS to 4,
+                SettingsCategory.VOICE to 3,
+                SettingsCategory.APPEARANCE to 2,
+                SettingsCategory.PERSONAS to 1,
+            )
+            SettingsCategory.entries
+                .sortedWith(
+                    compareByDescending<SettingsCategory> { visitCounts[it.name] ?: 0 }
+                        .thenByDescending { defaultPriority[it] ?: 0 }
+                )
+                .take(4)
         }
 
         Column(modifier = Modifier.fillMaxSize()) {
@@ -287,68 +322,72 @@ fun SettingsScreen(
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 item {
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Settings", style = MaterialTheme.typography.headlineSmall, color = CelTextPrimary, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "${BuildConfig.VERSION_NAME} · Local-First · CelSuite.HenryJayz.Cellium",
-                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
-                            color = CelTextSecondary,
-                        )
-                    }
-                }
-
-                // Simple / Advanced Mode Segmented Switcher
-                item {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(CelTerminalBg.copy(alpha = 0.82f))
-                            .border(1.dp, visuals.subtleBorder, RoundedCornerShape(16.dp))
-                            .padding(4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        val simpleSelected = !prefs.settingsAdvancedMode
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (simpleSelected) visuals.primary else Color.Transparent)
-                                .clickable {
-                                    viewModel.soundEngine.playClick()
-                                    scope.launch { viewModel.prefsStore.updateSettingsAdvancedMode(false) }
-                                }
-                                .padding(vertical = 9.dp)
-                                .testTag("settings_mode_simple"),
-                            contentAlignment = Alignment.Center,
-                        ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Settings", style = MaterialTheme.typography.headlineSmall, color = CelTextPrimary, fontWeight = FontWeight.SemiBold)
                             Text(
-                                text = "Simple",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = if (simpleSelected) Color.White else CelTextSecondary,
+                                "${BuildConfig.VERSION_NAME} · Cel.Cellium",
+                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                                color = CelTextSecondary,
                             )
                         }
-                        Box(
+                        // Simple / All Compact Segmented Switcher
+                        Row(
                             modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (!simpleSelected) visuals.primary else Color.Transparent)
-                                .clickable {
-                                    viewModel.soundEngine.playClick()
-                                    scope.launch { viewModel.prefsStore.updateSettingsAdvancedMode(true) }
-                                }
-                                .padding(vertical = 9.dp)
-                                .testTag("settings_mode_advanced"),
-                            contentAlignment = Alignment.Center,
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(CelTerminalBg.copy(alpha = 0.85f))
+                                .border(1.dp, visuals.subtleBorder, RoundedCornerShape(14.dp))
+                                .padding(3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
                         ) {
-                            Text(
-                                text = "Advanced",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = if (!simpleSelected) Color.White else CelTextSecondary,
-                            )
+                            val simpleSelected = !prefs.settingsAdvancedMode
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (simpleSelected) visuals.primary else Color.Transparent)
+                                    .clickable {
+                                        viewModel.soundEngine.playClick()
+                                        scope.launch { viewModel.prefsStore.updateSettingsAdvancedMode(false) }
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 7.dp)
+                                    .testTag("settings_mode_simple"),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "Simple",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (simpleSelected) Color.White else CelTextSecondary,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (!simpleSelected) visuals.primary else Color.Transparent)
+                                    .clickable {
+                                        viewModel.soundEngine.playClick()
+                                        scope.launch { viewModel.prefsStore.updateSettingsAdvancedMode(true) }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 7.dp)
+                                    .testTag("settings_mode_advanced"),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "All",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (!simpleSelected) Color.White else CelTextSecondary,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                            }
                         }
                     }
                 }
@@ -357,10 +396,17 @@ fun SettingsScreen(
                     OutlinedTextField(
                         value = hubSearch,
                         onValueChange = { hubSearch = it },
-                        placeholder = { Text("Search settings (kaggle, wake word, GGUF, keys, cloud...)") },
+                        placeholder = { Text("Search settings (voice, keys, kaggle, theme, logs...)") },
                         leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, tint = CelLavender) },
+                        trailingIcon = if (hubSearch.isNotBlank()) {
+                            {
+                                IconButton(onClick = { hubSearch = "" }) {
+                                    Icon(Icons.Rounded.Close, contentDescription = "Clear search", tint = CelTextMuted, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        } else null,
                         singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.fillMaxWidth().testTag("settings_hub_search"),
                     )
                 }
@@ -383,17 +429,14 @@ fun SettingsScreen(
                                     title = cat.title,
                                     subtitle = subtitleForCategory(cat),
                                     accent = Color(cat.accentHex),
-                                    onClick = {
-                                        viewModel.soundEngine.playClick()
-                                        activeCategory = cat
-                                    },
+                                    onClick = { openCategory(cat) },
                                 )
                             }
                         }
                     }
                 } else {
-                    // Quick Studios Row
-                    item {
+                    // Quick Studios Row (always 1-tap reachable: Avatar Studio + Stats & Dev Logs)
+                    item(key = "quick_studios") {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -401,7 +444,7 @@ fun SettingsScreen(
                             StudioQuickTile(
                                 icon = Icons.Rounded.Face,
                                 title = "Avatar Studio",
-                                subtitle = "Style: ${prefs.avatarGender} · 3,800+ faces",
+                                subtitle = "${prefs.avatarGender} · 3,800+ faces",
                                 accent = visuals.primary,
                                 onClick = {
                                     viewModel.soundEngine.playPop()
@@ -409,133 +452,110 @@ fun SettingsScreen(
                                 },
                                 modifier = Modifier.weight(1f).testTag("settings_open_avatar_studio"),
                             )
-                            if (prefs.settingsAdvancedMode) {
-                                StudioQuickTile(
-                                    icon = Icons.Rounded.BarChart,
-                                    title = "Stats & Logs",
-                                    subtitle = "${uiState.totalMessageCount} msgs · Console",
-                                    accent = Color(0xFF38BDF8),
-                                    onClick = {
-                                        viewModel.soundEngine.playPop()
-                                        onOpenStats()
-                                    },
-                                    modifier = Modifier.weight(1f).testTag("settings_open_stats"),
-                                )
-                            } else {
-                                StudioQuickTile(
-                                    icon = Icons.Rounded.Brush,
-                                    title = "Kaggle GPU Art",
-                                    subtitle = if (prefs.imageGenEnabled) "SDXL Cloud Ready" else "Configure GPU",
-                                    accent = Color(0xFFF59E0B),
-                                    onClick = {
-                                        viewModel.soundEngine.playPop()
-                                        activeCategory = SettingsCategory.IMAGINE_GPU
-                                    },
-                                    modifier = Modifier.weight(1f).testTag("settings_open_kaggle_quick"),
-                                )
+                            StudioQuickTile(
+                                icon = Icons.Rounded.BarChart,
+                                title = "Stats & Dev Logs",
+                                subtitle = "${uiState.totalMessageCount} msgs · Face HUD",
+                                accent = Color(0xFF38BDF8),
+                                onClick = {
+                                    viewModel.soundEngine.playPop()
+                                    onOpenStats()
+                                },
+                                modifier = Modifier.weight(1f).testTag("settings_open_stats"),
+                            )
+                        }
+                    }
+
+                    if (!prefs.settingsAdvancedMode) {
+                        // SIMPLE MODE: Only the Top 4 Most Visited Settings — zero clutter, fits on one screen!
+                        item(key = "simple_most_visited") {
+                            SettingsGroupCard(title = "Most Visited") {
+                                mostVisitedTop4.forEachIndexed { idx, cat ->
+                                    if (idx > 0) {
+                                        HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.50f))
+                                    }
+                                    SettingsGroupRow(
+                                        cat = cat,
+                                        subtitle = subtitleForCategory(cat),
+                                        onClick = { openCategory(cat) },
+                                    )
+                                }
                             }
                         }
-                    }
 
-                    // Group 1: AI & Models
-                    item(key = "group_ai") {
-                        SettingsGroupCard(title = "AI & Models") {
-                            SettingsGroupRow(
-                                cat = SettingsCategory.PROVIDERS,
-                                subtitle = subtitleForCategory(SettingsCategory.PROVIDERS),
-                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.PROVIDERS },
-                            )
-                            HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.55f))
-                            SettingsGroupRow(
-                                cat = SettingsCategory.PERSONAS,
-                                subtitle = subtitleForCategory(SettingsCategory.PERSONAS),
-                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.PERSONAS },
-                            )
-                            HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.55f))
-                            SettingsGroupRow(
-                                cat = SettingsCategory.IMAGINE_GPU,
-                                subtitle = subtitleForCategory(SettingsCategory.IMAGINE_GPU),
-                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.IMAGINE_GPU },
-                            )
-                        }
-                    }
-
-                    // Group 2: Voice & Sounds
-                    item(key = "group_voice") {
-                        SettingsGroupCard(title = "Voice & Sounds") {
-                            SettingsGroupRow(
-                                cat = SettingsCategory.VOICE,
-                                subtitle = subtitleForCategory(SettingsCategory.VOICE),
-                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.VOICE },
-                            )
-                        }
-                    }
-
-                    // Group 3: Avatar & Appearance
-                    item(key = "group_appearance") {
-                        SettingsGroupCard(title = "Avatar & Appearance") {
-                            SettingsGroupRow(
-                                cat = SettingsCategory.APPEARANCE,
-                                subtitle = subtitleForCategory(SettingsCategory.APPEARANCE),
-                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.APPEARANCE },
-                            )
-                        }
-                    }
-
-                    // Group 4: Account & Sync
-                    item(key = "group_account") {
-                        SettingsGroupCard(title = "Account & Sync") {
-                            SettingsGroupRow(
-                                cat = SettingsCategory.CLOUD,
-                                subtitle = subtitleForCategory(SettingsCategory.CLOUD),
-                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.CLOUD },
-                            )
-                        }
-                    }
-
-                    // Advanced Power Tools Group (revealed when Advanced is toggled ON)
-                    if (prefs.settingsAdvancedMode) {
-                        item(key = "group_advanced") {
-                            SettingsGroupCard(title = "Power User & System") {
-                                SettingsGroupRow(
-                                    cat = SettingsCategory.OFFLINE,
-                                    subtitle = subtitleForCategory(SettingsCategory.OFFLINE),
-                                    onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.OFFLINE },
-                                )
-                                HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.55f))
-                                SettingsGroupRow(
-                                    cat = SettingsCategory.CONTEXT,
-                                    subtitle = subtitleForCategory(SettingsCategory.CONTEXT),
-                                    onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.CONTEXT },
-                                )
-                                HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.55f))
-                                SettingsGroupRow(
-                                    cat = SettingsCategory.AGENT,
-                                    subtitle = subtitleForCategory(SettingsCategory.AGENT),
-                                    onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.AGENT },
-                                )
-                                HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.55f))
-                                SettingsGroupRow(
-                                    cat = SettingsCategory.SYSTEM,
-                                    subtitle = subtitleForCategory(SettingsCategory.SYSTEM),
-                                    onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.SYSTEM },
-                                )
-                            }
-                        }
-                    } else {
-                        item(key = "advanced_hint") {
-                            TextButton(
+                        item(key = "simple_show_all_btn") {
+                            OutlinedButton(
                                 onClick = {
                                     viewModel.soundEngine.playClick()
                                     scope.launch { viewModel.prefsStore.updateSettingsAdvancedMode(true) }
                                 },
+                                shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 Text(
-                                    text = "Show Advanced Settings (Offline GGUF, Context Knobs, Shizuku, Backup & Logs)",
-                                    style = MaterialTheme.typography.labelSmall,
+                                    text = "View All ${SettingsCategory.entries.size} Settings Categories",
+                                    style = MaterialTheme.typography.labelMedium,
                                     color = CelLavender,
+                                    maxLines = 1,
+                                    softWrap = false,
                                 )
+                            }
+                        }
+                    } else {
+                        // ALL MODE: Compact 2-Column Scannable Grid so every setting is 1 tap away with minimal scrolling!
+                        val rows = SettingsCategory.entries.chunked(2)
+                        rows.forEachIndexed { rowIdx, pair ->
+                            item(key = "all_grid_row_$rowIdx") {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    pair.forEach { cat ->
+                                        val accent = Color(cat.accentHex)
+                                        GlassCard(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clickable { openCategory(cat) },
+                                            shape = RoundedCornerShape(16.dp),
+                                            contentPadding = 12.dp,
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(30.dp)
+                                                        .clip(RoundedCornerShape(9.dp))
+                                                        .background(accent.copy(alpha = 0.18f))
+                                                        .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(9.dp)),
+                                                    contentAlignment = Alignment.Center,
+                                                ) {
+                                                    Icon(cat.icon, contentDescription = null, tint = accent, modifier = Modifier.size(16.dp))
+                                                }
+                                                Text(
+                                                    text = cat.title,
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = CelTextPrimary,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            }
+                                            Spacer(Modifier.height(6.dp))
+                                            Text(
+                                                text = subtitleForCategory(cat),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = CelTextSecondary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                    }
+                                    if (pair.size == 1) {
+                                        Spacer(Modifier.weight(1f))
+                                    }
+                                }
                             }
                         }
                     }

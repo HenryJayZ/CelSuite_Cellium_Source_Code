@@ -67,6 +67,8 @@ data class CelliumPreferences(
     val defaultPersonaId: String = "default",
     val activeProviderId: String = "preset_pollinations_free",
     val settingsAdvancedMode: Boolean = false,
+    val showAvatarAnimName: Boolean = false,
+    val settingsVisitCountsJson: String = "{}",
 
     // Theme & Liquid Glass Visuals
     val themePresetId: String = "neon_violet",
@@ -266,6 +268,8 @@ class PreferencesStore(context: Context) {
         val WAKE_WORD_SCREEN_ON_ONLY = booleanPreferencesKey("wake_word_screen_on_only")
         val WAKE_WORD_SHIZUKU_HIDE_DOT = booleanPreferencesKey("wake_word_shizuku_hide_dot")
         val SETTINGS_ADVANCED_MODE = booleanPreferencesKey("settings_advanced_mode")
+        val SHOW_AVATAR_ANIM_NAME = booleanPreferencesKey("show_avatar_anim_name")
+        val SETTINGS_VISIT_COUNTS_JSON = stringPreferencesKey("settings_visit_counts_json")
         val FLOATING_IDLE_PEEK_ENABLED = booleanPreferencesKey("floating_idle_peek_enabled")
         val IMAGE_GEN_ENABLED = booleanPreferencesKey("image_gen_enabled")
         val VAULT_PIN_HASH = stringPreferencesKey("vault_pin_hash")
@@ -353,6 +357,8 @@ class PreferencesStore(context: Context) {
             defaultPersonaId = p[Keys.DEFAULT_PERSONA] ?: "default",
             activeProviderId = p[Keys.ACTIVE_PROVIDER_ID] ?: "preset_pollinations_free",
             settingsAdvancedMode = p[Keys.SETTINGS_ADVANCED_MODE] ?: false,
+            showAvatarAnimName = p[Keys.SHOW_AVATAR_ANIM_NAME] ?: false,
+            settingsVisitCountsJson = p[Keys.SETTINGS_VISIT_COUNTS_JSON] ?: "{}",
             themePresetId = p[Keys.THEME_PRESET] ?: "neon_violet",
             customPrimaryHex = p[Keys.CUSTOM_PRIMARY_HEX] ?: "#A855F7",
             customWallpaperUri = p[Keys.CUSTOM_WALLPAPER_URI] ?: "",
@@ -660,6 +666,19 @@ class PreferencesStore(context: Context) {
     }
     suspend fun updateSettingsAdvancedMode(advanced: Boolean) {
         dataStore.edit { it[Keys.SETTINGS_ADVANCED_MODE] = advanced }
+    }
+    suspend fun updateShowAvatarAnimName(enabled: Boolean) {
+        dataStore.edit { it[Keys.SHOW_AVATAR_ANIM_NAME] = enabled }
+    }
+    fun decodeSettingsVisitCounts(raw: String): Map<String, Int> =
+        runCatching { json.decodeFromString<Map<String, Int>>(raw) }.getOrDefault(emptyMap())
+
+    suspend fun recordSettingsCategoryVisit(categoryKey: String) {
+        dataStore.edit { prefs ->
+            val current = decodeSettingsVisitCounts(prefs[Keys.SETTINGS_VISIT_COUNTS_JSON] ?: "{}").toMutableMap()
+            current[categoryKey] = (current[categoryKey] ?: 0) + 1
+            prefs[Keys.SETTINGS_VISIT_COUNTS_JSON] = runCatching { json.encodeToString(current) }.getOrDefault("{}")
+        }
     }
     suspend fun updateFloatingIdlePeekEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.FLOATING_IDLE_PEEK_ENABLED] = enabled }

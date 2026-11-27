@@ -3,7 +3,9 @@ package com.henny.cellium.ui.components
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import android.util.LruCache
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
@@ -51,6 +53,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -71,14 +74,20 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalScrollCaptureInProgress
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -433,10 +442,133 @@ private fun parseMarkdownBlocks(raw: String): List<MdBlock> {
     return blocks
 }
 
+private val LINK_COLOR = Color(0xFF7DD3FC)
+private val LINK_PRESSED_BG = Color(0x337DD3FC)
+private val LINK_TEXT_STYLES = TextLinkStyles(
+    style = SpanStyle(
+        color = LINK_COLOR,
+        fontWeight = FontWeight.Medium,
+        textDecoration = TextDecoration.Underline,
+    ),
+    pressedStyle = SpanStyle(
+        color = Color(0xFFBAE6FD),
+        background = LINK_PRESSED_BG,
+        fontWeight = FontWeight.Medium,
+        textDecoration = TextDecoration.Underline,
+    ),
+)
+
+private fun normalizeClickableUrl(raw: String): String {
+    val trimmed = raw.trim()
+    return when {
+        trimmed.startsWith("http://", ignoreCase = true) -> trimmed
+        trimmed.startsWith("https://", ignoreCase = true) -> trimmed
+        trimmed.startsWith("www.", ignoreCase = true) -> "https://$trimmed"
+        else -> trimmed
+    }
+}
+
+private fun formatCleanLinkLabel(label: String, url: String): String {
+    val trimmedLabel = label.trim()
+    val looksRawUrl = trimmedLabel.isEmpty() ||
+        trimmedLabel.equals(url.trim(), ignoreCase = true) ||
+        trimmedLabel.startsWith("http://", ignoreCase = true) ||
+        trimmedLabel.startsWith("https://", ignoreCase = true) ||
+        trimmedLabel.startsWith("www.", ignoreCase = true)
+    if (!looksRawUrl) return trimmedLabel
+    val stripped = url.trim()
+        .removePrefix("https://")
+        .removePrefix("http://")
+        .removePrefix("www.")
+        .trimEnd('/')
+    return if (stripped.length > 46) {
+        stripped.take(43) + "…"
+    } else {
+        stripped.ifBlank { url.trim() }
+    }
+}
+
+private fun openUrlWithNativeBrowserPicker(context: Context, rawUrl: String) {
+    val target = normalizeClickableUrl(rawUrl)
+    if (target.isBlank()) return
+    // Intentionally launch plain ACTION_VIEW (not Intent.createChooser) so Android shows
+    // the native browser resolver with "Just once / Always" support.
+    runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(target)).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    }.onFailure {
+        runCatching {
+            val fallback = Intent(Intent.ACTION_VIEW, Uri.parse(target)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(fallback)
+        }
+    }
+}
+
 private fun formatInlineMarkdown(text: String): AnnotatedString = buildAnnotatedString {
     var i = 0
     val n = text.length
     while (i < n) {
+        // Markdown links: [label](https://...)
+        if (text[i] == '[') {
+            val closeBracket = text.indexOf(']', i + 1)
+            if (closeBracket > i + 1 && closeBracket + 1 < n && text[closeBracket + 1] == '(') {
+                var depth = 1
+                var p = closeBracket + 2
+                while (p < n && depth > 0) {
+                    when (text[p]) {
+                        '(' -> depth++
+                        ')' -> depth--
+                    }
+                    if (depth > 0) p++
+                }
+                if (depth == 0 && p > closeBracket + 2) {
+                    val rawLabel = text.substring(i + 1, closeBracket)
+                    val rawUrl = text.substring(closeBracket + 2, p).trim()
+                    if (rawUrl.startsWith("http://", ignoreCase = true) ||
+                        rawUrl.startsWith("https://", ignoreCase = true) ||
+                        rawUrl.startsWith("www.", ignoreCase = true)
+                    ) {
+                        val targetUrl = normalizeClickableUrl(rawUrl)
+                        val displayLabel = formatCleanLinkLabel(rawLabel, targetUrl)
+                        withLink(LinkAnnotation.Url(url = targetUrl, styles = LINK_TEXT_STYLES)) {
+                            append(displayLabel)
+                        }
+                        i = p + 1
+                        continue
+                    }
+                }
+            }
+        }
+        // Bare URLs: https://... or http://...
+        val isHttp = text.regionMatches(i, "https://", 0, 8, ignoreCase = true) ||
+            text.regionMatches(i, "http://", 0, 7, ignoreCase = true)
+        if (isHttp) {
+            var end = i
+            while (end < n && !text[end].isWhitespace() && text[end] !in charArrayOf('<', '>', '"', '\'')) {
+                end++
+            }
+            var rawUrl = text.substring(i, end)
+            var trailingTrim = 0
+            while (rawUrl.isNotEmpty() && rawUrl.last() in charArrayOf('.', ',', '!', '?', ';', ':', ')', ']')) {
+                if (rawUrl.last() == ')' && rawUrl.count { it == '(' } >= rawUrl.count { it == ')' }) break
+                rawUrl = rawUrl.dropLast(1)
+                trailingTrim++
+            }
+            if (rawUrl.length > 8) {
+                val targetUrl = normalizeClickableUrl(rawUrl)
+                val displayLabel = formatCleanLinkLabel(rawUrl, targetUrl)
+                withLink(LinkAnnotation.Url(url = targetUrl, styles = LINK_TEXT_STYLES)) {
+                    append(displayLabel)
+                }
+                i = end - trailingTrim
+                continue
+            }
+        }
         if (i + 1 < n && text[i] == '*' && text[i + 1] == '*') {
             val end = text.indexOf("**", i + 2)
             if (end > i + 2) {
@@ -511,51 +643,61 @@ fun MarkdownMessageContent(
     defaultWordWrap: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
+    val browserUriHandler = remember(context) {
+        object : UriHandler {
+            override fun openUri(uri: String) {
+                openUrlWithNativeBrowserPicker(context, uri)
+            }
+        }
+    }
     val compiledBlocks = remember(text) { getCachedMarkdownBlocks(text) }
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        for (block in compiledBlocks) {
-            when (block) {
-                is CompiledMdBlock.Heading -> {
-                    val style = when (block.level) {
-                        1 -> MaterialTheme.typography.titleLarge
-                        2 -> MaterialTheme.typography.titleMedium
-                        else -> MaterialTheme.typography.titleSmall
-                    }
-                    Text(
-                        text = block.formatted,
-                        style = style,
-                        color = CelSoftLavender,
-                    )
-                }
-                is CompiledMdBlock.Bullet -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    CompositionLocalProvider(LocalUriHandler provides browserUriHandler) {
+        Column(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            for (block in compiledBlocks) {
+                when (block) {
+                    is CompiledMdBlock.Heading -> {
+                        val style = when (block.level) {
+                            1 -> MaterialTheme.typography.titleLarge
+                            2 -> MaterialTheme.typography.titleMedium
+                            else -> MaterialTheme.typography.titleSmall
+                        }
                         Text(
-                            text = "•",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = CelViolet,
+                            text = block.formatted,
+                            style = style,
+                            color = CelSoftLavender,
                         )
+                    }
+                    is CompiledMdBlock.Bullet -> {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "•",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = CelViolet,
+                            )
+                            Text(
+                                text = block.formatted,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = CelTextPrimary,
+                            )
+                        }
+                    }
+                    is CompiledMdBlock.Paragraph -> {
                         Text(
                             text = block.formatted,
                             style = MaterialTheme.typography.bodyMedium,
                             color = CelTextPrimary,
                         )
                     }
-                }
-                is CompiledMdBlock.Paragraph -> {
-                    Text(
-                        text = block.formatted,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = CelTextPrimary,
+                    is CompiledMdBlock.Code -> CodeCard(
+                        language = block.language,
+                        code = block.code,
+                        defaultWordWrap = defaultWordWrap,
                     )
                 }
-                is CompiledMdBlock.Code -> CodeCard(
-                    language = block.language,
-                    code = block.code,
-                    defaultWordWrap = defaultWordWrap,
-                )
             }
         }
     }

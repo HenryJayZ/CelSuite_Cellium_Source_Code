@@ -22,12 +22,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Face
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,6 +39,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 import com.henny.cellium.core.DevLogBuffer
 import com.henny.cellium.ui.chat.CelliumViewModel
 import com.henny.cellium.ui.components.GlassCard
@@ -63,7 +67,9 @@ fun AnalyticsScreen(
     BackHandler { onBack() }
 
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val prefs by viewModel.preferences.collectAsStateWithLifecycle()
     val logs by DevLogBuffer.entries.collectAsStateWithLifecycle()
 
     val totalTokens = uiState.sessions.sumOf { it.tokenCount }
@@ -137,6 +143,49 @@ fun AnalyticsScreen(
                             Text(p.selectedModel.take(24), style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono), color = CelLavender)
                         }
                     }
+                }
+            }
+        }
+
+        item {
+            GlassCard(shape = RoundedCornerShape(20.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f).padding(end = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Face,
+                            contentDescription = null,
+                            tint = CelLavender,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Column {
+                            Text(
+                                text = "Show Name of Cel's Face Animation",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = CelTextPrimary,
+                            )
+                            Text(
+                                text = "Displays the active expression name at the top-right in Live Mode",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = CelTextSecondary,
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = prefs.showAvatarAnimName,
+                        onCheckedChange = { enabled ->
+                            viewModel.soundEngine.playClick()
+                            scope.launch { viewModel.prefsStore.updateShowAvatarAnimName(enabled) }
+                        },
+                        modifier = Modifier.testTag("toggle_show_avatar_anim_name"),
+                    )
                 }
             }
         }
