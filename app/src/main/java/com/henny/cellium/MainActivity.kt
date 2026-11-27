@@ -25,18 +25,25 @@ import java.io.File
 
 class MainActivity : ComponentActivity() {
     private val viewModel: CelliumViewModel by viewModels()
+    private val openChatNonceFlow = kotlinx.coroutines.flow.MutableStateFlow(0L)
+
+    companion object {
+        const val EXTRA_OPEN_SESSION_ID = "com.henny.cellium.OPEN_SESSION_ID"
+        const val EXTRA_OPEN_CHAT_TAB = "com.henny.cellium.OPEN_CHAT_TAB"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureBoundedImageLoader()
         CelliumNotificationManager.ensureChannels(this)
-        handleNotificationIntent(intent)
+        handleExternalIntent(intent)
 
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         setContent {
+            val openChatNonce by openChatNonceFlow.collectAsStateWithLifecycle()
             val visualPrefs by remember(viewModel) {
                 viewModel.preferences
                     .map { p ->
@@ -56,14 +63,15 @@ class MainActivity : ComponentActivity() {
                     .distinctUntilChanged()
             }.collectAsStateWithLifecycle(initialValue = remember { CelliumPreferences() })
             CelliumTheme(prefs = visualPrefs) {
-                CelliumApp(viewModel = viewModel)
+                CelliumApp(viewModel = viewModel, externalChatOpenNonce = openChatNonce)
             }
         }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleNotificationIntent(intent)
+        setIntent(intent)
+        handleExternalIntent(intent)
     }
 
     override fun onStart() {
@@ -76,11 +84,18 @@ class MainActivity : ComponentActivity() {
         viewModel.setAppInForeground(false)
     }
 
-    private fun handleNotificationIntent(intent: Intent?) {
-        val targetSessionId = intent?.getStringExtra(CelliumNotificationManager.EXTRA_SESSION_ID)
+    private fun handleExternalIntent(intent: Intent?) {
+        if (intent == null) return
+        val explicitSession = intent.getStringExtra(EXTRA_OPEN_SESSION_ID)
+        val notifSession = intent.getStringExtra(CelliumNotificationManager.EXTRA_SESSION_ID)
+        val targetSessionId = explicitSession?.takeIf { it.isNotBlank() } ?: notifSession
+        val forceChatTab = intent.getBooleanExtra(EXTRA_OPEN_CHAT_TAB, false)
         if (!targetSessionId.isNullOrBlank()) {
-            viewModel.selectSession(targetSessionId)
+            viewModel.openSessionFromExternal(targetSessionId)
             CelliumNotificationManager.clearSessionNotification(this, targetSessionId)
+            openChatNonceFlow.value = System.currentTimeMillis()
+        } else if (forceChatTab) {
+            openChatNonceFlow.value = System.currentTimeMillis()
         }
     }
 

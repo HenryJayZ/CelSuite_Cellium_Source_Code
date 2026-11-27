@@ -69,6 +69,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -80,6 +81,9 @@ import androidx.compose.ui.unit.dp
 import com.henny.cellium.R
 import com.henny.cellium.ai.ProviderCatalog
 import com.henny.cellium.ai.ProviderPresets
+import com.henny.cellium.avatar.AVATAR_GENDERS
+import com.henny.cellium.avatar.AvatarLibrary
+import com.henny.cellium.avatar.DotMatrixAvatarCanvas
 import com.henny.cellium.data.local.ProviderProfileEntity
 import com.henny.cellium.ui.chat.ProviderSearchDropdownSheet
 import com.henny.cellium.ui.components.CelliumBackground
@@ -101,18 +105,21 @@ import kotlinx.coroutines.launch
 fun OnboardingScreen(
     providers: List<ProviderProfileEntity>,
     initialTermsAccepted: Boolean,
+    initialAvatarGender: String = "Chibi",
     googleAuthBusy: Boolean,
     googleAuthError: String?,
     signedInEmail: String?,
     onAcceptTerms: () -> Unit,
     onContinueAsGuest: () -> Unit,
     onContinueWithGoogle: () -> Unit,
+    onSelectAvatarGender: (String) -> Unit = {},
     onSaveProviderConfig: suspend (ProviderProfileEntity) -> Unit,
     onFetchModels: suspend (ProviderProfileEntity) -> Result<List<String>>,
     onCompleteOnboarding: (selectedProviderId: String) -> Unit,
 ) {
     val visuals = LocalCelliumVisuals.current
     var step by remember { mutableIntStateOf(if (initialTermsAccepted) 1 else 0) }
+    var chosenAvatarGender by remember(initialAvatarGender) { mutableStateOf(initialAvatarGender.ifBlank { "Chibi" }) }
 
     CelliumBackground(dimAlpha = 0.56f) {
         Box(
@@ -153,14 +160,14 @@ fun OnboardingScreen(
                                 color = CelTextPrimary,
                             )
                             Text(
-                                text = "${com.henny.cellium.BuildConfig.VERSION_NAME} · Step ${step + 1} of 3",
+                                text = "${com.henny.cellium.BuildConfig.VERSION_NAME} · Step ${step + 1} of 4",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = CelLavender,
                             )
                         }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        repeat(3) { idx ->
+                        repeat(4) { idx ->
                             Box(
                                 modifier = Modifier
                                     .width(if (idx == step) 26.dp else 10.dp)
@@ -196,6 +203,17 @@ fun OnboardingScreen(
                             },
                             onGoogle = { onContinueWithGoogle() },
                             onContinueAfterGoogle = { step = 2 },
+                        )
+                        2 -> ChooseAvatarStyleStep(
+                            selectedGender = chosenAvatarGender,
+                            onSelectGender = { g ->
+                                chosenAvatarGender = g
+                                onSelectAvatarGender(g)
+                            },
+                            onContinue = {
+                                onSelectAvatarGender(chosenAvatarGender)
+                                step = 3
+                            },
                         )
                         else -> StartupProviderStep(
                             providers = providers,
@@ -456,6 +474,214 @@ private fun ProfileChoiceStep(
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ChooseAvatarStyleStep(
+    selectedGender: String,
+    onSelectGender: (String) -> Unit,
+    onContinue: () -> Unit,
+) {
+    val visuals = LocalCelliumVisuals.current
+    val context = LocalContext.current
+    val library = remember(context) { AvatarLibrary.load(context) }
+
+    val chibiExpr = remember(library) { library.get("Chibi", "Happy") ?: library.getForMood("Chibi", "happy") }
+    val detailedExpr = remember(library) {
+        library.get("Detailed Female", "Happy") ?: library.getForMood("Detailed Female", "happy")
+    }
+    val previewExpr = remember(library, selectedGender) {
+        library.get(selectedGender, "Happy") ?: library.getForMood(selectedGender, "happy")
+    }
+    var blinkCount by remember { mutableIntStateOf(0) }
+
+    GlassCard(
+        modifier = Modifier.fillMaxSize(),
+        highlighted = true,
+        shape = RoundedCornerShape(24.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Choose Your Cel",
+                style = MaterialTheme.typography.titleLarge,
+                color = CelTextPrimary,
+            )
+            Text(
+                text = "Pick how Cel's dot-matrix face looks in Live Mode, Floating Cel, and Assistant pop-ups. You can switch anytime in Avatar Studio.",
+                style = MaterialTheme.typography.bodySmall,
+                color = CelTextSecondary,
+            )
+
+            // Side-by-side animated comparison: Chibi (Default) vs Detailed
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                val chibiSelected = selectedGender == "Chibi"
+                val detailedSelected = selectedGender.startsWith("Detailed")
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(if (chibiSelected) visuals.primary.copy(alpha = 0.22f) else CelTerminalBg.copy(alpha = 0.84f))
+                        .border(
+                            width = if (chibiSelected) 1.6.dp else 1.dp,
+                            color = if (chibiSelected) visuals.primary else CelBorderSubtle,
+                            shape = RoundedCornerShape(18.dp),
+                        )
+                        .clickable {
+                            onSelectGender("Chibi")
+                            blinkCount++
+                        }
+                        .padding(10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(112.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.Black),
+                    ) {
+                        DotMatrixAvatarCanvas(
+                            expression = chibiExpr,
+                            modifier = Modifier.fillMaxSize(),
+                            scale = 0.92f,
+                            blinkTrigger = if (chibiSelected) blinkCount else 0,
+                            onTapped = {
+                                onSelectGender("Chibi")
+                                blinkCount++
+                            },
+                        )
+                    }
+                    Text(
+                        text = "Chibi Cel",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (chibiSelected) visuals.primary else CelTextPrimary,
+                    )
+                    Text(
+                        text = "Default · Expressive & cute",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CelEmeraldThought,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(if (detailedSelected) visuals.primary.copy(alpha = 0.22f) else CelTerminalBg.copy(alpha = 0.84f))
+                        .border(
+                            width = if (detailedSelected) 1.6.dp else 1.dp,
+                            color = if (detailedSelected) visuals.primary else CelBorderSubtle,
+                            shape = RoundedCornerShape(18.dp),
+                        )
+                        .clickable {
+                            onSelectGender("Detailed Female")
+                            blinkCount++
+                        }
+                        .padding(10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(112.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.Black),
+                    ) {
+                        DotMatrixAvatarCanvas(
+                            expression = detailedExpr,
+                            modifier = Modifier.fillMaxSize(),
+                            scale = 0.92f,
+                            blinkTrigger = if (detailedSelected) blinkCount else 0,
+                            onTapped = {
+                                onSelectGender("Detailed Female")
+                                blinkCount++
+                            },
+                        )
+                    }
+                    Text(
+                        text = "Detailed Cel",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (detailedSelected) visuals.primary else CelTextPrimary,
+                    )
+                    Text(
+                        text = "Sharp anime lashes & eyes",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CelLavender,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+
+            // All 5 dot-matrix styles quick selector + live interactive preview
+            Text(
+                text = "All Styles (Tap to Preview)",
+                style = MaterialTheme.typography.labelMedium,
+                color = CelLavender,
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AVATAR_GENDERS.forEach { g ->
+                    FilterChip(
+                        selected = selectedGender == g,
+                        onClick = {
+                            onSelectGender(g)
+                            blinkCount++
+                        },
+                        label = { Text(if (g == "Chibi") "Chibi (Default)" else g, maxLines = 1, softWrap = false) },
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(132.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color.Black)
+                    .border(1.dp, visuals.activeBorder, RoundedCornerShape(16.dp)),
+            ) {
+                DotMatrixAvatarCanvas(
+                    expression = previewExpr,
+                    modifier = Modifier.fillMaxSize(),
+                    scale = 1.0f,
+                    blinkTrigger = blinkCount,
+                    onTapped = { blinkCount++ },
+                )
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        Button(
+            onClick = onContinue,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+                .testTag("onboarding_avatar_continue_button"),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
+        ) {
+            Text("Continue with $selectedGender", fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(8.dp))
+            Icon(Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
         }
     }
 }

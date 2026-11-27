@@ -16,6 +16,7 @@ import java.security.MessageDigest
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.henny.cellium.ai.CuratedLocalModel
+import com.henny.cellium.ai.KaggleImageEngine
 import com.henny.cellium.ai.LocalModelStatus
 import com.henny.cellium.ai.MultiImagineClient
 import com.henny.cellium.ai.OnDeviceLlmEngine
@@ -35,6 +36,7 @@ import com.henny.cellium.core.ContextModifyConfig
 import com.henny.cellium.core.DevLogBuffer
 import com.henny.cellium.core.PreferencesStore
 import com.henny.cellium.core.RegisteredLocalModel
+import com.henny.cellium.core.SecureKaggleStore
 import com.henny.cellium.core.StarredModelEntry
 import com.henny.cellium.data.BuiltInPersonas
 import com.henny.cellium.data.CustomPersona
@@ -122,6 +124,12 @@ data class CelliumUiState(
     val pendingSyncConflict: Boolean = false,
     val cloudStorageSummary: CloudStorageSummary? = null,
     val cloudStorageLoading: Boolean = false,
+    val cloudStorageError: String? = null,
+    val kaggleCacheStatusMap: Map<String, KaggleImageEngine.CacheEntry> = emptyMap(),
+    val kaggleCacheBusyPreset: String? = null,
+    val kaggleCacheStatusText: String = "",
+    val kaggleTestResult: String? = null,
+    val lastGeneratedImagePath: String? = null,
     val bannerMessage: String? = null,
     val errorMessage: String? = null,
     val settingsFeedbackMessage: String? = null,
@@ -178,6 +186,8 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
     val webTools = WebToolsClient()
     val onDeviceEngine = OnDeviceLlmEngine(appContext, shizukuBridge)
     val imagineClient = MultiImagineClient(appContext)
+    val secureKaggleStore = SecureKaggleStore(appContext)
+    val kaggleEngine = KaggleImageEngine(appContext, secureKaggleStore)
     val backupManager = AppBackupManager(dao)
     private val cloudSync = CloudSyncManager(appContext, dao, prefsStore)
 
@@ -467,6 +477,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             var lastRegisteredModelsJson: String? = null
             var lastActiveProviderId: String? = null
+            var lastKaggleCacheJson: String? = null
             preferences.collectLatest { p ->
                 soundEngine.enabled = p.soundsEnabled
                 soundEngine.animaleseEnabled = p.animaleseEnabled
@@ -476,6 +487,17 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 soundEngine.typingSoundPitch = p.typingSoundPitch
                 soundEngine.startupSoundId = p.startupSoundId
                 soundEngine.startupSoundCustomPath = p.startupSoundCustomPath
+                soundEngine.startupSoundShuffleEnabled = p.startupSoundShuffleEnabled
+                soundEngine.startupSoundExcludedIds = p.startupSoundExcludedIds
+                soundEngine.deletedStartupSoundIds = p.deletedStartupSoundIds
+
+                if (p.kaggleCacheMapJson != lastKaggleCacheJson) {
+                    lastKaggleCacheJson = p.kaggleCacheMapJson
+                    val parsedCache = kaggleEngine.parseCacheMap(p.kaggleCacheMapJson)
+                    if (parsedCache.isNotEmpty() || _uiState.value.kaggleCacheStatusMap.isEmpty()) {
+                        _uiState.value = _uiState.value.copy(kaggleCacheStatusMap = parsedCache)
+                    }
+                }
 
                 if (p.activeProviderId != lastActiveProviderId) {
                     lastActiveProviderId = p.activeProviderId
@@ -618,6 +640,26 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             pendingGuard = null,
             errorMessage = null,
         )
+    }
+
+    /** Opens an exact session handed off from Assistant Pop-up or Floating Cel. */
+    fun openSessionFromExternal(sessionId: String) {
+        val cleanId = sessionId.trim()
+        if (cleanId.isBlank()) return
+        viewModelScope.launch {
+            val sess = dao.getSession(cleanId)
+            _activeSessionId.value = cleanId
+            CelliumNotificationManager.clearSessionNotification(appContext, cleanId)
+            if (sess != null && sess.activeLeafId.isNotBlank()) {
+                _selectedLeafBySession.value = _selectedLeafBySession.value + (cleanId to sess.activeLeafId)
+            }
+            _uiState.value = _uiState.value.copy(
+                activeSessionId = cleanId,
+                activePersonaId = sess?.personaId ?: preferences.value.defaultPersonaId,
+                pendingGuard = null,
+                errorMessage = null,
+            )
+        }
     }
 
     fun startNewSession(title: String = "New Chat") {
@@ -1077,17 +1119,39 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             }
         }
 
-        // /illume <prompt> OR legacy /imagine <prompt>
+        // /illume <prompt> OR /imagine <prompt>
         if (trimmed.startsWith("/illume ", ignoreCase = true) || trimmed.startsWith("/imagine ", ignoreCase = true)) {
-            val imgPrompt = trimmed
+            val rawImgPrompt = trimmed
                 .removePrefix("/illume ").removePrefix("/ILLUME ")
                 .removePrefix("/imagine ").removePrefix("/IMAGINE ")
                 .trim()
-            if (imgPrompt.isNotEmpty()) {
+            if (rawImgPrompt.isNotEmpty()) {
                 viewModelScope.launch {
-                    val res = generateArtwork(imgPrompt)
-                    res.onSuccess { art -> sendArtworkToChat(art) }
-                        .onFailure { err -> _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage) }
+                    val prefs = preferences.value
+                    val useKaggle = prefs.imagineProvider == "kaggle" ||
+                        (trimmed.startsWith("/imagine ", ignoreCase = true) && kaggleEngine.isConfigured(prefs))
+                    if (useKaggle) {
+                        val batchRes = generateKaggleBatch(
+                            prompt = rawImgPrompt,
+                            stickyPrompt = prefs.kaggleStickyPrompt,
+                            negativePrompt = prefs.kaggleNegativePrompt,
+                            presetLabel = prefs.kagglePreset,
+                            sizeLabel = prefs.kaggleSize,
+                            steps = prefs.kaggleSteps,
+                            guidance = prefs.kaggleGuidance,
+                            batch = 1,
+                            seed = prefs.kaggleSeed,
+                        )
+                        batchRes.onSuccess { arts ->
+                            arts.firstOrNull()?.let { sendArtworkToChat(it) }
+                        }.onFailure { err ->
+                            _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage)
+                        }
+                    } else {
+                        val res = generateArtwork(rawImgPrompt)
+                        res.onSuccess { art -> sendArtworkToChat(art) }
+                            .onFailure { err -> _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage) }
+                    }
                 }
                 return
             }
@@ -1292,6 +1356,8 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             moodMethod = if (saveAsCompactSummary) "none" else prefs.moodMethod,
             contextConfig = ctxCfg,
             includeDeviceActions = !saveAsCompactSummary,
+            imageGenEnabled = prefs.imageGenEnabled && !saveAsCompactSummary,
+            kaggleConfigured = kaggleEngine.isConfigured(prefs),
         )
 
         activeStreamSessionId = sessionId
@@ -1658,8 +1724,66 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 networkDone.set(true)
                 revealJob?.join()
 
-                // Inline Multi-Image Illume (up to 5) & Keyless Web/Stock Images (up to 5)
+                // Inline Multi-Image Illume (up to 5), [GENERATE_IMAGE] JSON tool (supports img2img edit_last), & Keyless Web/Stock Images
                 if (!saveAsCompactSummary) {
+                    val (genImgCall, bodyAfterGenTag) = UniversalLlmClient.extractGenerateImageCall(finalBody)
+                    if (genImgCall != null && prefs.imageGenEnabled) {
+                        val marker = "[[CELLIUM_IMG_LOADING:Generating: ${genImgCall.prompt.take(44)}]]"
+                        finalBody = if (bodyAfterGenTag.isNotBlank()) "$bodyAfterGenTag\n\n$marker" else marker
+                        _uiState.value = _uiState.value.copy(
+                            streamingContent = finalBody,
+                            retryStatusText = if (genImgCall.editLast) "Editing previous image on GPU..." else "Generating image...",
+                        )
+                        val initPath = if (genImgCall.editLast) {
+                            _uiState.value.lastGeneratedImagePath
+                                ?: _uiState.value.artworks.firstOrNull()?.localPath
+                        } else null
+                        val useKaggleTool = kaggleEngine.isConfigured(prefs) &&
+                            (prefs.imagineProvider == "kaggle" || genImgCall.editLast)
+                        val sizeRaw = genImgCall.size.trim().lowercase()
+                        val toolResult = if (useKaggleTool) {
+                            val sizeForCall = when {
+                                sizeRaw.contains("x") -> KaggleImageEngine.SIZE_PRESETS.firstOrNull { it.startsWith(sizeRaw.substringBefore(" ")) } ?: prefs.kaggleSize
+                                sizeRaw == "square" || sizeRaw == "1:1" -> "1024x1024 (1:1)"
+                                sizeRaw == "landscape" || sizeRaw == "16:9" -> "1216x832 (16:9)"
+                                sizeRaw == "portrait" || sizeRaw == "9:16" -> "832x1216 (9:16)"
+                                else -> prefs.kaggleSize
+                            }
+                            generateKaggleBatch(
+                                prompt = genImgCall.prompt,
+                                stickyPrompt = prefs.kaggleStickyPrompt,
+                                negativePrompt = prefs.kaggleNegativePrompt,
+                                presetLabel = prefs.kagglePreset,
+                                sizeLabel = sizeForCall,
+                                steps = prefs.kaggleSteps,
+                                guidance = prefs.kaggleGuidance,
+                                batch = genImgCall.batch.coerceIn(1, 4),
+                                seed = prefs.kaggleSeed,
+                                initImagePath = initPath,
+                                denoise = 0.75f,
+                                onStatus = { st: String -> _uiState.value = _uiState.value.copy(retryStatusText = st) },
+                            ).map { it.first() }
+                        } else {
+                            val ar = when {
+                                sizeRaw == "landscape" || sizeRaw.contains("16:9") || sizeRaw.startsWith("1216x832") -> "16:9"
+                                sizeRaw == "portrait" || sizeRaw.contains("9:16") || sizeRaw.startsWith("832x1216") -> "9:16"
+                                else -> "1:1"
+                            }
+                            generateArtwork(
+                                prompt = genImgCall.prompt,
+                                negativePrompt = prefs.kaggleNegativePrompt,
+                                aspectRatio = ar,
+                            )
+                        }
+                        toolResult.onSuccess { art ->
+                            if (prefs.agentModeEnabled) copyImageToAgentWorkspace(File(art.localPath))
+                            finalBody = finalBody.replace(marker, "[[CELLIUM_IMG:${art.localPath}]]")
+                        }.onFailure { err ->
+                            finalBody = finalBody.replace(marker, "*(Image generation failed: ${err.localizedMessage})*")
+                        }
+                        _uiState.value = _uiState.value.copy(streamingContent = finalBody)
+                    }
+
                     val (illumePrompts, bodyWithIllumeSlots) = UniversalLlmClient.extractAllIllumeBlocks(finalBody, maxCount = 5)
                     val (webImgQueries, bodyWithAllSlots) = UniversalLlmClient.extractAllWebImageBlocks(bodyWithIllumeSlots, maxCount = 5)
 
@@ -1736,6 +1860,8 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                 }
+
+                finalBody = UniversalLlmClient.sanitizeVisibleReply(finalBody)
 
                 val latency = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                 val detectedMood = inlineMood ?: MoodDetector.detectMood(finalBody)
@@ -2181,9 +2307,7 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                     out = finalBody.ifBlank { finalClean.ifBlank { rawOut.trim() } }
                 }
 
-                out = AndroidDeviceActions.stripActionTags(
-                    UniversalLlmClient.extractWebSearchQuery(out).second
-                ).ifBlank { "Done!" }
+                out = UniversalLlmClient.sanitizeVisibleReply(out).ifBlank { "Done!" }
 
                 val mood = tagMood ?: MoodDetector.detectMood(out)
                 val latency = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
@@ -2432,31 +2556,146 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
             val raw = runCatching {
                 appContext.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.orEmpty()
             }.getOrDefault("")
-            val parsed = imagineClient.parseKaggleJson(raw)
+            val parsed = kaggleEngine.saveCredentialsFromJson(raw)
             withContext(Dispatchers.Main) {
-                parsed.onSuccess { creds ->
+                parsed.onSuccess { (username, key) ->
                     viewModelScope.launch {
                         prefsStore.updateKaggleConfig(
-                            username = creds.username,
-                            key = creds.key,
-                            slug = preferences.value.kaggleKernelSlug,
-                            modelId = preferences.value.kaggleModelId,
+                            username = username,
+                            key = key,
+                            slug = KaggleImageEngine.DEFAULT_KERNEL_SLUG,
+                            modelId = preferences.value.kaggleHfModel,
                         )
                         prefsStore.updateImagineConfig(
                             provider = "kaggle",
-                            model = preferences.value.kaggleModelId,
+                            model = preferences.value.kagglePreset,
                             apiKey = preferences.value.imagineApiKey,
                             customUrl = preferences.value.imagineCustomUrl,
                         )
+                        val (_, statusMsg) = kaggleEngine.validateCredentials(username, key)
+                        _uiState.value = _uiState.value.copy(kaggleTestResult = statusMsg)
+                        refreshKaggleCache()
                     }
                     soundEngine.playPop()
                     scheduleBackgroundCloudSync()
-                    showBanner("Imported kaggle.json for @${creds.username}")
+                    showBanner("Imported kaggle.json for @$username")
                 }.onFailure { err ->
                     _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage)
                 }
             }
         }
+    }
+
+    fun saveKaggleCredentials(
+        username: String,
+        apiKey: String,
+        hfToken: String? = null,
+        civitaiToken: String? = null,
+    ) {
+        secureKaggleStore.saveCredentials(username, apiKey)
+        if (hfToken != null) secureKaggleStore.saveHfToken(hfToken)
+        if (civitaiToken != null) secureKaggleStore.saveCivitaiToken(civitaiToken)
+        viewModelScope.launch {
+            prefsStore.updateKaggleConfig(
+                username = username.trim(),
+                key = apiKey.trim(),
+                slug = KaggleImageEngine.DEFAULT_KERNEL_SLUG,
+                modelId = preferences.value.kaggleHfModel,
+            )
+            scheduleBackgroundCloudSync()
+        }
+    }
+
+    fun testKaggleConnection() {
+        soundEngine.playClick()
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(kaggleTestResult = "Testing Kaggle API...")
+            val (u, k) = kaggleEngine.getCredentials(preferences.value)
+            val (ok, msg) = kaggleEngine.validateCredentials(u, k)
+            _uiState.value = _uiState.value.copy(kaggleTestResult = msg)
+            showSettingsFeedback(msg, isError = !ok)
+            if (ok) refreshKaggleCache()
+        }
+    }
+
+    fun refreshKaggleCache() {
+        viewModelScope.launch {
+            val res = kaggleEngine.refreshCacheMap(preferences.value)
+            res.onSuccess { map ->
+                _uiState.value = _uiState.value.copy(kaggleCacheStatusMap = map)
+                prefsStore.updateKaggleFullSettings(cacheMapJson = kaggleEngine.encodeCacheMap(map))
+            }.onFailure { err ->
+                _uiState.value = _uiState.value.copy(kaggleCacheStatusText = err.localizedMessage ?: "Cache check failed")
+            }
+        }
+    }
+
+    fun buildKaggleCache(presetLabel: String) {
+        if (_uiState.value.kaggleCacheBusyPreset != null) return
+        soundEngine.playPop()
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                kaggleCacheBusyPreset = presetLabel,
+                kaggleCacheStatusText = "Starting CPU-only cloud cache builder...",
+            )
+            val res = kaggleEngine.buildCloudCacheForPreset(
+                prefs = preferences.value,
+                presetLabel = presetLabel,
+                onStatus = { st ->
+                    _uiState.value = _uiState.value.copy(kaggleCacheStatusText = st)
+                },
+            )
+            res.onSuccess { entry ->
+                val updated = _uiState.value.kaggleCacheStatusMap + (presetLabel to entry)
+                _uiState.value = _uiState.value.copy(
+                    kaggleCacheBusyPreset = null,
+                    kaggleCacheStatusText = "Cached $presetLabel (${String.format("%.2f", entry.bytes / 1_073_741_824.0)} GB)",
+                    kaggleCacheStatusMap = updated,
+                )
+                prefsStore.updateKaggleFullSettings(cacheMapJson = kaggleEngine.encodeCacheMap(updated))
+                showBanner("Cloud cache ready for $presetLabel")
+            }.onFailure { err ->
+                _uiState.value = _uiState.value.copy(
+                    kaggleCacheBusyPreset = null,
+                    kaggleCacheStatusText = err.localizedMessage ?: "Cache build failed",
+                    errorMessage = err.localizedMessage,
+                )
+            }
+        }
+    }
+
+    fun deleteKaggleCache(presetLabel: String) {
+        soundEngine.playClick()
+        viewModelScope.launch {
+            val slug = KaggleImageEngine.presetSlug(presetLabel)
+            val res = kaggleEngine.deleteCacheDataset(preferences.value, slug)
+            res.onSuccess {
+                val updated = _uiState.value.kaggleCacheStatusMap + (
+                    presetLabel to KaggleImageEngine.CacheEntry(slug = slug, exists = false, healthy = false)
+                )
+                _uiState.value = _uiState.value.copy(
+                    kaggleCacheStatusMap = updated,
+                    kaggleCacheStatusText = "Deleted cloud cache $slug",
+                )
+                prefsStore.updateKaggleFullSettings(cacheMapJson = kaggleEngine.encodeCacheMap(updated))
+                showBanner("Deleted cloud cache $slug")
+            }.onFailure { err ->
+                _uiState.value = _uiState.value.copy(errorMessage = err.localizedMessage)
+            }
+        }
+    }
+
+    suspend fun enhanceKagglePrompt(rawPrompt: String, useLlm: Boolean): Result<String> {
+        if (!useLlm) {
+            return Result.success(KaggleImageEngine.enhancePromptLocal(rawPrompt))
+        }
+        val prefs = preferences.value
+        val activeProv = _uiState.value.activeProvider
+        return kaggleEngine.enhancePromptWithLlm(
+            rawPrompt = rawPrompt,
+            provider = activeProv,
+            modelOverride = prefs.kaggleEnhancerModel,
+        )
     }
 
     // ── Offline Local Models (Zero-Copy SAF Mount + Free RAM) ────────────
@@ -2645,7 +2884,29 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
     ): Result<ArtworkEntity> {
         val prefs = preferences.value
         val provider = providerOverride ?: prefs.imagineProvider
-        val model = modelOverride ?: if (provider == "kaggle") prefs.kaggleModelId else prefs.imagineModel
+        if (provider == "kaggle") {
+            val sizeLabel = when (aspectRatio) {
+                "16:9" -> "1216x832 (16:9)"
+                "9:16" -> "832x1216 (9:16)"
+                "4:3" -> "1152x896 (4:3)"
+                "3:4" -> "896x1152 (3:4)"
+                "1:1" -> "1024x1024 (1:1)"
+                else -> prefs.kaggleSize
+            }
+            return generateKaggleBatch(
+                prompt = prompt,
+                stickyPrompt = prefs.kaggleStickyPrompt,
+                negativePrompt = negativePrompt.ifBlank { prefs.kaggleNegativePrompt },
+                presetLabel = modelOverride?.takeIf { lbl -> KaggleImageEngine.MODEL_PRESETS.any { it.label == lbl } }
+                    ?: prefs.kagglePreset,
+                sizeLabel = sizeLabel,
+                steps = prefs.kaggleSteps,
+                guidance = prefs.kaggleGuidance,
+                batch = 1,
+                seed = prefs.kaggleSeed,
+            ).map { it.first() }
+        }
+        val model = modelOverride ?: prefs.imagineModel
         _uiState.value = _uiState.value.copy(isGeneratingImage = true, imagineStatusText = "Starting Illume...", errorMessage = null)
         val res = imagineClient.generateImage(
             prompt = prompt,
@@ -2675,8 +2936,87 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
                 localPath = gen.localFile.absolutePath,
             )
             dao.upsertArtwork(entity)
+            _uiState.value = _uiState.value.copy(lastGeneratedImagePath = entity.localPath)
             soundEngine.playPop()
             entity
+        }
+    }
+
+    suspend fun generateKaggleBatch(
+        prompt: String,
+        stickyPrompt: String = "",
+        negativePrompt: String = KaggleImageEngine.DEFAULT_NEGATIVE_PROMPT,
+        presetLabel: String = preferences.value.kagglePreset,
+        sizeLabel: String = preferences.value.kaggleSize,
+        steps: Int = preferences.value.kaggleSteps,
+        guidance: Float = preferences.value.kaggleGuidance,
+        batch: Int = preferences.value.kaggleBatch,
+        seed: Long = preferences.value.kaggleSeed,
+        initImagePath: String? = null,
+        denoise: Float = 0.75f,
+        onStatus: ((String) -> Unit)? = null,
+    ): Result<List<ArtworkEntity>> {
+        val prefs = preferences.value
+        val combinedPrompt = buildString {
+            append(prompt.trim())
+            val sticky = stickyPrompt.trim()
+            if (sticky.isNotBlank() && !prompt.contains(sticky, ignoreCase = true)) {
+                if (isNotEmpty()) append(", ")
+                append(sticky)
+            }
+        }
+        val (w, h) = KaggleImageEngine.parseSize(sizeLabel)
+        val initB64 = if (!initImagePath.isNullOrBlank()) {
+            withContext(Dispatchers.IO) { KaggleImageEngine.encodeInitImageBase64(File(initImagePath)) }.orEmpty()
+        } else ""
+        val req = KaggleImageEngine.GenerationRequest(
+            prompt = combinedPrompt,
+            negativePrompt = negativePrompt.ifBlank { KaggleImageEngine.DEFAULT_NEGATIVE_PROMPT },
+            steps = steps.coerceIn(1, 100),
+            width = w,
+            height = h,
+            seed = seed,
+            guidanceScale = guidance.coerceIn(0f, 20f),
+            batch = batch.coerceIn(1, 20),
+            initB64 = initB64,
+            denoise = denoise.coerceIn(0.1f, 0.95f),
+        )
+        _uiState.value = _uiState.value.copy(
+            isGeneratingImage = true,
+            imagineStatusText = "Pushing Kaggle GPU render...",
+            errorMessage = null,
+        )
+        val res = kaggleEngine.render(
+            prefs = prefs,
+            request = req,
+            presetOverride = presetLabel,
+            onProgress = { prog ->
+                val formatted = KaggleImageEngine.formatStage(prog.stage, prog.detail)
+                _uiState.value = _uiState.value.copy(imagineStatusText = formatted)
+                onStatus?.invoke(formatted)
+            },
+        )
+        _uiState.value = _uiState.value.copy(isGeneratingImage = false, imagineStatusText = "")
+        return res.map { gen ->
+            val entities = gen.allFiles.mapIndexed { idx, file ->
+                val usedSeed = gen.seeds.getOrElse(idx) { if (seed >= 0L) seed + idx else -1L }
+                ArtworkEntity(
+                    id = UUID.randomUUID().toString(),
+                    prompt = combinedPrompt,
+                    negativePrompt = req.negativePrompt,
+                    provider = "Kaggle GPU",
+                    model = gen.presetLabel.ifBlank { presetLabel },
+                    aspectRatio = sizeLabel.substringAfter("(").substringBefore(")").ifBlank { "${w}x${h}" },
+                    seed = usedSeed,
+                    localPath = file.absolutePath,
+                )
+            }
+            entities.forEach { dao.upsertArtwork(it) }
+            entities.firstOrNull()?.let { first ->
+                _uiState.value = _uiState.value.copy(lastGeneratedImagePath = first.localPath)
+            }
+            soundEngine.playPop()
+            entities
         }
     }
 
@@ -2883,17 +3223,67 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
         _uiState.value = _uiState.value.copy(pendingSyncConflict = false)
     }
 
+    fun setShizukuHideMicDot(enabled: Boolean) {
+        soundEngine.playClick()
+        viewModelScope.launch {
+            val shizukuConnected = _uiState.value.shizukuStatus == ShizukuStatus.CONNECTED_SHELL ||
+                _uiState.value.shizukuStatus == ShizukuStatus.CONNECTED_ROOT
+            if (!shizukuConnected) {
+                prefsStore.updateWakeWordSettings(
+                    enabled = preferences.value.wakeWordEnabled,
+                    shizukuHideDot = false,
+                )
+                showSettingsFeedback(
+                    "Shizuku is not connected. Authorize Shizuku first to toggle the Android privacy indicator flag.",
+                    isError = true,
+                )
+                return@launch
+            }
+            val flagVal = if (enabled) "false" else "true"
+            val res = shizukuBridge.runCommand(
+                "cmd device_config put privacy camera_mic_icons_enabled $flagVal default",
+                timeoutSec = 10,
+            )
+            res.onSuccess {
+                prefsStore.updateWakeWordSettings(
+                    enabled = preferences.value.wakeWordEnabled,
+                    shizukuHideDot = enabled,
+                )
+                showSettingsFeedback(
+                    if (enabled) {
+                        "System mic/camera privacy dot hidden OS-wide via Shizuku. Turn this OFF anytime to restore."
+                    } else {
+                        "Android system mic/camera privacy dot restored."
+                    },
+                    isError = false,
+                )
+            }.onFailure { err ->
+                showSettingsFeedback(
+                    "Failed updating privacy dot via Shizuku: ${err.localizedMessage}",
+                    isError = true,
+                )
+            }
+        }
+    }
+
     fun syncWithGoogleCloud(silent: Boolean = false, mode: CloudSyncMode = CloudSyncMode.MERGE_BOTH) {
         viewModelScope.launch {
             if (!silent) {
-                _uiState.value = _uiState.value.copy(isSyncingCloud = true, errorMessage = null)
+                _uiState.value = _uiState.value.copy(isSyncingCloud = true, errorMessage = null, cloudStorageError = null)
             }
             val res = cloudSync.syncNow(preferences.value, mode)
             if (!silent) {
                 _uiState.value = _uiState.value.copy(isSyncingCloud = false)
-                res.onSuccess {
-                    showSettingsFeedback(it.message, isError = false)
-                    refreshCloudStorage()
+                res.onSuccess { report ->
+                    if (report.storageSummary != null) {
+                        _uiState.value = _uiState.value.copy(
+                            cloudStorageSummary = report.storageSummary,
+                            cloudStorageError = null,
+                        )
+                    } else {
+                        refreshCloudStorage()
+                    }
+                    showSettingsFeedback(report.message, isError = false)
                 }.onFailure {
                     showSettingsFeedback(it.localizedMessage ?: "Cloud sync failed", isError = true)
                 }
@@ -2903,12 +3293,20 @@ class CelliumViewModel(application: Application) : AndroidViewModel(application)
 
     fun refreshCloudStorage() {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(cloudStorageLoading = true)
+            _uiState.value = _uiState.value.copy(cloudStorageLoading = true, cloudStorageError = null)
             val res = cloudSync.inspectCloudStorage()
-            _uiState.value = _uiState.value.copy(
-                cloudStorageLoading = false,
-                cloudStorageSummary = res.getOrNull() ?: _uiState.value.cloudStorageSummary,
-            )
+            res.onSuccess { summary ->
+                _uiState.value = _uiState.value.copy(
+                    cloudStorageLoading = false,
+                    cloudStorageSummary = summary,
+                    cloudStorageError = null,
+                )
+            }.onFailure { err ->
+                _uiState.value = _uiState.value.copy(
+                    cloudStorageLoading = false,
+                    cloudStorageError = err.localizedMessage ?: "Failed inspecting cloud storage.",
+                )
+            }
         }
     }
 

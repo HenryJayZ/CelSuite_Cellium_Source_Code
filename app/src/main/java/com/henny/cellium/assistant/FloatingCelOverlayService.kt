@@ -54,7 +54,15 @@ import com.henny.cellium.MainActivity
 import com.henny.cellium.R
 import com.henny.cellium.ai.ProviderPresets
 import com.henny.cellium.ai.UniversalLlmClient
+import com.henny.cellium.ai.WebToolsClient
+import com.henny.cellium.avatar.AvatarStudioLiveBus
+import com.henny.cellium.avatar.AvatarStudioLiveEvent
+import com.henny.cellium.avatar.ExpressionDirector
+import com.henny.cellium.avatar.FLOATING_IDLE_LINES
+import com.henny.cellium.avatar.FLOATING_WAKE_UP_LINES
+import com.henny.cellium.avatar.HELL_PIT_PANIC_LINES
 import com.henny.cellium.avatar.HELL_PIT_RELIEVED_EXPRESSIONS
+import com.henny.cellium.avatar.HELL_PIT_RELIEVED_LINES
 import com.henny.cellium.avatar.HELL_PIT_SCARED_EXPRESSIONS
 import com.henny.cellium.avatar.MoodDetector
 import com.henny.cellium.core.CelliumSoundEngine
@@ -247,12 +255,16 @@ class FloatingCelOverlayService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val llmClient = UniversalLlmClient()
+    private val webTools = WebToolsClient()
 
     private var faceContainer: FrameLayout? = null
     private var faceView: AssistantDotFaceView? = null
     private var faceParams: WindowManager.LayoutParams? = null
 
+    // #2e: Dual stacked container — reply bubble NEVER gets erased when listening pill appears!
+    private var bubbleStackContainer: LinearLayout? = null
     private var bubbleView: TextView? = null
+    private var listeningPill: TextView? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
 
     private var sideMenuContainer: LinearLayout? = null
@@ -289,15 +301,27 @@ class FloatingCelOverlayService : Service() {
     private var isDragging = false
     private var handsFreeEnabled = false
 
-    // Living idle lifecycle + angry wake-up / Hell Abyss relieved hold guards
+    // Living idle lifecycle + angry wake-up / Hell Abyss relieved hold guards + #2g idle screen-peek
     private var lastInteractionMs = SystemClock.uptimeMillis()
+    private var lastScreenPeekMs = 0L
+    private var lastHellPitLineMs = 0L
+    private var lastStudioTeaseMs = 0L
+    private var lastIdleLine: String? = null
+    private var lastWakeLine: String? = null
+    private var lastPanicLine: String? = null
+    private var lastRelievedLine: String? = null
     private var angryHoldUntilMs = 0L
     private var relievedHoldUntilMs = 0L
+    private var replyMoodHoldUntilMs = 0L
     private var calmDownRunnable: Runnable? = null
     private var relievedResetRunnable: Runnable? = null
+    private var moodRelaxRunnable: Runnable? = null
     private var isBored = false
     private var isAsleep = false
+    private var isDisintegrating = false
     private var autoHideBubbleRunnable: Runnable? = null
+    private var studioObserverJob: Job? = null
+    private var screenPeekJob: Job? = null
 
     // Persistent conversation memory + quick chat switcher (#4s)
     private var floatingSessionId: String? = null
@@ -315,33 +339,31 @@ class FloatingCelOverlayService : Service() {
     private var screenVisionEnabled = false
     private var pendingScreenQuestion: String? = null
 
-    private val boredLines = listOf(
-        "*yawn*... getting kinda bored over here...",
-        "Hello? Anyone home? Just floating around...",
-        "Kinda quiet... tap me if you wanna chat!",
-    )
-
-    private val angryWakeLines = listOf(
-        "Hey!! I was right in the middle of the best nap!!",
-        "Grr! Do you mind?! You just woke me up!",
-        "Whoa, rude!! I was sleeping! What do you want?",
-        "Hmph! Five more minutes... fine, I'm awake!",
-    )
+    private fun pickNonRepeating(pool: List<String>, last: String?): String {
+        val candidates = pool.filter { it != last }
+        return (if (candidates.isNotEmpty()) candidates else pool).random()
+    }
 
     private val idleTickerRunnable = object : Runnable {
         override fun run() {
-            val busy = isListening || isThinking || isTalking || isDragging || barVisible || handsFreeEnabled
-            if (!busy && faceContainer != null && !isAngryHeld() && !isRelievedHeld()) {
-                val idleSec = (SystemClock.uptimeMillis() - lastInteractionMs) / 1000L
-                if (idleSec >= 48L && !isAsleep) {
+            val busy = isListening || isThinking || isTalking || isDragging || barVisible || handsFreeEnabled || isDisintegrating
+            if (!busy && faceContainer != null && !isAngryHeld() && !isRelievedHeld() && !isReplyMoodHeld()) {
+                val now = SystemClock.uptimeMillis()
+                val idleSec = (now - lastInteractionMs) / 1000L
+                // #2f: Strictly wait >= 60s of genuine idle before showing ANY idle message (never right after answering!)
+                if (idleSec >= 300L && isAsleep && (now - lastScreenPeekMs) >= 300_000L) {
+                    // #2g: After 5+ min genuine idle, optionally peek at screen & tease if enabled + vision ready
+                    maybeTriggerIdleScreenPeek(reason = "woke_from_long_idle")
+                } else if (idleSec >= 120L && !isAsleep) {
                     isAsleep = true
                     isBored = false
                     faceView?.updateState(newMood = "sleepy", expressionOverride = null)
                     hideSpeechBubble()
-                } else if (idleSec >= 22L && !isBored && !isAsleep) {
+                } else if (idleSec >= 60L && !isBored && !isAsleep) {
                     isBored = true
-                    faceView?.updateState(newMood = "deadpan", expressionOverride = null)
-                    showSpeechBubble(boredLines.random(), autoHideMs = 4500L)
+                    val line = pickNonRepeating(FLOATING_IDLE_LINES, lastIdleLine).also { lastIdleLine = it }
+                    faceView?.updateState(newMood = "bored", expressionOverride = null)
+                    showSpeechBubble(line, autoHideMs = 4500L)
                 }
             }
             mainHandler.postDelayed(this, 1000L)
@@ -413,6 +435,9 @@ class FloatingCelOverlayService : Service() {
             soundEngine.masterVolume = prefs.sfxVolume
             soundEngine.startupSoundId = prefs.startupSoundId
             soundEngine.startupSoundCustomPath = prefs.startupSoundCustomPath
+            soundEngine.startupSoundShuffleEnabled = prefs.startupSoundShuffleEnabled
+            soundEngine.startupSoundExcludedIds = prefs.startupSoundExcludedIds
+            soundEngine.deletedStartupSoundIds = prefs.deletedStartupSoundIds
             faceView?.updateState(newGender = prefs.avatarGender)
             if (enableHandsFree && !handsFreeEnabled) {
                 handsFreeEnabled = true
@@ -441,46 +466,122 @@ class FloatingCelOverlayService : Service() {
 
     private fun isAngryHeld(): Boolean = SystemClock.uptimeMillis() < angryHoldUntilMs
     private fun isRelievedHeld(): Boolean = SystemClock.uptimeMillis() < relievedHoldUntilMs
+    private fun isReplyMoodHeld(): Boolean = SystemClock.uptimeMillis() < replyMoodHoldUntilMs
 
     private fun markUserInteraction(resetMoodToIdle: Boolean = false) {
         lastInteractionMs = SystemClock.uptimeMillis()
         isBored = false
         isAsleep = false
-        if (resetMoodToIdle && !isListening && !isThinking && !isTalking && !isAngryHeld() && !isRelievedHeld()) {
+        if (resetMoodToIdle && !isListening && !isThinking && !isTalking && !isAngryHeld() && !isRelievedHeld() && !isReplyMoodHeld()) {
             faceView?.updateState(newMood = "idle", expressionOverride = null)
         }
     }
 
+    // #2h: Varied wake-up lines + natural persistent grumpy/angry expression EVEN AFTER text fades!
     private fun wakeUpAngry(andDrag: Boolean = false) {
         isAsleep = false
         isBored = false
         val now = SystemClock.uptimeMillis()
         lastInteractionMs = now
-        angryHoldUntilMs = now + 5_000L
+        angryHoldUntilMs = now + 18_000L
         hapticFeedback(VibrationEffect.EFFECT_HEAVY_CLICK, 45L)
-        val line = angryWakeLines.random()
-        faceView?.updateState(newMood = "angry", expressionOverride = null)
-        showSpeechBubble(line, autoHideMs = 4800L)
+        val line = pickNonRepeating(FLOATING_WAKE_UP_LINES, lastWakeLine).also { lastWakeLine = it }
+        val wakeMood = listOf("angry", "annoyed", "grumpy", "sulk", "pout").random()
+        faceView?.updateState(newMood = wakeMood, expressionOverride = null)
+        showSpeechBubble(line, autoHideMs = 4600L)
         if (!andDrag) {
             scope.launch {
                 val prefs = PreferencesStore(applicationContext).preferencesFlow.first()
                 speakOut(line, prefs.liveTtsEngine, prefs.liveTtsVoiceName, prefs.liveTtsPitch, prefs.liveTtsSpeechRate, revealOnStart = false)
             }
+            // #2g: Optionally peek at screen after waking from nap if screen vision is active
+            if (mediaProjection != null && (now - lastScreenPeekMs) >= 180_000L) {
+                mainHandler.postDelayed({ maybeTriggerIdleScreenPeek(reason = "poked_awake") }, 4800L)
+            }
         }
         calmDownRunnable?.let { mainHandler.removeCallbacks(it) }
         val r = Runnable {
-            if (!isListening && !isThinking && !isTalking && !isDragging && !isAsleep && !isAngryHeld() && !isRelievedHeld()) {
+            angryHoldUntilMs = 0L
+            if (!isListening && !isThinking && !isTalking && !isDragging && !isAsleep && !isRelievedHeld()) {
                 faceView?.updateState(newMood = "idle", expressionOverride = null)
             }
         }
         calmDownRunnable = r
-        mainHandler.postDelayed(r, 5_100L)
+        mainHandler.postDelayed(r, 18_200L)
+    }
+
+    // #2g: Optional Idle Screen-Peek Teasing (only when enabled in Settings & MediaProjection is already granted)
+    private fun maybeTriggerIdleScreenPeek(reason: String) {
+        if (isListening || isThinking || isTalking || isDragging || isDisintegrating) return
+        if (mediaProjection == null) return
+        lastScreenPeekMs = SystemClock.uptimeMillis()
+        screenPeekJob?.cancel()
+        screenPeekJob = scope.launch {
+            val prefs = PreferencesStore(applicationContext).preferencesFlow.first()
+            if (!prefs.floatingIdlePeekEnabled) return@launch
+            val frame = withContext(Dispatchers.IO) { captureScreenFrameDirect() } ?: return@launch
+            try {
+                val dao = CelliumDatabase.getInstance(applicationContext).dao()
+                val prov = dao.getProvider(prefs.activeProviderId)
+                    ?: dao.getAllProviders().firstOrNull { it.protocol != "on_device" }
+                    ?: return@launch
+                val personas = dao.getAllPersonasOnce().map {
+                    CustomPersona(it.id, it.name, it.iconKey, it.tagline, it.systemPrompt, it.accentHex)
+                }
+                val persona = BuiltInPersonas.resolve(prefs.defaultPersonaId, personas)
+                val sys = llmClient.buildSystemPrompt(
+                    persona = persona,
+                    memories = emptyList(),
+                    agentModeEnabled = false,
+                    shizukuConnected = false,
+                    moodMethod = "inline_tag",
+                    contextConfig = ContextModifyConfig(
+                        includePersona = true,
+                        includeMemories = false,
+                        includeIllumeInstructions = false,
+                        includeAgentInstructions = false,
+                        includeMoodInstructions = true,
+                    ),
+                    includeDeviceActions = false,
+                    extraInstruction = "[Idle Screen-Peek Tease] You just woke up ($reason) and peeked at what the user is doing on their screen. Drop ONE short, witty, playful, persona-matched 1-sentence tease about what you see (no markdown, max 16 words). Start with a mood tag like [MOOD:teasing] or [MOOD:smug].",
+                )
+                val sb = StringBuilder()
+                llmClient.streamChat(
+                    provider = prov,
+                    systemPrompt = sys,
+                    history = emptyList(),
+                    userPrompt = "Peek at this screen and drop one quick playful remark.",
+                    imageBitmap = frame,
+                ).collect { chunk ->
+                    if (chunk.contentDelta.isNotEmpty()) sb.append(chunk.contentDelta)
+                }
+                val (_, cleaned) = ProviderPresets.parseThoughts(sb.toString())
+                val (tagMood, body) = MoodDetector.extractInlineMoodTag(cleaned)
+                val tease = UniversalLlmClient.sanitizeVisibleReply(body).trim()
+                if (tease.isNotBlank() && !isListening && !isThinking && !isDisintegrating) {
+                    isAsleep = false
+                    isBored = false
+                    lastInteractionMs = SystemClock.uptimeMillis()
+                    faceView?.updateState(newMood = tagMood ?: "teasing", newGender = prefs.avatarGender, expressionOverride = null)
+                    showSpeechBubble(tease, autoHideMs = 6000L)
+                    speakOut(tease, prefs.liveTtsEngine, prefs.liveTtsVoiceName, prefs.liveTtsPitch, prefs.liveTtsSpeechRate, revealOnStart = false)
+                }
+            } catch (_: Exception) {
+                // Silent fail for ambient idle peek
+            } finally {
+                if (!frame.isRecycled) frame.recycle()
+            }
+        }
     }
 
     private fun triggerRelievedAfterHellPit() {
         val relievedExpr = HELL_PIT_RELIEVED_EXPRESSIONS.random()
-        relievedHoldUntilMs = SystemClock.uptimeMillis() + 2_000L
+        relievedHoldUntilMs = SystemClock.uptimeMillis() + 3_200L
         faceView?.updateState(newMood = "relieved", expressionOverride = relievedExpr)
+        // #8: Varied relieved line when pulled back out of Hell Pit!
+        val line = pickNonRepeating(HELL_PIT_RELIEVED_LINES, lastRelievedLine).also { lastRelievedLine = it }
+        showSpeechBubble(line, autoHideMs = 3400L)
+        speakQuickOverlayLine(line)
         relievedResetRunnable?.let { mainHandler.removeCallbacks(it) }
         val r = Runnable {
             relievedHoldUntilMs = 0L
@@ -489,7 +590,25 @@ class FloatingCelOverlayService : Service() {
             }
         }
         relievedResetRunnable = r
-        mainHandler.postDelayed(r, 2_000L)
+        mainHandler.postDelayed(r, 3_400L)
+    }
+
+    private fun speakQuickOverlayLine(line: String) {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastHellPitLineMs < 1_800L) return
+        lastHellPitLineMs = now
+        scope.launch {
+            val prefs = PreferencesStore(applicationContext).preferencesFlow.first()
+            if (::celliumTts.isInitialized && !isTalking) {
+                celliumTts.speak(
+                    rawText = line,
+                    engine = prefs.liveTtsEngine,
+                    voiceName = prefs.liveTtsVoiceName,
+                    pitch = prefs.liveTtsPitch,
+                    speechRate = prefs.liveTtsSpeechRate,
+                )
+            }
+        }
     }
 
     private fun hapticFeedback(predefinedEffect: Int, fallbackMs: Long) {
@@ -685,15 +804,18 @@ class FloatingCelOverlayService : Service() {
                             inDismissZone = nowInZone
                             abyssView?.setHovering(nowInZone)
                             if (nowInZone) {
-                                // 4o: Pick a random scared/worried expression when dragged into Hell Abyss!
+                                // 4o + #8: Random scared expression + varied panicked voice line!
                                 wasInDismissZoneThisDrag = true
                                 relievedResetRunnable?.let { mainHandler.removeCallbacks(it) }
                                 relievedHoldUntilMs = 0L
                                 hapticFeedback(VibrationEffect.EFFECT_CLICK, 24L)
                                 val scaredExpr = HELL_PIT_SCARED_EXPRESSIONS.random()
                                 faceView?.updateState(newMood = "scared", expressionOverride = scaredExpr)
+                                val panicLine = pickNonRepeating(HELL_PIT_PANIC_LINES, lastPanicLine).also { lastPanicLine = it }
+                                showSpeechBubble(panicLine, autoHideMs = 3200L)
+                                speakQuickOverlayLine(panicLine)
                             } else {
-                                // 4o: Dragged OUT of Hell Abyss -> random relieved expression, back to idle after 2s!
+                                // 4o + #8: Dragged OUT of Hell Abyss -> random relieved expression + relieved voice line!
                                 hapticFeedback(VibrationEffect.EFFECT_TICK, 12L)
                                 if (isAngryHeld()) {
                                     faceView?.updateState(newMood = "angry", expressionOverride = null)
@@ -712,12 +834,27 @@ class FloatingCelOverlayService : Service() {
                     hideAbyssDismissZone()
                     if (wasMoved) {
                         if (shouldDismiss) {
-                            hapticFeedback(VibrationEffect.EFFECT_HEAVY_CLICK, 50L)
-                            dismissFloatingCel(updatePreference = true)
+                            // #5: Pixel-scatter disintegration animation before dismissing!
+                            isDisintegrating = true
+                            cancelListening()
+                            hideSideMenu()
+                            hideChatPicker()
+                            hideSpeechBubble()
+                            hideListeningPill()
+                            hapticFeedback(VibrationEffect.EFFECT_HEAVY_CLICK, 55L)
+                            soundEngine.playClick()
+                            val fv = faceView
+                            if (fv != null) {
+                                fv.startDisintegration {
+                                    dismissFloatingCel(updatePreference = true)
+                                }
+                            } else {
+                                dismissFloatingCel(updatePreference = true)
+                            }
                         } else if (!wasInDismissZoneThisDrag) {
                             markUserInteraction(resetMoodToIdle = true)
                         } else {
-                            // Keep the relieved animation running for its 2s window!
+                            // Keep the relieved animation running for its window!
                             markUserInteraction(resetMoodToIdle = false)
                         }
                     } else if (event.actionMasked == MotionEvent.ACTION_UP) {
@@ -737,7 +874,11 @@ class FloatingCelOverlayService : Service() {
 
         wm.addView(container, params)
 
-        // Floating Speech Bubble right beside Cel (tap to retry if error, or hide!)
+        // #2e: Dual stacked overlay container — Reply Bubble + separate Listening Pill!
+        val stack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.START
+        }
         val bubble = TextView(this).apply {
             setTextColor(Color.parseColor("#F5F0FF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -762,6 +903,42 @@ class FloatingCelOverlayService : Service() {
             }
         }
         bubbleView = bubble
+
+        val listenPill = TextView(this).apply {
+            setTextColor(Color.parseColor("#34D399"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            setPadding(dp(10f), dp(5f), dp(10f), dp(5f))
+            maxWidth = dp(224f)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(230, 8, 36, 30))
+                cornerRadius = dp(99f).toFloat()
+                setStroke(dp(1f), Color.argb(185, 52, 211, 153))
+            }
+            visibility = View.GONE
+            setOnClickListener {
+                hapticFeedback(VibrationEffect.EFFECT_TICK, 12L)
+                if (isListening) stopListeningForSubmit()
+            }
+        }
+        listeningPill = listenPill
+
+        stack.addView(
+            bubble,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+        )
+        stack.addView(
+            listenPill,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(5f) }
+        )
+        bubbleStackContainer = stack
+
         val bParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -774,7 +951,60 @@ class FloatingCelOverlayService : Service() {
             y = params.y
         }
         bubbleParams = bParams
-        wm.addView(bubble, bParams)
+        wm.addView(stack, bParams)
+
+        // #7: Live Avatar Studio mirroring collector!
+        studioObserverJob?.cancel()
+        studioObserverJob = scope.launch {
+            AvatarStudioLiveBus.events.collect { ev ->
+                if (isDisintegrating) return@collect
+                markUserInteraction()
+                when (ev.actionType) {
+                    "gender" -> {
+                        val g = ev.gender
+                        if (!g.isNullOrBlank()) {
+                            faceView?.updateState(newGender = g, expressionOverride = ev.expressionName)
+                        }
+                    }
+                    "expression", "modifier" -> {
+                        val g = ev.gender
+                        val m = ev.mood
+                        when {
+                            !g.isNullOrBlank() && !m.isNullOrBlank() ->
+                                faceView?.updateState(newGender = g, newMood = m, expressionOverride = ev.expressionName)
+                            !g.isNullOrBlank() ->
+                                faceView?.updateState(newGender = g, expressionOverride = ev.expressionName)
+                            !m.isNullOrBlank() ->
+                                faceView?.updateState(newMood = m, expressionOverride = ev.expressionName)
+                            else ->
+                                faceView?.updateState(expressionOverride = ev.expressionName)
+                        }
+                    }
+                    "blink" -> faceView?.triggerManualBlink()
+                    "pet" -> faceView?.updateState(newMood = "love", expressionOverride = null)
+                    else -> {
+                        val g = ev.gender
+                        val m = ev.mood
+                        when {
+                            !g.isNullOrBlank() && !m.isNullOrBlank() ->
+                                faceView?.updateState(newGender = g, newMood = m, expressionOverride = ev.expressionName)
+                            !g.isNullOrBlank() ->
+                                faceView?.updateState(newGender = g, expressionOverride = ev.expressionName)
+                            !m.isNullOrBlank() ->
+                                faceView?.updateState(newMood = m, expressionOverride = ev.expressionName)
+                            else ->
+                                faceView?.updateState(expressionOverride = ev.expressionName)
+                        }
+                    }
+                }
+                val now = SystemClock.uptimeMillis()
+                if (now - lastStudioTeaseMs >= 2_400L) {
+                    lastStudioTeaseMs = now
+                    val tease = AvatarStudioLiveBus.pickStudioReaction(ev)
+                    showSpeechBubble(tease, autoHideMs = 3400L)
+                }
+            }
+        }
 
         mainHandler.removeCallbacks(idleTickerRunnable)
         mainHandler.postDelayed(idleTickerRunnable, 1000L)
@@ -899,7 +1129,19 @@ class FloatingCelOverlayService : Service() {
             }
         )
 
-        // 6. Dismiss Floating Cel
+        // 6. Open in Main Chat App (#6)
+        col.addView(
+            makeMenuBtn(
+                label = "Open in Chat",
+                accentHex = "#E9D5FF",
+                bgColor = Color.argb(135, 58, 28, 102),
+            ) {
+                hideSideMenu()
+                openActiveSessionInMainChat()
+            }
+        )
+
+        // 7. Dismiss Floating Cel
         col.addView(
             makeMenuBtn(
                 label = "Dismiss Cel",
@@ -1121,17 +1363,36 @@ class FloatingCelOverlayService : Service() {
         mainHandler.postDelayed(r, delayMs)
     }
 
+    private fun openActiveSessionInMainChat() {
+        val sid = floatingSessionId
+        runCatching {
+            val intent = Intent(applicationContext, MainActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+                )
+                putExtra(MainActivity.EXTRA_OPEN_CHAT_TAB, true)
+                if (!sid.isNullOrBlank()) {
+                    putExtra(MainActivity.EXTRA_OPEN_SESSION_ID, sid)
+                }
+            }
+            startActivity(intent)
+        }
+    }
+
     /**
-     * 4p: Anchors the floating bubble snugly 8dp beside Cel's face on BOTH sides!
-     * On the left of Cel, uses Gravity.END so the bubble's RIGHT edge always hugs Cel regardless of text width.
+     * 4p + #2e: Anchors the stacked bubble + listening pill snugly 8dp beside Cel's face on BOTH sides!
+     * On the left of Cel, uses Gravity.END so the stack's RIGHT edge always hugs Cel regardless of text width.
      */
     private fun repositionBubbleBesideFace() {
         val fParams = faceParams ?: return
         val bParams = bubbleParams ?: return
-        val bubble = bubbleView ?: return
+        val stack = bubbleStackContainer ?: return
         val screenW = resources.displayMetrics.widthPixels
         val faceCenterX = fParams.x + fParams.width / 2
         val placeLeft = faceCenterX > screenW / 2
+        stack.gravity = if (placeLeft) Gravity.END else Gravity.START
         if (placeLeft) {
             bParams.gravity = Gravity.TOP or Gravity.END
             bParams.x = (screenW - fParams.x + dp(8f)).coerceAtLeast(dp(8f))
@@ -1140,8 +1401,8 @@ class FloatingCelOverlayService : Service() {
             bParams.x = (fParams.x + fParams.width + dp(8f)).coerceAtMost(screenW - dp(80f))
         }
         bParams.y = fParams.y.coerceIn(dp(28f), resources.displayMetrics.heightPixels - dp(128f))
-        if (bubble.isAttachedToWindow) {
-            runCatching { wm.updateViewLayout(bubble, bParams) }
+        if (stack.isAttachedToWindow) {
+            runCatching { wm.updateViewLayout(stack, bParams) }
         }
     }
 
@@ -1166,6 +1427,22 @@ class FloatingCelOverlayService : Service() {
             autoHideBubbleRunnable?.let { mainHandler.removeCallbacks(it) }
             autoHideBubbleRunnable = null
             bubbleView?.visibility = View.GONE
+        }
+    }
+
+    // #2e: Separate stacked listening indicator pill so listening NEVER erases Cel's last reply!
+    private fun showListeningPill(text: String) {
+        mainHandler.post {
+            val pill = listeningPill ?: return@post
+            pill.text = text
+            pill.visibility = View.VISIBLE
+            repositionBubbleBesideFace()
+        }
+    }
+
+    private fun hideListeningPill() {
+        mainHandler.post {
+            listeningPill?.visibility = View.GONE
         }
     }
 
@@ -1320,7 +1597,8 @@ class FloatingCelOverlayService : Service() {
         isListening = true
         bubbleIsRetryAction = false
         faceView?.updateState(newMood = "listening", isListening = true, isMicReady = false, isTalking = false, expressionOverride = null)
-        showSpeechBubble("Starting mic...")
+        // #2e: Show stacked Listening pill without erasing Cel's reply bubble!
+        showListeningPill("Starting mic...")
 
         sttLaunchJob = scope.launch {
             val prefs = PreferencesStore(this@FloatingCelOverlayService).preferencesFlow.first()
@@ -1353,7 +1631,7 @@ class FloatingCelOverlayService : Service() {
                             mainHandler.post {
                                 if (isListening) {
                                     faceView?.updateState(newMood = "listening", isListening = true, isMicReady = true)
-                                    showSpeechBubble("Listening...")
+                                    showListeningPill("Listening...")
                                 }
                             }
                         },
@@ -1361,7 +1639,7 @@ class FloatingCelOverlayService : Service() {
                             mainHandler.post {
                                 isListening = false
                                 faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
-                                showSpeechBubble("Transcribing...")
+                                showListeningPill("Transcribing...")
                             }
                         },
                     )
@@ -1370,17 +1648,18 @@ class FloatingCelOverlayService : Service() {
                     res.onSuccess { rawTxt ->
                         val cleaned = CelliumSttEngine.sanitizeTranscript(rawTxt)
                         if (cleaned.isNotBlank()) {
+                            hideListeningPill()
                             askCel(cleaned)
                         } else {
+                            hideListeningPill()
                             faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                             if (handsFreeEnabled) {
                                 // 4q: ALWAYS keep listening while Auto Mode is ON!
                                 scheduleAutoListen(450L)
-                            } else {
-                                hideSpeechBubble()
                             }
                         }
                     }.onFailure { err ->
+                        hideListeningPill()
                         faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                         if (handsFreeEnabled) {
                             // 4q: Never turn off Auto Chat on silence/timeout — re-arm calmly!
@@ -1408,7 +1687,7 @@ class FloatingCelOverlayService : Service() {
                         mainHandler.post {
                             if (isListening) {
                                 faceView?.updateState(newMood = "listening", isListening = true, isMicReady = true)
-                                showSpeechBubble("Listening...")
+                                showListeningPill("Listening...")
                             }
                         }
                     }
@@ -1418,22 +1697,22 @@ class FloatingCelOverlayService : Service() {
                     override fun onEndOfSpeech() {
                         isListening = false
                         faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
-                        showSpeechBubble("Transcribing...")
+                        showListeningPill("Transcribing...")
                     }
                     override fun onError(error: Int) {
                         isListening = false
                         WakeWordService.setPaused(this@FloatingCelOverlayService, false)
+                        hideListeningPill()
                         faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                         if (handsFreeEnabled) {
                             // 4q: True always-listening loop — never disables Auto Mode on silence/timeout!
                             scheduleAutoListen(600L)
-                        } else {
-                            hideSpeechBubble()
                         }
                     }
                     override fun onResults(results: Bundle?) {
                         isListening = false
                         WakeWordService.setPaused(this@FloatingCelOverlayService, false)
+                        hideListeningPill()
                         val raw = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
                         val cleaned = CelliumSttEngine.sanitizeTranscript(raw)
                         if (cleaned.isNotEmpty()) {
@@ -1442,15 +1721,13 @@ class FloatingCelOverlayService : Service() {
                             faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                             if (handsFreeEnabled) {
                                 scheduleAutoListen(450L)
-                            } else {
-                                hideSpeechBubble()
                             }
                         }
                     }
                     override fun onPartialResults(partialResults: Bundle?) {
                         if (!isListening) return
                         val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-                        if (partial.isNotBlank()) showSpeechBubble("\"$partial\"")
+                        if (partial.isNotBlank()) showListeningPill("\"$partial\"")
                     }
                     override fun onEvent(eventType: Int, params: Bundle?) = Unit
                 })
@@ -1465,6 +1742,7 @@ class FloatingCelOverlayService : Service() {
             }.onFailure {
                 isListening = false
                 WakeWordService.setPaused(this, false)
+                hideListeningPill()
                 faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                 showSpeechBubble("Mic unavailable — tap me to type instead.", autoHideMs = 4000L)
             }
@@ -1484,6 +1762,7 @@ class FloatingCelOverlayService : Service() {
         mainHandler.post {
             runCatching { speechRecognizer?.cancel() }
             WakeWordService.setPaused(this, false)
+            hideListeningPill()
             faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
         }
     }
@@ -1507,6 +1786,10 @@ class FloatingCelOverlayService : Service() {
 
     private fun captureScreenFrameIfEnabled(): Bitmap? {
         if (!screenVisionEnabled) return null
+        return captureScreenFrameDirect()
+    }
+
+    private fun captureScreenFrameDirect(): Bitmap? {
         val mp = mediaProjection ?: return null
         return runCatching {
             val dm: DisplayMetrics = resources.displayMetrics
@@ -1596,8 +1879,8 @@ class FloatingCelOverlayService : Service() {
                 val personas = dao.getAllPersonasOnce().map {
                     CustomPersona(it.id, it.name, it.iconKey, it.tagline, it.systemPrompt, it.accentHex)
                 }
+                // #9: Always respect active floating session persona or user's currently selected default persona!
                 val chosenSession = floatingSessionId?.let { dao.getSession(it) }
-                    ?: dao.getAllSessionsOnce().firstOrNull { !it.isArena && !it.isLocked }
                 val personaId = chosenSession?.personaId?.ifBlank { prefs.defaultPersonaId } ?: prefs.defaultPersonaId
                 val persona = BuiltInPersonas.resolve(personaId, personas)
                 val memories = dao.getAllMemoriesOnce()
@@ -1690,13 +1973,29 @@ class FloatingCelOverlayService : Service() {
 
                     val (_, cleanStep) = ProviderPresets.parseThoughts(sb.toString())
                     val actions = AndroidDeviceActions.extractActionPayloads(cleanStep)
-                    if (actions.isNotEmpty() && step < 2) {
-                        showSpeechBubble("Running action...")
-                        faceView?.updateState(newMood = "working", newGender = prefs.avatarGender)
+                    val (webQuery, _) = UniversalLlmClient.extractWebSearchQuery(cleanStep)
+                    if ((actions.isNotEmpty() || !webQuery.isNullOrBlank()) && step < 2) {
                         val resultBlock = buildString {
-                            for (payload in actions.take(3)) {
-                                val res = AndroidDeviceActions.executePayload(applicationContext, payload)
-                                appendLine("[DEVICE_ACTION_RESULT (${res.action}, success=${res.success})]: ${res.output}")
+                            if (actions.isNotEmpty()) {
+                                showSpeechBubble("Running action...")
+                                faceView?.updateState(newMood = "working", newGender = prefs.avatarGender)
+                                for (payload in actions.take(3)) {
+                                    val res = AndroidDeviceActions.executePayload(applicationContext, payload, webTools)
+                                    appendLine("[DEVICE_ACTION_RESULT (${res.action}, success=${res.success})]: ${res.output}")
+                                }
+                            }
+                            if (!webQuery.isNullOrBlank()) {
+                                showSpeechBubble("Searching web...")
+                                faceView?.updateState(newMood = "curious", newGender = prefs.avatarGender)
+                                val searchRes = webTools.searchWeb(webQuery, maxResults = 4)
+                                val block = searchRes.fold(
+                                    onSuccess = { items ->
+                                        if (items.isEmpty()) "No web results for $webQuery."
+                                        else items.joinToString("\n") { "${it.title}: ${it.snippet}" }
+                                    },
+                                    onFailure = { "Web search error: ${it.localizedMessage}" },
+                                )
+                                appendLine("[WEB_SEARCH_RESULT \"$webQuery\"]:\n$block")
                             }
                         }.trim()
                         workingHistory.add(
@@ -1715,17 +2014,17 @@ class FloatingCelOverlayService : Service() {
                                 content = cleanStep,
                             )
                         )
-                        currentPrompt = "$resultBlock\nNow give your concise natural spoken answer."
+                        currentPrompt = "$resultBlock\nNow give your concise natural spoken answer. Do NOT emit another [DEVICE_ACTION] or [WEB_SEARCH] tag."
                         currentBmp = null
                         showSpeechBubble("Thinking...")
                     } else {
-                        finalRaw = AndroidDeviceActions.stripActionTags(cleanStep)
+                        finalRaw = UniversalLlmClient.sanitizeVisibleReply(cleanStep)
                         break
                     }
                 }
 
                 val (tagMood, finalBody) = MoodDetector.extractInlineMoodTag(finalRaw)
-                val reply = finalBody.ifBlank { finalRaw.ifBlank { "I'm right here!" } }
+                val reply = UniversalLlmClient.sanitizeVisibleReply(finalBody.ifBlank { finalRaw }).ifBlank { "I'm right here!" }
                 val mood = tagMood ?: MoodDetector.detectMood(reply)
 
                 val assistantMsgId = UUID.randomUUID().toString()
@@ -1762,7 +2061,19 @@ class FloatingCelOverlayService : Service() {
                 lastFailedPrompt = null
                 lastFailedScreenBmp = null
 
+                val holdMs = ExpressionDirector.holdDurationMsForMood(mood)
+                replyMoodHoldUntilMs = SystemClock.uptimeMillis() + holdMs
                 faceView?.updateState(newMood = mood, newGender = prefs.avatarGender, expressionOverride = null)
+                moodRelaxRunnable?.let { mainHandler.removeCallbacks(it) }
+                val relax = Runnable {
+                    replyMoodHoldUntilMs = 0L
+                    if (!isListening && !isThinking && !isTalking && !isDragging && !isAsleep && !isAngryHeld() && !isRelievedHeld()) {
+                        faceView?.updateState(newMood = "idle", expressionOverride = null)
+                    }
+                }
+                moodRelaxRunnable = relax
+                mainHandler.postDelayed(relax, holdMs + 3_000L)
+
                 // 4j & 4t: Hold text reveal until voice audio starts (or animated typewriter for Synth!)
                 speakOut(
                     text = reply,
@@ -1849,7 +2160,10 @@ class FloatingCelOverlayService : Service() {
         autoHideBubbleRunnable?.let { mainHandler.removeCallbacks(it) }
         calmDownRunnable?.let { mainHandler.removeCallbacks(it) }
         relievedResetRunnable?.let { mainHandler.removeCallbacks(it) }
+        moodRelaxRunnable?.let { mainHandler.removeCallbacks(it) }
         rearmAutoListenRunnable?.let { mainHandler.removeCallbacks(it) }
+        studioObserverJob?.cancel()
+        screenPeekJob?.cancel()
         cancelListening()
         activeAskJob?.cancel()
         llmClient.cancelActiveRequests()
@@ -1858,7 +2172,7 @@ class FloatingCelOverlayService : Service() {
         hideAbyssDismissZone()
         removeBottomChatBar()
         faceContainer?.let { runCatching { wm.removeViewImmediate(it) }.onFailure { _ -> runCatching { wm.removeView(it) } } }
-        bubbleView?.let { runCatching { wm.removeViewImmediate(it) }.onFailure { _ -> runCatching { wm.removeView(it) } } }
+        bubbleStackContainer?.let { runCatching { wm.removeViewImmediate(it) }.onFailure { _ -> runCatching { wm.removeView(it) } } }
         runCatching { speechRecognizer?.destroy() }
         if (::celliumTts.isInitialized) runCatching { celliumTts.release() }
         if (::soundEngine.isInitialized) runCatching { soundEngine.release() }

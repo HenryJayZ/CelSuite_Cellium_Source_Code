@@ -1,0 +1,51 @@
+1. When the user clicks the hide eye in live mode, the app goes fullscreen to hide the phone's status bar and nav bar
+
+2. in the assistant popup when I hold the home button, 
+2a. Make it so when I send my first message from the screenshot, The screenshot goes to "off" so it doesn't spam the AI with the same appended screen all the time I'm texting her from the popup you get?, only once, or if reselected... or another circle drawn...
+
+2b. I realized I can't type paragraph/new line, My keyboard "next line" button gets switched to "send" , so it's impossible to type new lines 😭, there is already an "ask" button so why make my keyboard too?, and we can make the pill support multiline
+
+2c. When she blinks, her blush goes down with her eyes 💀 
+2d. I have noticed the app has 50+ Animations, but throughout these 5 days of this project, I have only seen 5 max, What is the issue?, I have only seen Happy like 500 times, then angry like 200 times (but it's cute when she runs the animation when she is running a task so I'll allow it), Like I never even see the sleeping, and annoyingly she goes back to happy after she finishes talking...
+All I'm saying is we have so much animations being wasted, and it's like the AI keeps picking "mood: blush" or something, instead of actually not repeating an animation a lot or unnecessarily, It's hard to say what I want 🥺, maybe the AI should consider not repeating a face by picking from the list of existing animations only, but still permitted to repeat incase ...
+
+2e. Annoyingly in floating mode, when she finishes talking and she switches to listening, The previous bubble disappears before I could finish reading, so make it so an extra listening bubble would appear above/below the chat bubble so I can read and know she is listening now...
+
+2f. Hahaha 😂 A silly bug happened, so you know Cel's random idle messages?, So as she finished answering my question, 1 second later and her idle message erased what she said asif she was idle 😹, The idle message should only happen when I haven't talked to her in like 1minute or so...
+
+2g. I low-key wanna make the floating more fun, maybe randomly when Idle, if she wakes up from her sleep on her own (or I forced her), she can be looking around and take a screenshot of my screen and say something to tease me or something (depends on the user's selected persona)... THIS CAN BE DISABLED IN SETTINGS INCASE THE USER CARES ABOUT QUOTA, but default enabled 
+
+2h. When I wake the floating face, I noticed it says similar voice lines 🥱, it gets boring....
+Also Make it so she keeps her anger animation (or infact similar) even after the text disappears, cuz it would be weird if she just immediately went back to normal from angry 😹 
+
+2i. In the avatar studio, what does that 3x3 grid .svg icon do?, it's confusing 
+
+3. Unfortunately my friends hated how the settings was arranged, calling it cluttered, tight and not understandable .... I guess it's only me that could understand the settings 😅🙃, We must make the app user friendly, what do you suggest for this mega critics?, do it!
+
+4. In the Setup screen, make sure the user can pick their avatar face like the detailed or chibi (preview will be available)... and yes, chibi cel will be the default please 
+
+5. when I drag the floating window to it's hell, make the face disintegrate when I let go 
+
+6. hmm, I want to open Cel to the chat from the popup/floating window... very very similar to how Google Gemini goes from the popup assistant to the main chat with everything there just from a swipe up you get?... we need something similar 🤔 🤔 🤔 
+
+7. Make it so anything I do in the Avatar studio reflects "Immediately" to the floating Cel for a preview and yes she would reply random stuff like "HEY! QUIT MESSING WITH MY FACE", or "WHAT I'M NOT EVEN ANGRY, BUT I WILL SOON BE IF YOU KEEP DOING THIS" if they pick angry, I don't know, just a lot of fun voice lines you get? 😹 
+
+8. Lets also give her voice lines from dragging her into the hell abbys 🤭 
+
+9. I don't think the user's selected Persona is affecting the Assistant Pop-up or Live mode!!!, It replies like it has no persona selected
+
+10. The Shuffle startup sound, I meant it would be so that if I click that shuffle button, it turns on and then all the time it shuffles the available startup sounds the user selected and the delete buttons switch to "-" a red minus so I can deselect the ones to be included in shuffle, and switch to a green "+" to add them back (they also gray out if deselected)
+
+11. I love how the voice is Waiting for me to finish finally 🔥... But ... one tiny thing, sometimes it would be listening forever ♾️ when I say things like "Sure" or "Okay", so let it detect silence after a unique loudness peak... 😭or something Idk
+
+12. Web search isn't working 😭... and when she gets it right, it said this screenshot:
+
+13. The kaggle you did was not the full thing, read this .md 
+
+14. Cloud Manager works I think, but when I click refresh to show me how much is used, it still says 0KB used, even tho I saw the successful 21 chats uploaded
+
+15. This new version is v2611.27.0 since it's finally November 27th
+
+
+
+.

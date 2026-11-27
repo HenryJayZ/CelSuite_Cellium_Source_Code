@@ -151,8 +151,6 @@ class CelliumSttEngine(context: Context) {
             "hm",
             "oh",
             "ah",
-            "okay",
-            "ok",
             "silence",
             "music",
             "applause",
@@ -427,21 +425,29 @@ class CelliumSttEngine(context: Context) {
                     withContext(Dispatchers.Main) { onRmsLevel(normLevel) }
 
                     if (!manualStopOnly) {
-                        if (calibratedFrames < 7) {
-                            ambientRms = if (calibratedFrames == 0) rms.coerceIn(60f, 650f)
-                            else (ambientRms * 0.72f + rms.coerceIn(60f, 650f) * 0.28f)
+                        if (calibratedFrames < 6) {
+                            ambientRms = if (calibratedFrames == 0) rms.coerceIn(55f, 600f)
+                            else (ambientRms * 0.72f + rms.coerceIn(55f, 600f) * 0.28f)
                             calibratedFrames++
                         } else if (!speechDetected && rms < ambientRms * 1.45f) {
-                            ambientRms = (ambientRms * 0.96f + rms.coerceIn(60f, 650f) * 0.04f)
+                            ambientRms = (ambientRms * 0.96f + rms.coerceIn(55f, 600f) * 0.04f)
                         }
 
-                        val onsetThreshold = maxOf(340f, ambientRms * 2.25f)
-                        val holdThreshold = maxOf(210f, ambientRms * 1.45f)
+                        // Peak-envelope VAD: latch immediately on 1 crisp peak (e.g. "Sure", "Okay", "Yes")
+                        // OR 2 consecutive moderate speech frames so 1-word replies never hang for 60s.
+                        val crispPeakThreshold = maxOf(500f, ambientRms * 2.80f)
+                        val onsetThreshold = maxOf(290f, ambientRms * 2.00f)
+                        val holdThreshold = maxOf(190f, ambientRms * 1.38f)
 
                         if (!speechDetected) {
-                            if (rms >= onsetThreshold) {
+                            if (rms >= crispPeakThreshold) {
+                                speechDetected = true
+                                speechStartMs = now
+                                lastSpeechMs = now
+                                consecutiveSpeechFrames = 2
+                            } else if (rms >= onsetThreshold) {
                                 consecutiveSpeechFrames++
-                                if (consecutiveSpeechFrames >= 3) {
+                                if (consecutiveSpeechFrames >= 2) {
                                     speechDetected = true
                                     speechStartMs = now
                                     lastSpeechMs = now
@@ -456,7 +462,14 @@ class CelliumSttEngine(context: Context) {
                             if (rms >= holdThreshold) {
                                 lastSpeechMs = now
                             }
-                            if (now - lastSpeechMs >= silenceAutoStopMs) {
+                            val spokenSoFarMs = (lastSpeechMs - speechStartMs).coerceAtLeast(0L)
+                            // Short 1-word bursts finish slightly faster once clean silence returns
+                            val effectiveSilenceMs = if (spokenSoFarMs < 750L) {
+                                minOf(silenceAutoStopMs, 1_650L)
+                            } else {
+                                silenceAutoStopMs
+                            }
+                            if (now - lastSpeechMs >= effectiveSilenceMs) {
                                 break
                             }
                         }

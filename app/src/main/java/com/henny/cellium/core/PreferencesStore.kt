@@ -62,10 +62,11 @@ data class CelliumPreferences(
     val onboardingCompleted: Boolean = false,
     val personasSeeded: Boolean = false,
 
-    // Defaults (Pollinations keyless free provider by default so instant testing works)
-    val avatarGender: String = "Female",
+    // Defaults (Pollinations keyless free provider by default so instant testing works; Chibi Cel default)
+    val avatarGender: String = "Chibi",
     val defaultPersonaId: String = "default",
     val activeProviderId: String = "preset_pollinations_free",
+    val settingsAdvancedMode: Boolean = false,
 
     // Theme & Liquid Glass Visuals
     val themePresetId: String = "neon_violet",
@@ -80,6 +81,7 @@ data class CelliumPreferences(
     val fontScale: Float = 1.0f,
     val floatingMiniCel: Boolean = false,
     val floatingTipsShown: Boolean = false,
+    val floatingIdlePeekEnabled: Boolean = true,
     val codeWordWrap: Boolean = true,
 
     // Shizuku, Agent & Tools
@@ -91,6 +93,7 @@ data class CelliumPreferences(
     val agentWorkspacePrompted: Boolean = false,
     val webSearchAutoEnabled: Boolean = false,
     val notificationsEnabled: Boolean = true,
+    val imageGenEnabled: Boolean = true,
 
     // Mood Engine, Retry & Providers UX
     val moodMethod: String = "inline_tag", // "inline_tag" (Method 1 default) or "background_ai" (Method 2)
@@ -117,10 +120,12 @@ data class CelliumPreferences(
     val liveTtsVoiceName: String = "synth:groove_synth",
     val liveTtsPitch: Float = 1.0f, // 0.25f..2.50f
     val liveTtsSpeechRate: Float = 1.04f, // 0.50f..2.20f
-    // Customizable Assistant Start-up Sound (22 presets + custom audio + deletable presets)
+    // Customizable Assistant Start-up Sound (22 presets + custom audio + Shuffle ON/OFF + Exclude pool)
     val startupSoundId: String = "soft_celesta",
     val startupSoundCustomPath: String = "",
     val deletedStartupSoundIds: Set<String> = emptySet(),
+    val startupSoundShuffleEnabled: Boolean = false,
+    val startupSoundExcludedIds: Set<String> = emptySet(),
     val sttEngine: String = "device", // "device", "groq_whisper", "pollinations_audio", "openai_whisper", "huggingface_whisper"
     val sttApiKey: String = "",
     val sttModel: String = "",
@@ -128,8 +133,9 @@ data class CelliumPreferences(
     val liveHandsFreeLoop: Boolean = true,
     val wakeWordEnabled: Boolean = false,
     val wakeWordCustomPath: String = "",
-    val wakeWordSensitivity: Float = 0.25f,
+    val wakeWordSensitivity: Float = 0.25f, // Internal threshold 0.05..0.90 (UI displays intuitive 1.0 - threshold)
     val wakeWordScreenOnOnly: Boolean = true,
+    val wakeWordShizukuHideDot: Boolean = false,
 
     // Locked Chats Vault & Sync Timestamp
     val vaultPinHash: String = "",
@@ -143,15 +149,33 @@ data class CelliumPreferences(
     val arenaModelB: String = "openai-fast",
     val arenaPersonaB: String = "celeste",
 
-    // Multi-Provider Illume Image Studio + Kaggle GPU Notebook (.json)
+    // Multi-Provider Illume Image Studio + Full Kaggle Cloud GPU Pipeline
     val imagineProvider: String = "aihorde",
     val imagineModel: String = "Auto (Fastest)",
     val imagineApiKey: String = "",
     val imagineCustomUrl: String = "",
     val kaggleUsername: String = "",
     val kaggleKey: String = "",
-    val kaggleKernelSlug: String = "cellium-gpu-imagine",
-    val kaggleModelId: String = "stabilityai/sdxl-turbo",
+    val kaggleKernelSlug: String = "cloud-render-w1",
+    val kaggleModelId: String = "lykon/dreamshaper-xl-v2-turbo",
+    val kagglePreset: String = "✨ DreamShaper XL Turbo v2 (fast, public HF)",
+    val kaggleModelMode: String = "huggingface", // "huggingface" | "civitai"
+    val kaggleHfModel: String = "lykon/dreamshaper-xl-v2-turbo",
+    val kaggleCivitaiUrl: String = "",
+    val kaggleLoraUrl: String = "",
+    val kaggleLoraStrength: Float = 0.9f,
+    val kaggleSteps: Int = 8,
+    val kaggleSize: String = "832x1216 (9:16)",
+    val kaggleGuidance: Float = 2.0f,
+    val kaggleNegativePrompt: String = "worst quality, low quality, ugly, blurry, deformed, bad anatomy, watermark, signature",
+    val kaggleAutoClean: Boolean = true,
+    val kaggleEnhancerModel: String = "",
+    val kagglePrompt: String = "",
+    val kaggleStickyPrompt: String = "",
+    val kaggleBatch: Int = 1,
+    val kaggleSeed: Long = -1L,
+    val kaggleDialogMode: String = "simple", // "simple" | "advanced"
+    val kaggleCacheMapJson: String = "{}",
 
     // On-Device Local Model Path & Zero-Copy Mounted Registry
     val localModelPath: String = "",
@@ -229,6 +253,8 @@ class PreferencesStore(context: Context) {
         val STARTUP_SOUND_ID = stringPreferencesKey("startup_sound_id")
         val STARTUP_SOUND_CUSTOM_PATH = stringPreferencesKey("startup_sound_custom_path")
         val DELETED_STARTUP_SOUND_IDS = stringSetPreferencesKey("deleted_startup_sound_ids")
+        val STARTUP_SOUND_SHUFFLE = booleanPreferencesKey("startup_sound_shuffle")
+        val STARTUP_SOUND_EXCLUDED_IDS = stringSetPreferencesKey("startup_sound_excluded_ids")
         val STT_ENGINE = stringPreferencesKey("stt_engine")
         val STT_API_KEY = stringPreferencesKey("stt_api_key")
         val STT_MODEL = stringPreferencesKey("stt_model")
@@ -238,6 +264,10 @@ class PreferencesStore(context: Context) {
         val WAKE_WORD_CUSTOM_PATH = stringPreferencesKey("wake_word_custom_path")
         val WAKE_WORD_SENSITIVITY = floatPreferencesKey("wake_word_sensitivity")
         val WAKE_WORD_SCREEN_ON_ONLY = booleanPreferencesKey("wake_word_screen_on_only")
+        val WAKE_WORD_SHIZUKU_HIDE_DOT = booleanPreferencesKey("wake_word_shizuku_hide_dot")
+        val SETTINGS_ADVANCED_MODE = booleanPreferencesKey("settings_advanced_mode")
+        val FLOATING_IDLE_PEEK_ENABLED = booleanPreferencesKey("floating_idle_peek_enabled")
+        val IMAGE_GEN_ENABLED = booleanPreferencesKey("image_gen_enabled")
         val VAULT_PIN_HASH = stringPreferencesKey("vault_pin_hash")
         val PREFS_UPDATED_AT_MS = longPreferencesKey("prefs_updated_at_ms")
         val FLOATING_TIPS_SHOWN = booleanPreferencesKey("floating_tips_shown")
@@ -255,6 +285,24 @@ class PreferencesStore(context: Context) {
         val KAGGLE_KEY = stringPreferencesKey("kaggle_key")
         val KAGGLE_SLUG = stringPreferencesKey("kaggle_slug")
         val KAGGLE_MODEL = stringPreferencesKey("kaggle_model")
+        val KAGGLE_PRESET = stringPreferencesKey("kaggle_preset")
+        val KAGGLE_MODEL_MODE = stringPreferencesKey("kaggle_model_mode")
+        val KAGGLE_HF_MODEL = stringPreferencesKey("kaggle_hf_model")
+        val KAGGLE_CIVITAI_URL = stringPreferencesKey("kaggle_civitai_url")
+        val KAGGLE_LORA_URL = stringPreferencesKey("kaggle_lora_url")
+        val KAGGLE_LORA_STRENGTH = floatPreferencesKey("kaggle_lora_strength")
+        val KAGGLE_STEPS = intPreferencesKey("kaggle_steps")
+        val KAGGLE_SIZE = stringPreferencesKey("kaggle_size")
+        val KAGGLE_GUIDANCE = floatPreferencesKey("kaggle_guidance")
+        val KAGGLE_NEGATIVE_PROMPT = stringPreferencesKey("kaggle_negative_prompt")
+        val KAGGLE_AUTO_CLEAN = booleanPreferencesKey("kaggle_auto_clean")
+        val KAGGLE_ENHANCER_MODEL = stringPreferencesKey("kaggle_enhancer_model")
+        val KAGGLE_PROMPT = stringPreferencesKey("kaggle_prompt")
+        val KAGGLE_STICKY_PROMPT = stringPreferencesKey("kaggle_sticky_prompt")
+        val KAGGLE_BATCH = intPreferencesKey("kaggle_batch")
+        val KAGGLE_SEED = longPreferencesKey("kaggle_seed")
+        val KAGGLE_DIALOG_MODE = stringPreferencesKey("kaggle_dialog_mode")
+        val KAGGLE_CACHE_MAP_JSON = stringPreferencesKey("kaggle_cache_map_json")
         val LOCAL_MODEL_PATH = stringPreferencesKey("local_model_path")
         val LOCAL_MODEL_NAME = stringPreferencesKey("local_model_name")
         val LOCAL_MAX_TOKENS = intPreferencesKey("local_max_tokens")
@@ -301,9 +349,10 @@ class PreferencesStore(context: Context) {
             guestMode = p[Keys.GUEST_MODE] ?: true,
             onboardingCompleted = p[Keys.ONBOARDING_COMPLETED] ?: false,
             personasSeeded = p[Keys.PERSONAS_SEEDED] ?: false,
-            avatarGender = p[Keys.AVATAR_GENDER] ?: "Female",
+            avatarGender = p[Keys.AVATAR_GENDER] ?: "Chibi",
             defaultPersonaId = p[Keys.DEFAULT_PERSONA] ?: "default",
             activeProviderId = p[Keys.ACTIVE_PROVIDER_ID] ?: "preset_pollinations_free",
+            settingsAdvancedMode = p[Keys.SETTINGS_ADVANCED_MODE] ?: false,
             themePresetId = p[Keys.THEME_PRESET] ?: "neon_violet",
             customPrimaryHex = p[Keys.CUSTOM_PRIMARY_HEX] ?: "#A855F7",
             customWallpaperUri = p[Keys.CUSTOM_WALLPAPER_URI] ?: "",
@@ -316,6 +365,7 @@ class PreferencesStore(context: Context) {
             fontScale = p[Keys.FONT_SCALE] ?: 1.0f,
             floatingMiniCel = p[Keys.FLOATING_MINI_CEL] ?: false,
             floatingTipsShown = p[Keys.FLOATING_TIPS_SHOWN] ?: false,
+            floatingIdlePeekEnabled = p[Keys.FLOATING_IDLE_PEEK_ENABLED] ?: true,
             codeWordWrap = p[Keys.CODE_WORD_WRAP] ?: true,
             shizukuAutoGuard = p[Keys.SHIZUKU_AUTO_GUARD] ?: true,
             ramGuardThresholdMb = p[Keys.RAM_GUARD_THRESHOLD_MB] ?: 1536,
@@ -325,6 +375,7 @@ class PreferencesStore(context: Context) {
             agentWorkspacePrompted = p[Keys.AGENT_WORKSPACE_PROMPTED] ?: false,
             webSearchAutoEnabled = p[Keys.WEB_SEARCH_AUTO] ?: false,
             notificationsEnabled = p[Keys.NOTIFICATIONS_ENABLED] ?: true,
+            imageGenEnabled = p[Keys.IMAGE_GEN_ENABLED] ?: true,
             moodMethod = p[Keys.MOOD_METHOD] ?: "inline_tag",
             maxAutoRetries = (p[Keys.MAX_AUTO_RETRIES] ?: 10).coerceIn(0, 15),
             hiddenProviderIds = p[Keys.HIDDEN_PROVIDER_IDS] ?: emptySet(),
@@ -348,6 +399,8 @@ class PreferencesStore(context: Context) {
             startupSoundId = p[Keys.STARTUP_SOUND_ID] ?: "soft_celesta",
             startupSoundCustomPath = p[Keys.STARTUP_SOUND_CUSTOM_PATH] ?: "",
             deletedStartupSoundIds = p[Keys.DELETED_STARTUP_SOUND_IDS] ?: emptySet(),
+            startupSoundShuffleEnabled = p[Keys.STARTUP_SOUND_SHUFFLE] ?: false,
+            startupSoundExcludedIds = p[Keys.STARTUP_SOUND_EXCLUDED_IDS] ?: emptySet(),
             sttEngine = p[Keys.STT_ENGINE] ?: "device",
             sttApiKey = p[Keys.STT_API_KEY] ?: "",
             sttModel = p[Keys.STT_MODEL] ?: "",
@@ -357,6 +410,7 @@ class PreferencesStore(context: Context) {
             wakeWordCustomPath = p[Keys.WAKE_WORD_CUSTOM_PATH] ?: "",
             wakeWordSensitivity = (p[Keys.WAKE_WORD_SENSITIVITY] ?: 0.25f).coerceIn(0.05f, 0.90f),
             wakeWordScreenOnOnly = p[Keys.WAKE_WORD_SCREEN_ON_ONLY] ?: true,
+            wakeWordShizukuHideDot = p[Keys.WAKE_WORD_SHIZUKU_HIDE_DOT] ?: false,
             vaultPinHash = p[Keys.VAULT_PIN_HASH] ?: "",
             prefsUpdatedAtMs = p[Keys.PREFS_UPDATED_AT_MS] ?: 0L,
             arenaProviderA = p[Keys.ARENA_PROVIDER_A] ?: "preset_pollinations_free",
@@ -371,8 +425,27 @@ class PreferencesStore(context: Context) {
             imagineCustomUrl = p[Keys.IMAGINE_CUSTOM_URL] ?: "",
             kaggleUsername = p[Keys.KAGGLE_USERNAME] ?: "",
             kaggleKey = p[Keys.KAGGLE_KEY] ?: "",
-            kaggleKernelSlug = p[Keys.KAGGLE_SLUG] ?: "cellium-gpu-imagine",
-            kaggleModelId = p[Keys.KAGGLE_MODEL] ?: "stabilityai/sdxl-turbo",
+            kaggleKernelSlug = p[Keys.KAGGLE_SLUG] ?: "cloud-render-w1",
+            kaggleModelId = p[Keys.KAGGLE_MODEL] ?: "lykon/dreamshaper-xl-v2-turbo",
+            kagglePreset = p[Keys.KAGGLE_PRESET] ?: "✨ DreamShaper XL Turbo v2 (fast, public HF)",
+            kaggleModelMode = p[Keys.KAGGLE_MODEL_MODE] ?: "huggingface",
+            kaggleHfModel = p[Keys.KAGGLE_HF_MODEL] ?: "lykon/dreamshaper-xl-v2-turbo",
+            kaggleCivitaiUrl = p[Keys.KAGGLE_CIVITAI_URL] ?: "",
+            kaggleLoraUrl = p[Keys.KAGGLE_LORA_URL] ?: "",
+            kaggleLoraStrength = (p[Keys.KAGGLE_LORA_STRENGTH] ?: 0.9f).coerceIn(0.1f, 2.0f),
+            kaggleSteps = (p[Keys.KAGGLE_STEPS] ?: 8).coerceIn(1, 100),
+            kaggleSize = p[Keys.KAGGLE_SIZE] ?: "832x1216 (9:16)",
+            kaggleGuidance = (p[Keys.KAGGLE_GUIDANCE] ?: 2.0f).coerceIn(0f, 20f),
+            kaggleNegativePrompt = p[Keys.KAGGLE_NEGATIVE_PROMPT]
+                ?: "worst quality, low quality, ugly, blurry, deformed, bad anatomy, watermark, signature",
+            kaggleAutoClean = p[Keys.KAGGLE_AUTO_CLEAN] ?: true,
+            kaggleEnhancerModel = p[Keys.KAGGLE_ENHANCER_MODEL] ?: "",
+            kagglePrompt = p[Keys.KAGGLE_PROMPT] ?: "",
+            kaggleStickyPrompt = p[Keys.KAGGLE_STICKY_PROMPT] ?: "",
+            kaggleBatch = (p[Keys.KAGGLE_BATCH] ?: 1).coerceIn(1, 20),
+            kaggleSeed = p[Keys.KAGGLE_SEED] ?: -1L,
+            kaggleDialogMode = p[Keys.KAGGLE_DIALOG_MODE] ?: "simple",
+            kaggleCacheMapJson = p[Keys.KAGGLE_CACHE_MAP_JSON] ?: "{}",
             localModelPath = p[Keys.LOCAL_MODEL_PATH] ?: "",
             localModelName = p[Keys.LOCAL_MODEL_NAME] ?: "",
             localMaxTokens = p[Keys.LOCAL_MAX_TOKENS] ?: 512,
@@ -575,13 +648,24 @@ class PreferencesStore(context: Context) {
         customPath: String? = null,
         sensitivity: Float? = null,
         screenOnOnly: Boolean? = null,
+        shizukuHideDot: Boolean? = null,
     ) {
         dataStore.edit {
             it[Keys.WAKE_WORD_ENABLED] = enabled
             if (customPath != null) it[Keys.WAKE_WORD_CUSTOM_PATH] = customPath
             if (sensitivity != null) it[Keys.WAKE_WORD_SENSITIVITY] = sensitivity.coerceIn(0.05f, 0.90f)
             if (screenOnOnly != null) it[Keys.WAKE_WORD_SCREEN_ON_ONLY] = screenOnOnly
+            if (shizukuHideDot != null) it[Keys.WAKE_WORD_SHIZUKU_HIDE_DOT] = shizukuHideDot
         }
+    }
+    suspend fun updateSettingsAdvancedMode(advanced: Boolean) {
+        dataStore.edit { it[Keys.SETTINGS_ADVANCED_MODE] = advanced }
+    }
+    suspend fun updateFloatingIdlePeekEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.FLOATING_IDLE_PEEK_ENABLED] = enabled }
+    }
+    suspend fun updateImageGenEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.IMAGE_GEN_ENABLED] = enabled }
     }
     suspend fun updateVoiceSettings(
         voice: String,
@@ -627,6 +711,13 @@ class PreferencesStore(context: Context) {
             it[Keys.DELETED_STARTUP_SOUND_IDS] = deletedIds
         }
     }
+    suspend fun updateStartupSoundShuffle(enabled: Boolean, excludedIds: Set<String>? = null) {
+        dataStore.edit {
+            it[Keys.STARTUP_SOUND_SHUFFLE] = enabled
+            if (excludedIds != null) it[Keys.STARTUP_SOUND_EXCLUDED_IDS] = excludedIds
+            it[Keys.PREFS_UPDATED_AT_MS] = System.currentTimeMillis()
+        }
+    }
     suspend fun updateSttSettings(engine: String, apiKey: String? = null, model: String? = null) {
         dataStore.edit {
             it[Keys.STT_ENGINE] = engine
@@ -667,8 +758,49 @@ class PreferencesStore(context: Context) {
         dataStore.edit {
             it[Keys.KAGGLE_USERNAME] = username.trim()
             it[Keys.KAGGLE_KEY] = key.trim()
-            it[Keys.KAGGLE_SLUG] = slug.trim().ifBlank { "cellium-gpu-imagine" }
-            it[Keys.KAGGLE_MODEL] = modelId.trim().ifBlank { "stabilityai/sdxl-turbo" }
+            it[Keys.KAGGLE_SLUG] = slug.trim().ifBlank { "cloud-render-w1" }
+            it[Keys.KAGGLE_MODEL] = modelId.trim().ifBlank { "lykon/dreamshaper-xl-v2-turbo" }
+        }
+    }
+    suspend fun updateKaggleFullSettings(
+        preset: String? = null,
+        modelMode: String? = null,
+        hfModel: String? = null,
+        civitaiUrl: String? = null,
+        loraUrl: String? = null,
+        loraStrength: Float? = null,
+        steps: Int? = null,
+        size: String? = null,
+        guidance: Float? = null,
+        negativePrompt: String? = null,
+        autoClean: Boolean? = null,
+        enhancerModel: String? = null,
+        prompt: String? = null,
+        stickyPrompt: String? = null,
+        batch: Int? = null,
+        seed: Long? = null,
+        dialogMode: String? = null,
+        cacheMapJson: String? = null,
+    ) {
+        dataStore.edit {
+            if (preset != null) it[Keys.KAGGLE_PRESET] = preset
+            if (modelMode != null) it[Keys.KAGGLE_MODEL_MODE] = modelMode
+            if (hfModel != null) it[Keys.KAGGLE_HF_MODEL] = hfModel.trim()
+            if (civitaiUrl != null) it[Keys.KAGGLE_CIVITAI_URL] = civitaiUrl.trim()
+            if (loraUrl != null) it[Keys.KAGGLE_LORA_URL] = loraUrl.trim()
+            if (loraStrength != null) it[Keys.KAGGLE_LORA_STRENGTH] = loraStrength.coerceIn(0.1f, 2.0f)
+            if (steps != null) it[Keys.KAGGLE_STEPS] = steps.coerceIn(1, 100)
+            if (size != null) it[Keys.KAGGLE_SIZE] = size
+            if (guidance != null) it[Keys.KAGGLE_GUIDANCE] = guidance.coerceIn(0f, 20f)
+            if (negativePrompt != null) it[Keys.KAGGLE_NEGATIVE_PROMPT] = negativePrompt
+            if (autoClean != null) it[Keys.KAGGLE_AUTO_CLEAN] = autoClean
+            if (enhancerModel != null) it[Keys.KAGGLE_ENHANCER_MODEL] = enhancerModel
+            if (prompt != null) it[Keys.KAGGLE_PROMPT] = prompt
+            if (stickyPrompt != null) it[Keys.KAGGLE_STICKY_PROMPT] = stickyPrompt
+            if (batch != null) it[Keys.KAGGLE_BATCH] = batch.coerceIn(1, 20)
+            if (seed != null) it[Keys.KAGGLE_SEED] = seed
+            if (dialogMode != null) it[Keys.KAGGLE_DIALOG_MODE] = dialogMode
+            if (cacheMapJson != null) it[Keys.KAGGLE_CACHE_MAP_JSON] = cacheMapJson
         }
     }
     suspend fun updateLocalModel(path: String, name: String, maxTokens: Int, useGpu: Boolean) {

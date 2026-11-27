@@ -313,8 +313,6 @@ fun DotMatrixAvatarCanvas(
                             p.alpha = 255f
                         }
                         AvatarKind.BLUSH, AvatarKind.PERM_BLUSH -> {
-                            ty -= effBlink * 0.075f
-                            tx += (if (p.left) 1f else -1f) * (effBlink * 0.025f)
                             p.alpha = 255f
                         }
                         else -> p.alpha = 255f

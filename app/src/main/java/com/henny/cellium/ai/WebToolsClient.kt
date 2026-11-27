@@ -15,6 +15,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
@@ -34,6 +35,10 @@ data class WebImageResult(
  * Built-in keyless Web Search (/web & autonomous [WEB_SEARCH]), URL Reader (/url),
  * and Free Keyless Web/Stock Image Search ([WEB_IMAGE] via Wikimedia Commons API)
  * for Cel.Cellium. Zero API keys required.
+ *
+ * Uses a multi-tier keyless waterfall (Bing Web RSS -> Google News RSS -> DuckDuckGo HTML/Lite
+ * -> Wikipedia last resort) so live patch numbers, news, and current facts return reliably
+ * without DDG CAPTCHA failures collapsing into generic encyclopedia intros.
  */
 class WebToolsClient {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -43,56 +48,190 @@ class WebToolsClient {
         .followRedirects(true)
         .build()
 
-    suspend fun searchWeb(query: String, maxResults: Int = 5): Result<List<WebSearchResult>> = withContext(Dispatchers.IO) {
+    private val freshQueryHints = listOf(
+        "latest", "current", "news", "today", "2025", "2026", "version", "release",
+        "patch", "update", "price", "score", "weather", "debut", "announced", "new",
+    )
+
+    suspend fun searchWeb(query: String, maxResults: Int = 6): Result<List<WebSearchResult>> = withContext(Dispatchers.IO) {
         val cleanQuery = query.trim()
-        if (cleanQuery.isBlank()) return@withContext Result.failure(IllegalArgumentException("Search query is empty."))
-        val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
-        val url = "https://lite.duckduckgo.com/lite/?q=$encoded"
-        val req = Request.Builder()
-            .url(url)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36")
-            .get()
-            .build()
-        val ddgRes = runCatching {
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) throw IllegalStateException("Search HTTP ${resp.code}")
-                val html = resp.body?.string().orEmpty()
-                val linkRegex = Regex(
-                    """<a[^>]*class=['"]result-link['"][^>]*href=['"]([^'"]+)['"][^>]*>([\s\S]*?)</a>""",
-                    RegexOption.IGNORE_CASE,
-                )
-                val snippetRegex = Regex(
-                    """<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)</td>""",
-                    RegexOption.IGNORE_CASE,
-                )
-                val links = linkRegex.findAll(html).toList()
-                val snippets = snippetRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.toList()
-                links.take(maxResults).mapIndexed { idx, match ->
-                    WebSearchResult(
-                        title = stripHtml(match.groupValues[2]).ifBlank { "Result ${idx + 1}" },
-                        url = match.groupValues[1].trim(),
-                        snippet = snippets.getOrNull(idx).orEmpty(),
-                    )
-                }
-            }
-        }
-        val ddgList = ddgRes.getOrNull().orEmpty()
-        if (ddgList.isNotEmpty()) {
-            DevLogBuffer.add("INFO", "WebTools", "Search '$cleanQuery' -> ${ddgList.size} results")
-            return@withContext Result.success(ddgList)
+        if (cleanQuery.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Search query is empty."))
         }
 
-        // Keyless Wikipedia Search API fallback when DDG Lite rate-limits or returns 0 hits
+        val combined = LinkedHashMap<String, WebSearchResult>()
+        val lowQ = cleanQuery.lowercase()
+        val wantsFresh = freshQueryHints.any { it in lowQ }
+
+        // Tier 1: Bing Web RSS (live web index, keyless, XML, never CAPTCHAs mobile clients)
+        val bingHits = searchBingWebRss(cleanQuery, maxResults)
+        bingHits.forEach { hit -> combined.putIfAbsent(hit.url, hit) }
+
+        // Tier 2: Google News RSS (injected for fresh/current/news/version queries, or when Bing is sparse)
+        if (wantsFresh || combined.size < 3) {
+            val newsHits = searchGoogleNewsRss(cleanQuery, if (wantsFresh) 4 else maxResults)
+            newsHits.forEach { hit -> combined.putIfAbsent(hit.url, hit) }
+        }
+
+        // Tier 3: DuckDuckGo HTML & Lite (fallback when Bing/News returned too few hits)
+        if (combined.size < 3) {
+            val ddgHtml = searchDuckDuckGoHtml(cleanQuery, maxResults)
+            ddgHtml.forEach { hit -> combined.putIfAbsent(hit.url, hit) }
+        }
+        if (combined.size < 2) {
+            val ddgLite = searchDuckDuckGoLite(cleanQuery, maxResults)
+            ddgLite.forEach { hit -> combined.putIfAbsent(hit.url, hit) }
+        }
+
+        if (combined.isNotEmpty()) {
+            val results = combined.values.take(maxResults)
+            DevLogBuffer.add("INFO", "WebTools", "Live search '$cleanQuery' -> ${results.size} results (bing=${bingHits.size})")
+            return@withContext Result.success(results)
+        }
+
+        // Tier 4: Wikipedia API strictly as last resort when live web search yielded zero results
         val wikiRes = searchWikipediaFallback(cleanQuery, maxResults)
         if (wikiRes.isNotEmpty()) {
-            DevLogBuffer.add("INFO", "WebTools", "Wikipedia fallback '$cleanQuery' -> ${wikiRes.size} results")
+            DevLogBuffer.add("WARN", "WebTools", "Live web empty for '$cleanQuery'; Wikipedia last-resort -> ${wikiRes.size}")
             return@withContext Result.success(wikiRes)
         }
 
-        ddgRes.onFailure { err ->
-            DevLogBuffer.add("ERROR", "WebTools", "Search failed: ${err.localizedMessage}")
+        DevLogBuffer.add("ERROR", "WebTools", "All search tiers returned 0 hits for '$cleanQuery'")
+        Result.success(emptyList())
+    }
+
+    private fun searchBingWebRss(query: String, maxResults: Int): List<WebSearchResult> = runCatching {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val url = "https://www.bing.com/search?q=$encoded&format=rss&count=${(maxResults + 2).coerceAtMost(10)}"
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+            .header("Accept", "application/rss+xml, application/xml, text/xml, */*")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .get()
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return@runCatching emptyList()
+            val xml = resp.body?.string().orEmpty()
+            parseRssItems(xml, maxResults)
         }
-        if (ddgRes.isSuccess) Result.success(emptyList()) else ddgRes
+    }.getOrDefault(emptyList())
+
+    private fun searchGoogleNewsRss(query: String, maxResults: Int): List<WebSearchResult> = runCatching {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val url = "https://news.google.com/rss/search?q=$encoded&hl=en-US&gl=US&ceid=US:en"
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36")
+            .header("Accept", "application/rss+xml, application/xml, text/xml")
+            .get()
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return@runCatching emptyList()
+            val xml = resp.body?.string().orEmpty()
+            parseRssItems(xml, maxResults, tagPrefix = "[News] ")
+        }
+    }.getOrDefault(emptyList())
+
+    private fun parseRssItems(xml: String, maxResults: Int, tagPrefix: String = ""): List<WebSearchResult> {
+        val itemRegex = Regex("""<item\b[^>]*>([\s\S]*?)</item>""", RegexOption.IGNORE_CASE)
+        val results = mutableListOf<WebSearchResult>()
+        for (match in itemRegex.findAll(xml)) {
+            if (results.size >= maxResults) break
+            val block = match.groupValues[1]
+            val title = extractXmlTag(block, "title").let { stripHtml(it) }
+            val link = extractXmlTag(block, "link").trim()
+            val desc = extractXmlTag(block, "description").let { stripHtml(it) }
+            val pubDate = extractXmlTag(block, "pubDate").trim()
+            if (title.isBlank() || link.isBlank()) continue
+            val snippet = buildString {
+                if (tagPrefix.isNotEmpty()) append(tagPrefix)
+                if (pubDate.isNotBlank()) append("($pubDate) ")
+                append(desc.ifBlank { title })
+            }.trim()
+            results.add(WebSearchResult(title = title, url = link, snippet = snippet.take(360)))
+        }
+        return results
+    }
+
+    private fun extractXmlTag(block: String, tag: String): String {
+        val rx = Regex("""<$tag\b[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:]]>)?</$tag>""", RegexOption.IGNORE_CASE)
+        return rx.find(block)?.groupValues?.get(1)?.trim().orEmpty()
+    }
+
+    private fun searchDuckDuckGoHtml(query: String, maxResults: Int): List<WebSearchResult> = runCatching {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val url = "https://html.duckduckgo.com/html/?q=$encoded"
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .get()
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return@runCatching emptyList()
+            val html = resp.body?.string().orEmpty()
+            val linkRegex = Regex(
+                """<a[^>]*class=['"][^'"]*result__a[^'"]*['"][^>]*href=['"]([^'"]+)['"][^>]*>([\s\S]*?)</a>""",
+                RegexOption.IGNORE_CASE,
+            )
+            val snippetRegex = Regex(
+                """<(?:a|div)[^>]*class=['"][^'"]*result__snippet[^'"]*['"][^>]*>([\s\S]*?)</(?:a|div)>""",
+                RegexOption.IGNORE_CASE,
+            )
+            val links = linkRegex.findAll(html).toList()
+            val snippets = snippetRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.toList()
+            links.take(maxResults).mapIndexedNotNull { idx, match ->
+                val rawHref = match.groupValues[1].trim()
+                val realUrl = unwrapDdgRedirect(rawHref)
+                val title = stripHtml(match.groupValues[2])
+                if (title.isBlank() || realUrl.isBlank()) null
+                else WebSearchResult(
+                    title = title,
+                    url = realUrl,
+                    snippet = snippets.getOrNull(idx).orEmpty(),
+                )
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    private fun searchDuckDuckGoLite(query: String, maxResults: Int): List<WebSearchResult> = runCatching {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val url = "https://lite.duckduckgo.com/lite/?q=$encoded"
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36")
+            .get()
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return@runCatching emptyList()
+            val html = resp.body?.string().orEmpty()
+            val linkRegex = Regex(
+                """<a[^>]*class=['"]result-link['"][^>]*href=['"]([^'"]+)['"][^>]*>([\s\S]*?)</a>""",
+                RegexOption.IGNORE_CASE,
+            )
+            val snippetRegex = Regex(
+                """<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)</td>""",
+                RegexOption.IGNORE_CASE,
+            )
+            val links = linkRegex.findAll(html).toList()
+            val snippets = snippetRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.toList()
+            links.take(maxResults).mapIndexed { idx, match ->
+                WebSearchResult(
+                    title = stripHtml(match.groupValues[2]).ifBlank { "Result ${idx + 1}" },
+                    url = unwrapDdgRedirect(match.groupValues[1].trim()),
+                    snippet = snippets.getOrNull(idx).orEmpty(),
+                )
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    private fun unwrapDdgRedirect(rawUrl: String): String {
+        val match = Regex("""[?&]uddg=([^&]+)""").find(rawUrl)
+        if (match != null) {
+            return runCatching { URLDecoder.decode(match.groupValues[1], "UTF-8") }.getOrDefault(rawUrl)
+        }
+        return if (rawUrl.startsWith("//")) "https:$rawUrl" else rawUrl
     }
 
     private fun searchWikipediaFallback(query: String, maxResults: Int): List<WebSearchResult> = runCatching {
@@ -100,7 +239,7 @@ class WebToolsClient {
         val url = "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encoded&srlimit=$maxResults&format=json"
         val req = Request.Builder()
             .url(url)
-            .header("User-Agent", "Cel.Cellium-Android/2611.25.0 (https://github.com/HenryJayZ)")
+            .header("User-Agent", "Cel.Cellium-Android/2611.27.0 (https://github.com/HenryJayZ)")
             .get()
             .build()
         client.newCall(req).execute().use { resp ->
@@ -114,7 +253,11 @@ class WebToolsClient {
                 if (title.isBlank()) return@mapNotNull null
                 val snippet = stripHtml(obj["snippet"]?.jsonPrimitive?.contentOrNull.orEmpty())
                 val wikiUrl = "https://en.wikipedia.org/wiki/" + URLEncoder.encode(title.replace(" ", "_"), "UTF-8")
-                WebSearchResult(title = title, url = wikiUrl, snippet = snippet)
+                WebSearchResult(
+                    title = title,
+                    url = wikiUrl,
+                    snippet = "[Wikipedia fallback] $snippet",
+                )
             }
         }
     }.getOrDefault(emptyList())
@@ -134,7 +277,7 @@ class WebToolsClient {
                 "&prop=imageinfo&iiprop=url|mime&iiurlwidth=960&format=json"
             val req = Request.Builder()
                 .url(apiUrl)
-                .header("User-Agent", "Cel.Cellium-Android/2611.25.0 (https://github.com/HenryJayZ)")
+                .header("User-Agent", "Cel.Cellium-Android/2611.27.0 (https://github.com/HenryJayZ)")
                 .get()
                 .build()
             val hits = mutableListOf<WebImageResult>()
@@ -165,7 +308,7 @@ class WebToolsClient {
     }
 
     /**
-     * Downloads a remote web image URL to a local file as clean PNG/JPEG so it displays offline
+     * Downloads a remote web image URL to a local file as clean JPEG so it displays offline
      * and supports fullscreen zoom + Save to Downloads/Cellium.
      */
     suspend fun downloadImageToFile(imageUrl: String, destDir: File, filePrefix: String = "web_img"): Result<File> =
@@ -174,7 +317,7 @@ class WebToolsClient {
                 destDir.mkdirs()
                 val req = Request.Builder()
                     .url(imageUrl)
-                    .header("User-Agent", "Cel.Cellium-Android/2611.25.0 (https://github.com/HenryJayZ)")
+                    .header("User-Agent", "Cel.Cellium-Android/2611.27.0 (https://github.com/HenryJayZ)")
                     .get()
                     .build()
                 val bytes = client.newCall(req).execute().use { resp ->
@@ -198,7 +341,7 @@ class WebToolsClient {
         }
         val req = Request.Builder()
             .url(normalized)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36")
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36")
             .get()
             .build()
         runCatching {
@@ -225,6 +368,7 @@ class WebToolsClient {
             .replace("&gt;", ">")
             .replace("&quot;", "\"")
             .replace("&#39;", "'")
+            .replace("&apos;", "'")
             .replace("&nbsp;", " ")
             .replace(Regex("\\s+"), " ")
             .trim()

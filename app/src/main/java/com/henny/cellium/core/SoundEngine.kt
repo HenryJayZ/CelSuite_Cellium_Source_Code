@@ -87,6 +87,10 @@ class CelliumSoundEngine(context: Context) {
     @Volatile var masterVolume: Float = 0.80f
     @Volatile var startupSoundId: String = "soft_celesta"
     @Volatile var startupSoundCustomPath: String = ""
+    @Volatile var startupSoundShuffleEnabled: Boolean = false
+    @Volatile var startupSoundExcludedIds: Set<String> = emptySet()
+    @Volatile var deletedStartupSoundIds: Set<String> = emptySet()
+    @Volatile private var lastShuffledStartupId: String = ""
 
     @Volatile private var lastChirpMs: Long = 0L
 
@@ -440,8 +444,26 @@ class CelliumSoundEngine(context: Context) {
     ) {
         hapticDoubleClick()
         if (!enabled) return
-        val soundId = (overrideSoundId ?: startupSoundId).ifBlank { "soft_celesta" }
         val customPath = (overrideCustomPath ?: startupSoundCustomPath).trim()
+        val soundId = when {
+            !overrideSoundId.isNullOrBlank() -> overrideSoundId
+            startupSoundShuffleEnabled -> {
+                val excluded = startupSoundExcludedIds + deletedStartupSoundIds
+                val pool = STARTUP_SOUND_PRESETS.map { it.id }.filter { it !in excluded }.toMutableList()
+                if (customPath.isNotBlank() && File(customPath).exists() && "custom" !in excluded) {
+                    pool.add("custom")
+                }
+                if (pool.isEmpty()) {
+                    startupSoundId.ifBlank { "soft_celesta" }
+                } else {
+                    val candidates = if (pool.size > 1) pool.filter { it != lastShuffledStartupId } else pool
+                    val picked = candidates[Random.nextInt(candidates.size)]
+                    lastShuffledStartupId = picked
+                    picked
+                }
+            }
+            else -> startupSoundId.ifBlank { "soft_celesta" }
+        }
         val vol = (0.68f * masterVolume).coerceIn(0f, 0.85f)
         if (vol <= 0.01f) return
 

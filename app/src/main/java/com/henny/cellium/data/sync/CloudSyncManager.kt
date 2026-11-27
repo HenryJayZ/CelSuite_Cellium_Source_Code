@@ -20,6 +20,9 @@ import com.henny.cellium.data.local.PromptTemplateEntity
 import com.henny.cellium.data.local.ProviderProfileEntity
 import com.henny.cellium.data.local.SessionEntity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
@@ -39,6 +42,7 @@ data class SyncReport(
     val usedBytes: Long = 0L,
     val quotaBytes: Long = CloudSyncManager.USER_QUOTA_BYTES,
     val message: String = "",
+    val storageSummary: CloudStorageSummary? = null,
 )
 
 data class CloudStorageItem(
@@ -115,74 +119,105 @@ class CloudSyncManager(
         }.getOrDefault(false)
     }
 
+    private suspend fun getDocWithFallback(ref: com.google.firebase.firestore.DocumentReference) =
+        runCatching { ref.get(Source.SERVER).await() }.getOrElse { ref.get(Source.DEFAULT).await() }
+
+    private suspend fun getColWithFallback(ref: com.google.firebase.firestore.CollectionReference) =
+        runCatching { ref.get(Source.SERVER).await() }.getOrElse { ref.get(Source.DEFAULT).await() }
+
     suspend fun inspectCloudStorage(): Result<CloudStorageSummary> = withContext(Dispatchers.IO) {
         val user = Firebase.auth.currentUser
             ?: return@withContext Result.failure(IllegalStateException("Sign in with Google first to inspect cloud storage."))
         val userDoc = db.collection("users").document(user.uid)
         runCatching {
-            user.getIdToken(false).await()
+            runCatching { user.getIdToken(false).await() }
             val items = mutableListOf<CloudStorageItem>()
             var totalBytes = 0L
 
-            val accDoc = userDoc.collection("account").document("profile_state").get(Source.SERVER).await()
-            if (accDoc.exists()) {
-                val sz = estimateDocBytes(accDoc.data)
-                totalBytes += sz
-                items.add(CloudStorageItem("account", "profile_state", "Preferences, Stars & Stats", "Theme, voice, starred models, usage stats", sz))
-            }
+            // Each collection is isolated so one flaky read/timeout never collapses the whole manager to 0.0 KB
+            runCatching {
+                val accDoc = getDocWithFallback(userDoc.collection("account").document("profile_state"))
+                if (accDoc.exists()) {
+                    val sz = estimateDocBytes(accDoc.data)
+                    totalBytes += sz
+                    items.add(CloudStorageItem("account", "profile_state", "Preferences, Stars & Stats", "Theme, voice, starred models, usage stats", sz))
+                }
+            }.onFailure { DevLogBuffer.add("WARN", "CloudStorage", "Account read skipped: ${it.localizedMessage}") }
 
-            val provSnap = userDoc.collection("providers").get(Source.SERVER).await()
-            for (d in provSnap.documents) {
-                val sz = estimateDocBytes(d.data)
-                totalBytes += sz
-                items.add(
-                    CloudStorageItem(
-                        collection = "providers",
-                        docId = d.id,
-                        title = "Provider: ${d.getString("name") ?: d.id}",
-                        subtitle = d.getString("selectedModel").orEmpty().ifBlank { "Saved API profile" },
-                        sizeBytes = sz,
+            runCatching {
+                val provSnap = getColWithFallback(userDoc.collection("providers"))
+                for (d in provSnap.documents) {
+                    val sz = estimateDocBytes(d.data)
+                    totalBytes += sz
+                    items.add(
+                        CloudStorageItem(
+                            collection = "providers",
+                            docId = d.id,
+                            title = "Provider: ${d.getString("name") ?: d.id}",
+                            subtitle = d.getString("selectedModel").orEmpty().ifBlank { "Saved API profile" },
+                            sizeBytes = sz,
+                        )
                     )
-                )
-            }
+                }
+            }.onFailure { DevLogBuffer.add("WARN", "CloudStorage", "Providers read skipped: ${it.localizedMessage}") }
 
-            val sessSnap = userDoc.collection("sessions").get(Source.SERVER).await()
-            for (d in sessSnap.documents) {
-                var sz = estimateDocBytes(d.data)
-                val msgs = userDoc.collection("sessions").document(d.id).collection("messages").get(Source.SERVER).await()
-                msgs.documents.forEach { m -> sz += estimateDocBytes(m.data) }
-                totalBytes += sz
-                items.add(
-                    CloudStorageItem(
-                        collection = "sessions",
-                        docId = d.id,
-                        title = "Chat: ${d.getString("title") ?: "Untitled"}",
-                        subtitle = "${msgs.size()} messages",
-                        sizeBytes = sz,
-                    )
-                )
-            }
+            runCatching {
+                val sessSnap = getColWithFallback(userDoc.collection("sessions"))
+                val sessItems = coroutineScope {
+                    sessSnap.documents.chunked(8).flatMap { chunk ->
+                        chunk.map { d ->
+                            async {
+                                var sz = estimateDocBytes(d.data)
+                                val msgCount = runCatching {
+                                    val msgs = getColWithFallback(userDoc.collection("sessions").document(d.id).collection("messages"))
+                                    msgs.documents.forEach { m -> sz += estimateDocBytes(m.data) }
+                                    msgs.size()
+                                }.getOrElse {
+                                    (d.getLong("messageCount") ?: 0L).toInt()
+                                }
+                                CloudStorageItem(
+                                    collection = "sessions",
+                                    docId = d.id,
+                                    title = "Chat: ${d.getString("title") ?: "Untitled"}",
+                                    subtitle = "$msgCount messages",
+                                    sizeBytes = sz,
+                                )
+                            }
+                        }.awaitAll()
+                    }
+                }
+                sessItems.forEach { item ->
+                    totalBytes += item.sizeBytes
+                    items.add(item)
+                }
+            }.onFailure { DevLogBuffer.add("WARN", "CloudStorage", "Sessions read skipped: ${it.localizedMessage}") }
 
-            val perSnap = userDoc.collection("personas").get(Source.SERVER).await()
-            for (d in perSnap.documents) {
-                val sz = estimateDocBytes(d.data)
-                totalBytes += sz
-                items.add(CloudStorageItem("personas", d.id, "Persona: ${d.getString("name") ?: d.id}", d.getString("tagline").orEmpty(), sz))
-            }
+            runCatching {
+                val perSnap = getColWithFallback(userDoc.collection("personas"))
+                for (d in perSnap.documents) {
+                    val sz = estimateDocBytes(d.data)
+                    totalBytes += sz
+                    items.add(CloudStorageItem("personas", d.id, "Persona: ${d.getString("name") ?: d.id}", d.getString("tagline").orEmpty(), sz))
+                }
+            }.onFailure { DevLogBuffer.add("WARN", "CloudStorage", "Personas read skipped: ${it.localizedMessage}") }
 
-            val memSnap = userDoc.collection("memories").get(Source.SERVER).await()
-            for (d in memSnap.documents) {
-                val sz = estimateDocBytes(d.data)
-                totalBytes += sz
-                items.add(CloudStorageItem("memories", d.id, "Memory: ${d.getString("title") ?: d.id}", d.getString("content").orEmpty().take(60), sz))
-            }
+            runCatching {
+                val memSnap = getColWithFallback(userDoc.collection("memories"))
+                for (d in memSnap.documents) {
+                    val sz = estimateDocBytes(d.data)
+                    totalBytes += sz
+                    items.add(CloudStorageItem("memories", d.id, "Memory: ${d.getString("title") ?: d.id}", d.getString("content").orEmpty().take(60), sz))
+                }
+            }.onFailure { DevLogBuffer.add("WARN", "CloudStorage", "Memories read skipped: ${it.localizedMessage}") }
 
-            val tplSnap = userDoc.collection("templates").get(Source.SERVER).await()
-            for (d in tplSnap.documents) {
-                val sz = estimateDocBytes(d.data)
-                totalBytes += sz
-                items.add(CloudStorageItem("templates", d.id, "Command: ${d.getString("slashKey") ?: d.id}", d.getString("title").orEmpty(), sz))
-            }
+            runCatching {
+                val tplSnap = getColWithFallback(userDoc.collection("templates"))
+                for (d in tplSnap.documents) {
+                    val sz = estimateDocBytes(d.data)
+                    totalBytes += sz
+                    items.add(CloudStorageItem("templates", d.id, "Command: ${d.getString("slashKey") ?: d.id}", d.getString("title").orEmpty(), sz))
+                }
+            }.onFailure { DevLogBuffer.add("WARN", "CloudStorage", "Templates read skipped: ${it.localizedMessage}") }
 
             CloudStorageSummary(
                 usedBytes = totalBytes,
@@ -768,17 +803,32 @@ class CloudSyncManager(
                 }
             }
 
-            // Compute REAL live cloud totals after sync so UI never misleadingly prints "0 everything"
-            val storageSummary = inspectCloudStorage().getOrNull()
-            val totalCloudBytes = storageSummary?.usedBytes ?: (USER_QUOTA_BYTES - byteBudgetRemaining).coerceIn(0L, USER_QUOTA_BYTES)
-            val totalCloudChats = storageSummary?.items?.count { it.collection == "sessions" }
+            // Compute REAL live cloud totals after sync so UI never misleadingly prints "0.0 KB"
+            val inspected = inspectCloudStorage().getOrNull()
+            val totalCloudBytes = inspected?.usedBytes?.takeIf { it > 0L }
+                ?: (USER_QUOTA_BYTES - byteBudgetRemaining).coerceIn(0L, USER_QUOTA_BYTES)
+            val totalCloudChats = inspected?.items?.count { it.collection == "sessions" }
                 ?: maxOf(remoteSessionsById.size, uploaded)
-            val totalCloudProviders = storageSummary?.items?.count { it.collection == "providers" }
+            val totalCloudProviders = inspected?.items?.count { it.collection == "providers" }
                 ?: maxOf(remoteProvMap.size, deltaProviders)
-            val totalCloudPersonas = storageSummary?.items?.count { it.collection == "personas" }
+            val totalCloudPersonas = inspected?.items?.count { it.collection == "personas" }
                 ?: maxOf(remotePersonaIds.size, deltaPersonas)
-            val totalCloudMemories = storageSummary?.items?.count { it.collection == "memories" }
+            val totalCloudMemories = inspected?.items?.count { it.collection == "memories" }
                 ?: maxOf(remoteMemoryIds.size, deltaMemories)
+
+            val resolvedSummary = inspected ?: CloudStorageSummary(
+                usedBytes = totalCloudBytes,
+                quotaBytes = USER_QUOTA_BYTES,
+                items = remoteSessionsById.values.map { d ->
+                    CloudStorageItem(
+                        collection = "sessions",
+                        docId = d.id,
+                        title = "Chat: ${d.getString("title") ?: "Untitled"}",
+                        subtitle = "${(d.getLong("messageCount") ?: 0L)} messages",
+                        sizeBytes = estimateDocBytes(d.data),
+                    )
+                },
+            )
 
             val usedKb = "%.1f".format(totalCloudBytes / 1024.0)
             val maxKb = "%.1f".format(USER_QUOTA_BYTES / 1024.0)
@@ -794,6 +844,7 @@ class CloudSyncManager(
                 usedBytes = totalCloudBytes,
                 quotaBytes = USER_QUOTA_BYTES,
                 message = summary,
+                storageSummary = resolvedSummary,
             )
         }.onFailure { err ->
             val detail = err.localizedMessage ?: err.javaClass.simpleName

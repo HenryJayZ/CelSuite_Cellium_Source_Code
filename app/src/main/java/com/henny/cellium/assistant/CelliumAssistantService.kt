@@ -24,6 +24,7 @@ import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.text.Editable
+import android.text.InputType
 import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
@@ -38,8 +39,11 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.henny.cellium.MainActivity
 import com.henny.cellium.ai.ProviderPresets
 import com.henny.cellium.ai.UniversalLlmClient
+import com.henny.cellium.ai.WebToolsClient
+import com.henny.cellium.avatar.ExpressionDirector
 import com.henny.cellium.avatar.MoodDetector
 import com.henny.cellium.core.CelliumSoundEngine
 import com.henny.cellium.core.CelliumSttEngine
@@ -345,6 +349,8 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val llmClient = UniversalLlmClient()
+    private val webTools = WebToolsClient()
+    private var moodRelaxRunnable: Runnable? = null
 
     private var faceView: AssistantDotFaceView? = null
     private var speechBubble: TextView? = null
@@ -531,9 +537,63 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         val baseBottomPad = dp(18f)
         val bottomCol = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14f), dp(8f), dp(14f), baseBottomPad)
+            setPadding(dp(14f), dp(6f), dp(14f), baseBottomPad)
             setOnClickListener { /* consume */ }
         }
+
+        // #6: Gemini-style swipe-up handle -> opens exact active conversation in main Chat tab!
+        var handleDownY = 0f
+        var handleTriggered = false
+        val swipeHandleRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4f), 0, dp(6f))
+            addView(
+                View(context).apply {
+                    background = GradientDrawable().apply {
+                        setColor(Color.argb(175, 192, 132, 252))
+                        cornerRadius = dp(3f).toFloat()
+                    }
+                    layoutParams = LinearLayout.LayoutParams(dp(44f), dp(4.5f))
+                }
+            )
+            setOnClickListener {
+                soundEngine.playOpen()
+                openActiveSessionInMainChat()
+            }
+            setOnTouchListener { _, ev ->
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        handleDownY = ev.rawY
+                        handleTriggered = false
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (!handleTriggered && (handleDownY - ev.rawY) > dp(44f)) {
+                            handleTriggered = true
+                            soundEngine.playOpen()
+                            openActiveSessionInMainChat()
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        if (!handleTriggered && abs(handleDownY - ev.rawY) < dp(12f)) {
+                            soundEngine.playOpen()
+                            openActiveSessionInMainChat()
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }
+        bottomCol.addView(
+            swipeHandleRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+        )
 
         // 4e & 4f: Cropped / Screenshot Thumbnail Preview Strip above chat box!
         val stripRow = LinearLayout(context).apply {
@@ -643,6 +703,18 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             }
         }
 
+        val openChatChip = TextView(context).apply {
+            text = "Open Chat"
+            setTextColor(Color.parseColor("#E9D5FF"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
+            background = chipBg(Color.argb(220, 44, 22, 74), Color.argb(185, 192, 132, 252))
+            setOnClickListener {
+                soundEngine.playOpen()
+                openActiveSessionInMainChat()
+            }
+        }
+
         val chipLp = {
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -652,6 +724,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         chipRow.addView(sChip, chipLp())
         chipRow.addView(clrChip, chipLp())
         chipRow.addView(chatChip, chipLp())
+        chipRow.addView(openChatChip, chipLp())
         chipRow.addView(liveChip, chipLp())
 
         val chipScroll = HorizontalScrollView(context).apply {
@@ -719,8 +792,13 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
             background = null
-            isSingleLine = true
-            imeOptions = EditorInfo.IME_ACTION_SEND
+            // #2b: Multiline paragraphs + normal keyboard Enter/New-Line (Send button sends!)
+            isSingleLine = false
+            maxLines = 4
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI
             setPadding(dp(8f), dp(6f), dp(8f), dp(6f))
             setOnFocusChangeListener { _, hasFocus ->
                 if (hasFocus) {
@@ -745,18 +823,6 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 }
                 override fun afterTextChanged(s: Editable?) = Unit
             })
-            setOnEditorActionListener { _, actionId, _ ->
-                if (actionId == EditorInfo.IME_ACTION_SEND) {
-                    val q = text.toString().trim()
-                    if (q.isNotEmpty()) {
-                        setText("")
-                        isTypingMode = false
-                        sendBtnView?.visibility = View.GONE
-                        askCel(q)
-                    }
-                    true
-                } else false
-            }
         }
         inputEdit = edit
 
@@ -816,6 +882,26 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             text = if (includeScreenVision) "Full Screen: ON" else "Full Screen: OFF"
             setTextColor(if (includeScreenVision) Color.parseColor("#D8B4FE") else Color.parseColor("#9A90B0"))
         }
+    }
+
+    private fun openActiveSessionInMainChat() {
+        val sid = assistSessionId
+        cancelAllActiveWork()
+        runCatching {
+            val intent = Intent(context.applicationContext, MainActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+                )
+                putExtra(MainActivity.EXTRA_OPEN_CHAT_TAB, true)
+                if (!sid.isNullOrBlank()) {
+                    putExtra(MainActivity.EXTRA_OPEN_SESSION_ID, sid)
+                }
+            }
+            context.startActivity(intent)
+        }
+        hide()
     }
 
     private fun handleNewCircledCrop(normRect: RectF) {
@@ -1073,6 +1159,9 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             soundEngine.masterVolume = prefs.sfxVolume
             soundEngine.startupSoundId = prefs.startupSoundId
             soundEngine.startupSoundCustomPath = prefs.startupSoundCustomPath
+            soundEngine.startupSoundShuffleEnabled = prefs.startupSoundShuffleEnabled
+            soundEngine.startupSoundExcludedIds = prefs.startupSoundExcludedIds
+            soundEngine.deletedStartupSoundIds = prefs.deletedStartupSoundIds
             soundEngine.playAssistantSummon()
             faceView?.updateState(newGender = prefs.avatarGender, newMood = "happy")
         }
@@ -1090,6 +1179,8 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private fun cancelAllActiveWork() {
         showListenRunnable?.let { mainHandler.removeCallbacks(it) }
         showListenRunnable = null
+        moodRelaxRunnable?.let { mainHandler.removeCallbacks(it) }
+        moodRelaxRunnable = null
         cancelListeningQuietly()
         askJob?.cancel()
         askJob = null
@@ -1313,6 +1404,8 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
         showBubble("Thinking...")
 
+        val usedFullScreenThisTurn = explicitBitmaps == null && includeScreenVision &&
+            capturedScreenshot != null && !capturedScreenshot!!.isRecycled
         val bitmapsToSend: List<Bitmap> = explicitBitmaps ?: buildList {
             val rawShot = capturedScreenshot
             if (includeScreenVision && rawShot != null && !rawShot.isRecycled) {
@@ -1328,9 +1421,17 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         if (explicitBitmaps == null && croppedRegions.isNotEmpty()) {
             clearAllCrops()
         }
+        // #2a: After sending 1st message with a screenshot, auto-switch Full Screen OFF so follow-ups don't re-upload it
+        if (usedFullScreenThisTurn) {
+            includeScreenVision = false
+            mainHandler.post {
+                updateScreenChipAppearance()
+                rebuildAttachmentPreviewStrip()
+            }
+        }
 
         val effectivePrompt = when {
-            cropCount > 0 && includeScreenVision ->
+            cropCount > 0 && usedFullScreenThisTurn ->
                 "[User attached full screen + $cropCount circled cropped region(s). Focus closely on the cropped regions!] $cleanedUserText"
             cropCount > 0 ->
                 "[User circled and cropped $cropCount specific region(s) from their screen — answer specifically about these cropped image(s)!] $cleanedUserText"
@@ -1349,8 +1450,8 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 val personas = dao.getAllPersonasOnce().map {
                     CustomPersona(it.id, it.name, it.iconKey, it.tagline, it.systemPrompt, it.accentHex)
                 }
+                // #9: Always respect active session persona or user's currently selected default persona!
                 val activeSession = assistSessionId?.let { dao.getSession(it) }
-                    ?: dao.getAllSessionsOnce().firstOrNull { !it.isArena && !it.isLocked }
                 val personaId = activeSession?.personaId?.ifBlank { prefs.defaultPersonaId } ?: prefs.defaultPersonaId
                 val persona = BuiltInPersonas.resolve(personaId, personas)
                 val memories = dao.getAllMemoriesOnce()
@@ -1447,13 +1548,29 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
 
                     val (_, cleanStep) = ProviderPresets.parseThoughts(sb.toString())
                     val actions = AndroidDeviceActions.extractActionPayloads(cleanStep)
-                    if (actions.isNotEmpty() && step < 2) {
-                        showBubble("Running action...")
-                        faceView?.updateState(newMood = "working", newGender = prefs.avatarGender)
+                    val (webQuery, _) = UniversalLlmClient.extractWebSearchQuery(cleanStep)
+                    if ((actions.isNotEmpty() || !webQuery.isNullOrBlank()) && step < 2) {
                         val resultsText = buildString {
-                            for (payload in actions.take(3)) {
-                                val res = AndroidDeviceActions.executePayload(appCtx, payload)
-                                appendLine("[DEVICE_ACTION_RESULT (${res.action}, success=${res.success})]: ${res.output}")
+                            if (actions.isNotEmpty()) {
+                                showBubble("Running action...")
+                                faceView?.updateState(newMood = "working", newGender = prefs.avatarGender)
+                                for (payload in actions.take(3)) {
+                                    val res = AndroidDeviceActions.executePayload(appCtx, payload, webTools)
+                                    appendLine("[DEVICE_ACTION_RESULT (${res.action}, success=${res.success})]: ${res.output}")
+                                }
+                            }
+                            if (!webQuery.isNullOrBlank()) {
+                                showBubble("Searching web...")
+                                faceView?.updateState(newMood = "curious", newGender = prefs.avatarGender)
+                                val searchRes = webTools.searchWeb(webQuery, maxResults = 4)
+                                val block = searchRes.fold(
+                                    onSuccess = { items ->
+                                        if (items.isEmpty()) "No web results for $webQuery."
+                                        else items.joinToString("\n") { "${it.title}: ${it.snippet}" }
+                                    },
+                                    onFailure = { "Web search error: ${it.localizedMessage}" },
+                                )
+                                appendLine("[WEB_SEARCH_RESULT \"$webQuery\"]:\n$block")
                             }
                         }.trim()
                         currentHistory.add(
@@ -1472,17 +1589,17 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                                 content = cleanStep,
                             )
                         )
-                        currentPrompt = "$resultsText\nNow give your concise natural spoken answer to the user."
+                        currentPrompt = "$resultsText\nNow give your concise natural spoken answer to the user. Do NOT emit another [DEVICE_ACTION] or [WEB_SEARCH] tag."
                         currentImages = emptyList()
                         showBubble("Thinking...")
                     } else {
-                        finalRawReply = AndroidDeviceActions.stripActionTags(cleanStep)
+                        finalRawReply = UniversalLlmClient.sanitizeVisibleReply(cleanStep)
                         break
                     }
                 }
 
                 val (tagMood, finalBody) = MoodDetector.extractInlineMoodTag(finalRawReply)
-                val reply = finalBody.ifBlank { finalRawReply.ifBlank { "All set!" } }
+                val reply = UniversalLlmClient.sanitizeVisibleReply(finalBody.ifBlank { finalRawReply }).ifBlank { "All set!" }
                 val mood = tagMood ?: MoodDetector.detectMood(reply)
 
                 val assistantMsgId = UUID.randomUUID().toString()
@@ -1553,6 +1670,15 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                             mainHandler.post {
                                 faceView?.updateState(isTalking = false)
                                 if (isVisible) showBubble(reply)
+                                // #2d: Hold emotional expression naturally before relaxing back to idle
+                                moodRelaxRunnable?.let { mainHandler.removeCallbacks(it) }
+                                val r = Runnable {
+                                    if (isVisible && !isListening) {
+                                        faceView?.updateState(newMood = "idle")
+                                    }
+                                }
+                                moodRelaxRunnable = r
+                                mainHandler.postDelayed(r, ExpressionDirector.holdDurationMsForMood(mood))
                             }
                         },
                     )

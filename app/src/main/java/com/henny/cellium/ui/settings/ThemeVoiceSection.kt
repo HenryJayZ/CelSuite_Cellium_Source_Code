@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AddCircleOutline
 import androidx.compose.material.icons.rounded.Assistant
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.Check
@@ -43,8 +44,10 @@ import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.VolumeUp
@@ -77,6 +80,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -312,6 +316,17 @@ fun ThemeWallpaperStudioCard(
                 }
             }
         }
+        SettingSwitchRow("Floating Cel Idle Screen-Peek Teasing", prefs.floatingIdlePeekEnabled) { enabled ->
+            scope.launch {
+                viewModel.prefsStore.updateFloatingIdlePeekEnabled(enabled)
+                viewModel.notifyPrefsChangedForSync()
+            }
+        }
+        Text(
+            text = "When enabled and Screen Eye is active, Floating Cel occasionally glances at your screen after 5+ min idle or waking from a nap to drop a playful tease.",
+            style = MaterialTheme.typography.labelSmall,
+            color = CelTextMuted,
+        )
     }
 }
 
@@ -349,7 +364,10 @@ fun VoiceAndAudioLabCard(
     var rateDraft by remember(editingLiveProfile, persistedRate) { mutableFloatStateOf(persistedRate.coerceIn(0.50f, 2.20f)) }
     var sfxVolDraft by remember(prefs.sfxVolume) { mutableFloatStateOf(prefs.sfxVolume) }
     var chirpPitchDraft by remember(prefs.typingSoundPitch) { mutableFloatStateOf(prefs.typingSoundPitch.coerceIn(0.25f, 2.50f)) }
-    var wakeSensDraft by remember(prefs.wakeWordSensitivity) { mutableFloatStateOf(prefs.wakeWordSensitivity.coerceIn(0.05f, 0.90f)) }
+    // Intuitive Sensitivity UI: Higher % = MORE sensitive (maps to lower internal detection threshold 1f - uiSens)
+    var wakeUiSensDraft by remember(prefs.wakeWordSensitivity) {
+        mutableFloatStateOf((1f - prefs.wakeWordSensitivity.coerceIn(0.05f, 0.90f)).coerceIn(0.10f, 0.95f))
+    }
     var lastPreviewIdx by remember { mutableIntStateOf(-1) }
     var startupCacheBytes by remember(prefs.deletedStartupSoundIds, prefs.startupSoundId) {
         mutableStateOf(viewModel.soundEngine.getStartupCacheBytes())
@@ -1027,12 +1045,17 @@ fun VoiceAndAudioLabCard(
             )
         }
 
-        // 2. Cel Start-up Sound Studio (22 Gentle Presets + Shuffle + Custom Audio + Delete Presets to Save Storage) (#4g)
+        // 2. Cel Start-up Sound Studio (22 Gentle Presets + Persistent Shuffle + Per-Preset Exclude/Include + Custom Audio) (#10)
         GlassCard(shape = RoundedCornerShape(22.dp)) {
             val visiblePresets = remember(prefs.deletedStartupSoundIds) {
                 CelliumSoundEngine.STARTUP_SOUND_PRESETS.filter { it.id !in prefs.deletedStartupSoundIds }
             }
-            val activeStartupLabel = if (prefs.startupSoundId == "custom" && prefs.startupSoundCustomPath.isNotBlank()) {
+            val includedInShuffleCount = remember(visiblePresets, prefs.startupSoundExcludedIds) {
+                visiblePresets.count { it.id !in prefs.startupSoundExcludedIds }
+            }
+            val activeStartupLabel = if (prefs.startupSoundShuffleEnabled) {
+                "Shuffle Mode ($includedInShuffleCount active)"
+            } else if (prefs.startupSoundId == "custom" && prefs.startupSoundCustomPath.isNotBlank()) {
                 "Custom Audio File"
             } else {
                 CelliumSoundEngine.findStartupPreset(prefs.startupSoundId).label
@@ -1060,12 +1083,35 @@ fun VoiceAndAudioLabCard(
                 }
             }
 
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(8.dp))
+
+            SettingSwitchRow("Shuffle Start-up Sound on Every Summon", prefs.startupSoundShuffleEnabled) { enabled ->
+                viewModel.soundEngine.startupSoundShuffleEnabled = enabled
+                viewModel.soundEngine.startupSoundExcludedIds = prefs.startupSoundExcludedIds
+                scope.launch {
+                    viewModel.prefsStore.updateStartupSoundShuffle(enabled = enabled)
+                    viewModel.notifyPrefsChangedForSync()
+                }
+                if (enabled) {
+                    viewModel.soundEngine.playAssistantSummon()
+                    viewModel.showSettingsFeedback("Start-up sound shuffle ON ($includedInShuffleCount chimes in rotation).")
+                } else {
+                    viewModel.showSettingsFeedback("Start-up sound shuffle OFF.")
+                }
+            }
+            Text(
+                text = "Tap the red minus button on any sound to exclude it from shuffle rotation (grayed out), or tap green plus to include it again.",
+                style = MaterialTheme.typography.labelSmall,
+                color = CelTextMuted,
+            )
+
+            Spacer(Modifier.height(8.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(
                     onClick = {
-                        val pool = visiblePresets.filter { it.id != prefs.startupSoundId }.ifEmpty { visiblePresets }
+                        val activePool = visiblePresets.filter { it.id !in prefs.startupSoundExcludedIds }.ifEmpty { visiblePresets }
+                        val pool = activePool.filter { it.id != prefs.startupSoundId }.ifEmpty { activePool }
                         val picked = pool.randomOrNull() ?: return@OutlinedButton
                         viewModel.soundEngine.startupSoundId = picked.id
                         viewModel.soundEngine.playAssistantSummon(picked.id)
@@ -1073,7 +1119,7 @@ fun VoiceAndAudioLabCard(
                             viewModel.prefsStore.updateStartupSound(picked.id)
                             viewModel.notifyPrefsChangedForSync()
                             startupCacheBytes = viewModel.soundEngine.getStartupCacheBytes()
-                            viewModel.showSettingsFeedback("Shuffled start-up sound: ${picked.label}")
+                            viewModel.showSettingsFeedback("Picked start-up sound: ${picked.label}")
                         }
                     },
                     shape = RoundedCornerShape(10.dp),
@@ -1081,7 +1127,7 @@ fun VoiceAndAudioLabCard(
                 ) {
                     Icon(Icons.Rounded.Shuffle, contentDescription = null, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Shuffle", maxLines = 1, softWrap = false)
+                    Text("Roll One Now", maxLines = 1, softWrap = false)
                 }
                 OutlinedButton(
                     onClick = { customStartupAudioPicker.launch(arrayOf("audio/*")) },
@@ -1094,26 +1140,49 @@ fun VoiceAndAudioLabCard(
                 }
             }
 
-            if (prefs.deletedStartupSoundIds.isNotEmpty()) {
+            if (prefs.deletedStartupSoundIds.isNotEmpty() || prefs.startupSoundExcludedIds.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))
-                TextButton(
-                    onClick = {
-                        scope.launch {
-                            viewModel.prefsStore.updateDeletedStartupSounds(emptySet())
-                            viewModel.showSettingsFeedback("Restored all 22 start-up sound presets.")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (prefs.startupSoundExcludedIds.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                viewModel.soundEngine.startupSoundExcludedIds = emptySet()
+                                scope.launch {
+                                    viewModel.prefsStore.updateStartupSoundShuffle(
+                                        enabled = prefs.startupSoundShuffleEnabled,
+                                        excludedIds = emptySet(),
+                                    )
+                                    viewModel.notifyPrefsChangedForSync()
+                                    viewModel.showSettingsFeedback("Re-included all excluded sounds in shuffle.")
+                                }
+                            },
+                        ) {
+                            Icon(Icons.Rounded.AddCircleOutline, contentDescription = null, tint = CelEmeraldThought, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Re-Include All (${prefs.startupSoundExcludedIds.size} excluded)")
                         }
-                    },
-                ) {
-                    Icon(Icons.Rounded.Restore, contentDescription = null, modifier = Modifier.size(15.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Restore All 22 Presets (${prefs.deletedStartupSoundIds.size} deleted)")
+                    }
+                    if (prefs.deletedStartupSoundIds.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    viewModel.prefsStore.updateDeletedStartupSounds(emptySet())
+                                    viewModel.showSettingsFeedback("Restored all 22 start-up sound presets.")
+                                }
+                            },
+                        ) {
+                            Icon(Icons.Rounded.Restore, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Restore Deleted (${prefs.deletedStartupSoundIds.size})")
+                        }
+                    }
                 }
             }
 
             Spacer(Modifier.height(6.dp))
 
             LazyColumn(
-                modifier = Modifier.fillMaxWidth().heightIn(max = 210.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(max = 228.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 if (prefs.startupSoundCustomPath.isNotBlank() && File(prefs.startupSoundCustomPath).exists()) {
@@ -1158,11 +1227,12 @@ fun VoiceAndAudioLabCard(
 
                 items(visiblePresets, key = { it.id }) { preset ->
                     val sel = prefs.startupSoundId == preset.id
+                    val isExcluded = preset.id in prefs.startupSoundExcludedIds
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
-                            .background(if (sel) visuals.primary.copy(alpha = 0.22f) else CelTerminalBg)
+                            .background(if (sel && !isExcluded) visuals.primary.copy(alpha = 0.22f) else CelTerminalBg)
                             .clickable {
                                 viewModel.soundEngine.startupSoundId = preset.id
                                 viewModel.soundEngine.playAssistantSummon(preset.id)
@@ -1176,13 +1246,58 @@ fun VoiceAndAudioLabCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(preset.label, style = MaterialTheme.typography.labelMedium, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(preset.vibe, style = MaterialTheme.typography.labelSmall, color = CelTextSecondary, maxLines = 1)
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .alpha(if (isExcluded) 0.42f else 1f),
+                        ) {
+                            Text(
+                                text = preset.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (isExcluded) CelTextMuted else CelTextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = if (isExcluded) "Excluded from shuffle" else preset.vibe,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isExcluded) CelDangerRed.copy(alpha = 0.8f) else CelTextSecondary,
+                                maxLines = 1,
+                            )
                         }
-                        if (sel) {
+                        if (sel && !isExcluded) {
                             Icon(Icons.Rounded.Check, contentDescription = null, tint = visuals.primary, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
+                        }
+                        // Red minus = exclude from shuffle; Green plus = re-include in shuffle
+                        IconButton(
+                            onClick = {
+                                val nextExcluded = if (isExcluded) {
+                                    prefs.startupSoundExcludedIds - preset.id
+                                } else {
+                                    prefs.startupSoundExcludedIds + preset.id
+                                }
+                                viewModel.soundEngine.startupSoundExcludedIds = nextExcluded
+                                scope.launch {
+                                    viewModel.prefsStore.updateStartupSoundShuffle(
+                                        enabled = prefs.startupSoundShuffleEnabled,
+                                        excludedIds = nextExcluded,
+                                    )
+                                    viewModel.notifyPrefsChangedForSync()
+                                    viewModel.showSettingsFeedback(
+                                        if (isExcluded) "Included '${preset.label}' in shuffle."
+                                        else "Excluded '${preset.label}' from shuffle."
+                                    )
+                                }
+                            },
+                            modifier = Modifier.size(30.dp),
+                        ) {
+                            Icon(
+                                imageVector = if (isExcluded) Icons.Rounded.AddCircleOutline else Icons.Rounded.RemoveCircleOutline,
+                                contentDescription = if (isExcluded) "Include in shuffle" else "Exclude from shuffle",
+                                tint = if (isExcluded) CelEmeraldThought else CelDangerRed,
+                                modifier = Modifier.size(18.dp),
+                            )
                         }
                         if (visiblePresets.size > 1) {
                             IconButton(
@@ -1200,7 +1315,7 @@ fun VoiceAndAudioLabCard(
                                         viewModel.showSettingsFeedback("Deleted '${preset.label}' (freed $freedKb KB).")
                                     }
                                 },
-                                modifier = Modifier.size(30.dp),
+                                modifier = Modifier.size(28.dp),
                             ) {
                                 Icon(Icons.Rounded.Delete, contentDescription = "Delete preset", tint = CelTextMuted, modifier = Modifier.size(15.dp))
                             }
@@ -1803,6 +1918,7 @@ fun VoiceAndAudioLabCard(
                 }
             }
 
+            val activeThreshold = (1f - wakeUiSensDraft).coerceIn(0.05f, 0.90f)
             if (wakeRunning || prefs.wakeWordEnabled) {
                 Spacer(Modifier.height(6.dp))
                 Surface(
@@ -1822,15 +1938,15 @@ fun VoiceAndAudioLabCard(
                                 color = if (wakeMicActive) CelEmeraldThought else CelTextSecondary,
                             )
                             Text(
-                                text = "${(liveWakeScore * 100).toInt()}% / ${(wakeSensDraft * 100).toInt()}%",
+                                text = "Score ${(liveWakeScore * 100).toInt()}% (triggers >= ${(activeThreshold * 100).toInt()}%)",
                                 style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
-                                color = if (liveWakeScore >= wakeSensDraft) CelEmeraldThought else CelLavender,
+                                color = if (liveWakeScore >= activeThreshold) CelEmeraldThought else CelLavender,
                             )
                         }
                         Spacer(Modifier.height(5.dp))
                         LinearProgressIndicator(
                             progress = { liveWakeScore.coerceIn(0f, 1f) },
-                            color = if (liveWakeScore >= wakeSensDraft) CelEmeraldThought else visuals.primary,
+                            color = if (liveWakeScore >= activeThreshold) CelEmeraldThought else visuals.primary,
                             trackColor = visuals.subtleBorder,
                             modifier = Modifier.fillMaxWidth().height(7.dp).clip(RoundedCornerShape(99.dp)),
                         )
@@ -1840,18 +1956,48 @@ fun VoiceAndAudioLabCard(
 
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "Trigger Threshold: ${(wakeSensDraft * 100).toInt()}% (Lower = Easier to Trigger)",
+                text = "Wake Word Sensitivity: ${(wakeUiSensDraft * 100).toInt()}% (Higher = Triggers Easier)",
                 style = MaterialTheme.typography.labelSmall,
-                color = CelTextSecondary,
+                color = CelTextPrimary,
+            )
+            Text(
+                text = "Left (10%) = strict · Default 75% · Right (95%) = ultra sensitive",
+                style = MaterialTheme.typography.labelSmall,
+                color = CelTextMuted,
             )
             Slider(
-                value = wakeSensDraft,
-                onValueChange = { wakeSensDraft = it },
+                value = wakeUiSensDraft,
+                onValueChange = { wakeUiSensDraft = it },
                 onValueChangeFinished = {
-                    scope.launch { viewModel.prefsStore.updateWakeWordSettings(prefs.wakeWordEnabled, sensitivity = wakeSensDraft) }
+                    val threshold = (1f - wakeUiSensDraft).coerceIn(0.05f, 0.90f)
+                    scope.launch {
+                        viewModel.prefsStore.updateWakeWordSettings(
+                            enabled = prefs.wakeWordEnabled,
+                            sensitivity = threshold,
+                        )
+                    }
                 },
-                valueRange = 0.05f..0.90f,
+                valueRange = 0.10f..0.95f,
             )
+
+            Spacer(Modifier.height(4.dp))
+            HorizontalDivider(color = visuals.subtleBorder)
+            Spacer(Modifier.height(8.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Icon(Icons.Rounded.Shield, contentDescription = null, tint = CelAmber, modifier = Modifier.size(16.dp))
+                Text("Advanced (Shizuku) · System Privacy Indicator", style = MaterialTheme.typography.labelLarge, color = CelAmber)
+            }
+            SettingSwitchRow("Hide Android Mic Dot (Shizuku)", prefs.wakeWordShizukuHideDot) { hide ->
+                viewModel.setShizukuHideMicDot(hide)
+            }
+            Text(
+                text = "Caution: Runs 'cmd device_config put privacy camera_mic_icons_enabled false default' via Shizuku. This hides the green mic & camera dot OS-wide for ALL apps until toggled back OFF.",
+                style = MaterialTheme.typography.labelSmall,
+                color = CelAmber.copy(alpha = 0.88f),
+            )
+
+            Spacer(Modifier.height(8.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(
@@ -1879,7 +2025,7 @@ fun VoiceAndAudioLabCard(
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Icon(Icons.Rounded.GraphicEq, contentDescription = null, tint = CelEmeraldThought, modifier = Modifier.size(15.dp).padding(top = 2.dp))
                 Text(
-                    text = "Active model: ${if (prefs.wakeWordCustomPath.isBlank()) "Built-in oh_kay_sell.tflite" else File(prefs.wakeWordCustomPath).name} (exact 1760-sample openWakeWord LiteRT). Note on the green mic dot: Android 12-16 locks hardware zero-dot DSP hotwording (AlwaysOnHotwordDetector / CAPTURE_AUDIO_HOTWORD) strictly to OEM-signed system apps like Google Assistant. Smart Screen-On Only turns the mic & green dot completely OFF whenever your screen locks or a voice session pauses. For zero green dot 24/7, set Cel as your Default Assistant above and hold Power/Home!",
+                    text = "Active model: ${if (prefs.wakeWordCustomPath.isBlank()) "Built-in oh_kay_sell.tflite" else File(prefs.wakeWordCustomPath).name} (exact 1760-sample openWakeWord LiteRT). Why Android shows the green mic dot: Google's 'Okay Google' runs inside a hardware low-power DSP (AlwaysOnHotwordDetector / SoundTrigger) locked strictly to OEM-signed system apps. Every third-party app must open AudioRecord on the CPU, which always triggers Android 12+'s green dot. Keep Smart Screen-On Only ON to drop the mic when locked, or use Power/Home Default Assistant for zero-dot instant summon.",
                     style = MaterialTheme.typography.labelSmall,
                     color = CelTextMuted,
                 )

@@ -65,6 +65,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.henny.cellium.avatar.AVATAR_GENDERS
 import com.henny.cellium.avatar.AvatarLibrary
+import com.henny.cellium.avatar.AvatarStudioLiveBus
+import com.henny.cellium.avatar.AvatarStudioLiveEvent
 import com.henny.cellium.avatar.DotMatrixAvatarCanvas
 import com.henny.cellium.avatar.PET_PAT_GREETINGS
 import com.henny.cellium.avatar.STYLE_MODIFIERS
@@ -201,6 +203,13 @@ fun AvatarStudioScreen(
                     onClick = {
                         blinkTrigger++
                         soundEngine.playPop()
+                        AvatarStudioLiveBus.emit(
+                            AvatarStudioLiveEvent(
+                                gender = selectedGender,
+                                expressionName = currentExpr?.name ?: selectedBase,
+                                actionType = "blink",
+                            )
+                        )
                     },
                     modifier = Modifier.testTag("avatar_blink_button"),
                 ) {
@@ -250,6 +259,14 @@ fun AvatarStudioScreen(
                 onPetted = {
                     soundEngine.playAnimalesePurr()
                     petCaption = PET_PAT_GREETINGS.random()
+                    AvatarStudioLiveBus.emit(
+                        AvatarStudioLiveEvent(
+                            gender = selectedGender,
+                            expressionName = "Blushing",
+                            mood = "blush",
+                            actionType = "pet",
+                        )
+                    )
                 },
                 modifier = Modifier
                     .fillMaxSize()
@@ -273,19 +290,37 @@ fun AvatarStudioScreen(
                 )
             }
 
-            // Grid toggle button
-            IconButton(
-                onClick = { showGrid = !showGrid },
+            // Stage Grid toggle chip (clearly labeled instead of ambiguous 3x3 icon)
+            Surface(
+                color = if (showGrid) CelViolet.copy(alpha = 0.30f) else CelObsidianGlass,
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, if (showGrid) CelBorderActive else CelBorderSubtle),
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(4.dp)
+                    .padding(10.dp)
+                    .clickable {
+                        showGrid = !showGrid
+                        soundEngine.playClick()
+                    }
                     .testTag("avatar_grid_toggle"),
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.GridOn,
-                    contentDescription = "Toggle stage grid",
-                    tint = if (showGrid) CelViolet else CelTextMuted,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.GridOn,
+                        contentDescription = "Stage Grid",
+                        tint = if (showGrid) CelLavender else CelTextMuted,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(
+                        text = if (showGrid) "Grid ON" else "Grid OFF",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (showGrid) CelSoftLavender else CelTextMuted,
+                    )
+                }
             }
 
             // Headpat floating caption
@@ -321,6 +356,13 @@ fun AvatarStudioScreen(
                         selectedGender = g
                         soundEngine.playClick()
                         scope.launch { viewModel.prefsStore.updateAvatarGender(g) }
+                        AvatarStudioLiveBus.emit(
+                            AvatarStudioLiveEvent(
+                                gender = g,
+                                expressionName = if (selectedModifier == "Base") selectedBase else "$selectedBase - $selectedModifier",
+                                actionType = "gender",
+                            )
+                        )
                     },
                     selected = selectedGender == g,
                     modifier = Modifier.testTag("avatar_style_$g"),
@@ -343,6 +385,13 @@ fun AvatarStudioScreen(
                     onClick = {
                         selectedModifier = mod
                         soundEngine.playClick()
+                        AvatarStudioLiveBus.emit(
+                            AvatarStudioLiveEvent(
+                                gender = selectedGender,
+                                expressionName = if (mod == "Base") selectedBase else "$selectedBase - $mod",
+                                actionType = "modifier",
+                            )
+                        )
                     },
                     selected = selectedModifier == mod,
                     modifier = Modifier.testTag("avatar_mod_$mod"),
@@ -425,6 +474,13 @@ fun AvatarStudioScreen(
                         .clickable {
                             selectedBase = exprName
                             soundEngine.playPop()
+                            AvatarStudioLiveBus.emit(
+                                AvatarStudioLiveEvent(
+                                    gender = selectedGender,
+                                    expressionName = if (selectedModifier == "Base") exprName else "$exprName - $selectedModifier",
+                                    actionType = "expression",
+                                )
+                            )
                         }
                         .testTag("avatar_expr_$exprName"),
                 ) {

@@ -36,7 +36,12 @@ import java.util.TimeZone
 object AndroidDeviceActions {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     private val ACTION_TAG_REGEX = Regex(
-        """\[DEVICE_ACTION]\s*([\s\S]*?)\s*\[/DEVICE_ACTION]""",
+        """(?:```[a-zA-Z]*\s*)?\[DEVICE_ACTION]\s*([\s\S]*?)\s*\[/DEVICE_ACTION](?:\s*```)?""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val ACTION_OPEN_REGEX = Regex("""\[DEVICE_ACTION]""", RegexOption.IGNORE_CASE)
+    private val ACTION_RESULT_STRAY_REGEX = Regex(
+        """\[/?DEVICE_ACTION(?:_RESULT)?]""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -46,14 +51,92 @@ object AndroidDeviceActions {
         val output: String,
     )
 
-    fun extractActionPayloads(text: String): List<String> =
-        ACTION_TAG_REGEX.findAll(text)
-            .map { it.groupValues[1].trim() }
-            .filter { it.isNotBlank() }
-            .toList()
+    /**
+     * Extracts JSON payloads from both well-formed `[DEVICE_ACTION]{...}[/DEVICE_ACTION]` blocks
+     * AND malformed/unclosed model outputs (e.g. `[DEVICE_ACTION]{"action":"web_search",...}スペ[DEVICE_ACTION_RESULT]`)
+     * using a balanced-brace JSON scanner.
+     */
+    fun extractActionPayloads(text: String): List<String> {
+        val results = LinkedHashSet<String>()
+        ACTION_TAG_REGEX.findAll(text).forEach { match ->
+            val inner = match.groupValues[1].trim()
+            val extracted = extractFirstBalancedJsonObject(inner) ?: inner
+            if (extracted.startsWith("{") && extracted.endsWith("}")) {
+                results.add(extracted)
+            }
+        }
+        // Fallback scanner for unclosed / hallucinated closing tags
+        ACTION_OPEN_REGEX.findAll(text).forEach { match ->
+            val tail = text.substring(match.range.last + 1)
+            val balanced = extractFirstBalancedJsonObject(tail)
+            if (!balanced.isNullOrBlank()) {
+                results.add(balanced)
+            }
+        }
+        return results.toList()
+    }
 
-    fun stripActionTags(text: String): String =
-        ACTION_TAG_REGEX.replace(text, "").replace(Regex("\n{3,}"), "\n\n").trim()
+    fun stripActionTags(text: String): String {
+        var cleaned = ACTION_TAG_REGEX.replace(text, "")
+        // Strip malformed unclosed `[DEVICE_ACTION]{...}<optional stray chars>[DEVICE_ACTION_RESULT]`
+        while (true) {
+            val m = ACTION_OPEN_REGEX.find(cleaned) ?: break
+            val startIdx = m.range.first
+            val afterTag = m.range.last + 1
+            val jsonRange = findBalancedJsonRange(cleaned, afterTag)
+            val cutEnd = if (jsonRange != null) {
+                var endIdx = jsonRange.last + 1
+                // Consume any trailing hallucinated junk before/including [DEVICE_ACTION_RESULT] or [/DEVICE_ACTION]
+                val nextResult = Regex("""^[^\n]{0,24}\[/?DEVICE_ACTION(?:_RESULT)?]""", RegexOption.IGNORE_CASE)
+                    .find(cleaned.substring(endIdx))
+                if (nextResult != null) {
+                    endIdx += nextResult.range.last + 1
+                }
+                endIdx
+            } else {
+                // Unfinished streaming tag at end of buffer
+                cleaned.length
+            }
+            cleaned = cleaned.removeRange(startIdx, cutEnd.coerceAtMost(cleaned.length))
+        }
+        cleaned = ACTION_RESULT_STRAY_REGEX.replace(cleaned, "")
+        return cleaned.replace(Regex("\n{3,}"), "\n\n").trim()
+    }
+
+    private fun extractFirstBalancedJsonObject(input: String): String? {
+        val range = findBalancedJsonRange(input, 0) ?: return null
+        return input.substring(range.first, range.last + 1).trim()
+    }
+
+    private fun findBalancedJsonRange(text: String, fromIndex: Int): IntRange? {
+        val start = text.indexOf('{', startIndex = fromIndex)
+        if (start < 0 || start - fromIndex > 32) return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until text.length) {
+            val ch = text[i]
+            if (inString) {
+                if (escaped) {
+                    escaped = false
+                } else if (ch == '\\') {
+                    escaped = true
+                } else if (ch == '"') {
+                    inString = false
+                }
+            } else {
+                when (ch) {
+                    '"' -> inString = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return start..i
+                    }
+                }
+            }
+        }
+        return null
+    }
 
     suspend fun executePayload(
         context: Context,

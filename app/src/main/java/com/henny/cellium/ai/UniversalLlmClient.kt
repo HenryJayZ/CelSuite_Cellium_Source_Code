@@ -75,8 +75,12 @@ class UniversalLlmClient {
         contextConfig: ContextModifyConfig = ContextModifyConfig(),
         extraInstruction: String = "",
         includeDeviceActions: Boolean = false,
+        imageGenEnabled: Boolean = true,
+        kaggleConfigured: Boolean = false,
     ): String = buildString {
         if (contextConfig.includePersona && persona.systemPrompt.isNotBlank()) {
+            append("[PRIMARY PERSONA — ALWAYS STAY IN CHARACTER]\n")
+            append("Persona Name: ${persona.name}\n")
             append(persona.systemPrompt.trim())
         } else {
             append("You are Cel, a concise, helpful AI assistant.")
@@ -96,19 +100,25 @@ class UniversalLlmClient {
             val allowed = MoodDetector.PROMPT_MOOD_LIST.joinToString(", ")
             append("\n\n[Avatar Expression Tag — REQUIRED]\n")
             append("Start EVERY response on line 1 with EXACTLY: mood: <key>\n")
-            append("Choose ONLY ONE key from this exact list: $allowed\n")
-            append("NEVER invent any other mood word. Put your normal reply on line 2.")
+            append("Choose ONLY ONE key from this list: $allowed\n")
+            append("Pick the most vivid, specific emotion for THIS exact message (e.g. laughing, smug, suspicious, awkward, determined, shocked, gremlin, flirty, annoyed, deadpan, warm, excited, thinking). Do NOT default to happy or blush on every turn. Put your normal reply on line 2.")
         }
 
         append("\n\n[Conversation Vision Memory]\n")
-        append("Recent images in this conversation — including images YOU generated with Illume or fetched earlier — are automatically attached to your visual input. Never say you cannot see images you just generated.")
+        append("Recent images in this conversation — including images YOU generated or fetched earlier — are automatically attached to your visual input. Never say you cannot see images you just generated.")
 
         if (contextConfig.includeIllumeInstructions) {
-            append("\n\n[Illume Built-In Image Generator & Keyless Web Tools — ACTIVE]\n")
-            append("1. AI Image Generation: You HAVE a built-in image generator! Whenever the user asks you to generate, draw, paint, create, make, or render images/art/pictures, emit up to 5 separate blocks placed INLINE right where each image belongs in your explanation (no code fences):\n")
-            append("[ILLUME_GEN]\n<detailed visual prompt>\n[/ILLUME_GEN]\n")
-            append("NEVER claim you are text-only or cannot generate images.\n")
-            append("2. Real-Time Web Search (Free Keyless): If you need up-to-date news, facts, versions, or current info, output ONLY a single block and wait for results:\n")
+            append("\n\n[Built-In Image Generation & Keyless Web Tools — ACTIVE]\n")
+            if (imageGenEnabled && kaggleConfigured) {
+                append("1. GPU Image Generation (Kaggle SDXL + Illume): Whenever the user asks you to generate, draw, paint, create, edit, or render an image, emit a clean JSON block (no markdown fences):\n")
+                append("[GENERATE_IMAGE]{\"prompt\":\"<detailed visual prompt>\",\"size\":\"832x1216\",\"edit_last\":false}[/GENERATE_IMAGE]\n")
+                append("Set \"edit_last\":true when refining/editing the previous image. You may also use [ILLUME_GEN]<prompt>[/ILLUME_GEN] for quick inline multi-image scenes. NEVER claim you cannot generate images.\n")
+            } else if (imageGenEnabled) {
+                append("1. AI Image Generation: You HAVE a built-in image generator! Whenever the user asks you to generate, draw, paint, create, make, or render images/art/pictures, emit up to 5 separate blocks placed INLINE right where each image belongs (no code fences):\n")
+                append("[ILLUME_GEN]\n<detailed visual prompt>\n[/ILLUME_GEN]\n")
+                append("NEVER claim you are text-only or cannot generate images.\n")
+            }
+            append("2. Real-Time Web Search (Free Keyless): If you need up-to-date news, patch versions, facts, or current info, output ONLY a single block and wait for results:\n")
             append("[WEB_SEARCH]<concise search query>[/WEB_SEARCH]\n")
             append("3. Real Web/Stock Photos (Free Keyless): ONLY when the user explicitly asks for real photographs or stock/web images (NOT AI art), you may embed up to 5 inline blocks:\n")
             append("[WEB_IMAGE]<simple photo subject keywords>[/WEB_IMAGE]")
@@ -116,7 +126,7 @@ class UniversalLlmClient {
 
         if (includeDeviceActions) {
             append("\n\n[Native Android Device Actions — Quiet Assistant Agent]\n")
-            append("You can directly control Android without Shizuku! When the user asks for the current time/date, battery/device status, to open an app, list apps, set an alarm or timer, turn flashlight on/off, adjust volume, open a URL, dial a number, or search the web, output ONLY one raw block (no intro text, no markdown fences) and wait silently for the result:\n")
+            append("You can directly control Android without Shizuku! When the user asks for the current time/date, battery/device status, to open an app, list apps, set an alarm or timer, turn flashlight on/off, adjust volume, open a URL, dial a number, or search the web, output ONLY one exact block (no intro text, no markdown fences, ALWAYS close with [/DEVICE_ACTION]) and wait silently for the result:\n")
             append("[DEVICE_ACTION]{\"action\":\"get_time\"}[/DEVICE_ACTION]\n")
             append("Available JSON actions:\n")
             append("- {\"action\":\"get_time\"}\n")
@@ -130,7 +140,7 @@ class UniversalLlmClient {
             append("- {\"action\":\"open_url\",\"url\":\"https://example.com\"}\n")
             append("- {\"action\":\"dial\",\"number\":\"5551234\"}\n")
             append("- {\"action\":\"web_search\",\"query\":\"weather today\"}\n")
-            append("After Cellium returns [DEVICE_ACTION_RESULT], reply naturally in spoken style.")
+            append("After Cellium returns [DEVICE_ACTION_RESULT], reply naturally in your Persona's voice.")
         }
 
         if (agentModeEnabled && contextConfig.includeAgentInstructions) {
@@ -986,11 +996,70 @@ class UniversalLlmClient {
             return prompts to working.trim()
         }
 
+        private val WEB_SEARCH_UNCLOSED_REGEX = Regex(
+            """(?:```[a-zA-Z]*\s*)?\[WEB_SEARCH]([\s\S]+)$""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val GENERATE_IMAGE_BLOCK_REGEX = Regex(
+            """(?:```[a-zA-Z]*\s*)?\[GENERATE_IMAGE]\s*([\s\S]*?)\s*\[/GENERATE_IMAGE](?:\s*```)?""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val GENERATE_IMAGE_UNCLOSED_REGEX = Regex(
+            """(?:```[a-zA-Z]*\s*)?\[GENERATE_IMAGE]([\s\S]+)$""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        data class GenerateImageToolCall(
+            val prompt: String,
+            val size: String = "",
+            val editLast: Boolean = false,
+            val batch: Int = 1,
+        )
+
+        fun extractGenerateImageCall(assistantBodyOnly: String): Pair<GenerateImageToolCall?, String> {
+            val match = GENERATE_IMAGE_BLOCK_REGEX.find(assistantBodyOnly)
+                ?: GENERATE_IMAGE_UNCLOSED_REGEX.find(assistantBodyOnly)
+                ?: return null to assistantBodyOnly
+            val rawPayload = match.groupValues[1].trim()
+            val cleaned = assistantBodyOnly.removeRange(match.range).trim()
+            if (rawPayload.isBlank()) return null to cleaned
+            val parsed = runCatching {
+                val j = Json { ignoreUnknownKeys = true; isLenient = true }
+                val obj = j.parseToJsonElement(rawPayload).jsonObject
+                val p = obj["prompt"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val sz = obj["size"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val editLast = obj["edit_last"]?.jsonPrimitive?.contentOrNull?.lowercase() == "true"
+                val batch = obj["batch"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()?.coerceIn(1, 20) ?: 1
+                if (p.isNotBlank()) GenerateImageToolCall(p, sz, editLast, batch) else null
+            }.getOrNull() ?: GenerateImageToolCall(prompt = rawPayload.trim('"', '\'', '`'))
+            return parsed to cleaned
+        }
+
         fun extractWebSearchQuery(assistantBodyOnly: String): Pair<String?, String> {
-            val match = WEB_SEARCH_REGEX.find(assistantBodyOnly) ?: return null to assistantBodyOnly
-            val q = match.groupValues[1].trim().trim('`', '"', '\'')
-            val cleaned = assistantBodyOnly.replace(WEB_SEARCH_REGEX, "").trim()
-            return q.ifBlank { null } to cleaned
+            val match = WEB_SEARCH_REGEX.find(assistantBodyOnly)
+            if (match != null) {
+                val q = match.groupValues[1].trim().trim('`', '"', '\'')
+                val cleaned = assistantBodyOnly.replace(WEB_SEARCH_REGEX, "").trim()
+                return q.ifBlank { null } to cleaned
+            }
+            val unclosed = WEB_SEARCH_UNCLOSED_REGEX.find(assistantBodyOnly)
+            if (unclosed != null) {
+                val q = unclosed.groupValues[1].lineSequence().firstOrNull().orEmpty().replace("```", "").trim().trim('"', '\'')
+                val cleaned = assistantBodyOnly.replace(WEB_SEARCH_UNCLOSED_REGEX, "").trim()
+                return q.ifBlank { null } to cleaned
+            }
+            return null to assistantBodyOnly
+        }
+
+        /** Strips all raw internal tool tags (closed or unclosed/malformed) so users never see raw markup in bubbles or TTS. */
+        fun sanitizeVisibleReply(raw: String): String {
+            var s = com.henny.cellium.assistant.AndroidDeviceActions.stripActionTags(raw)
+            s = WEB_SEARCH_REGEX.replace(s, "")
+            s = WEB_SEARCH_UNCLOSED_REGEX.replace(s, "")
+            s = GENERATE_IMAGE_BLOCK_REGEX.replace(s, "")
+            s = GENERATE_IMAGE_UNCLOSED_REGEX.replace(s, "")
+            s = VIEW_IMAGE_REGEX.replace(s, "")
+            return s.replace(Regex("\n{3,}"), "\n\n").trim()
         }
 
         fun extractAllWebImageBlocks(

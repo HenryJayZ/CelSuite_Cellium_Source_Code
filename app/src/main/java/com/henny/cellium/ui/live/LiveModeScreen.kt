@@ -123,11 +123,17 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import android.app.Activity
+import android.content.ContextWrapper
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.henny.cellium.assistant.FloatingCelOverlayService
 import com.henny.cellium.avatar.AvatarLibrary
 import com.henny.cellium.avatar.DotMatrixAvatarCanvas
+import com.henny.cellium.avatar.ExpressionDirector
 import com.henny.cellium.avatar.MoodDetector
 import com.henny.cellium.core.CelliumSttEngine
 import com.henny.cellium.core.CelliumTtsEngine
@@ -364,11 +370,38 @@ fun LiveModeScreen(
     var phase by remember { mutableStateOf(LivePhase.IDLE) }
     var stageLabel by remember { mutableStateOf("") }
     var mood by remember { mutableStateOf("idle") }
+    var moodHoldJob by remember { mutableStateOf<Job?>(null) }
     var avatarLibrary by remember { mutableStateOf<AvatarLibrary?>(null) }
     var userTranscript by remember { mutableStateOf("") }
     var celReply by remember { mutableStateOf("") }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var mouthOpenness by remember { mutableFloatStateOf(0.05f) }
+
+    fun findHostActivity(ctx: Context): Activity? {
+        var cur: Context? = ctx
+        while (cur is ContextWrapper) {
+            if (cur is Activity) return cur
+            cur = cur.baseContext
+        }
+        return null
+    }
+
+    // #1: True Android edge-to-edge immersive fullscreen when Hide Eye is ON (restores bars on toggle or exit)
+    DisposableEffect(guiHidden) {
+        val activity = findHostActivity(context)
+        val controller = activity?.let { WindowCompat.getInsetsController(it.window, it.window.decorView) }
+        if (controller != null) {
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            if (guiHidden) {
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
 
     // Retry preservation on offline / network failure (#4v)
     var failedPrompt by remember { mutableStateOf<String?>(null) }
@@ -536,6 +569,15 @@ fun LiveModeScreen(
                                 phase = LivePhase.IDLE
                                 stageLabel = ""
                                 mouthOpenness = 0.05f
+                                // #2d: Hold emotional expression naturally before relaxing back to idle
+                                moodHoldJob?.cancel()
+                                val holdMs = ExpressionDirector.holdDurationMsForMood(mood)
+                                moodHoldJob = scope.launch {
+                                    delay(holdMs)
+                                    if (!isExiting && phase == LivePhase.IDLE) {
+                                        mood = "idle"
+                                    }
+                                }
                                 if (viewModel.preferences.value.liveHandsFreeLoop && hasAudioPerm && typedInput.isBlank()) {
                                     delay(360L)
                                     if (!isExiting && viewModel.preferences.value.liveHandsFreeLoop && typedInput.isBlank()) {
@@ -830,9 +872,11 @@ fun LiveModeScreen(
             }
         }
 
-        // Centered Dot-Matrix Avatar (always visible even when GUI is hidden!)
+        // Centered Dot-Matrix Avatar (always visible even when GUI is hidden! Anti-repetition ExpressionDirector)
         val liveExpr = remember(avatarLibrary, prefs.avatarGender, mood) {
-            avatarLibrary?.getForMood(prefs.avatarGender, mood)
+            val picked = ExpressionDirector.pickExpressionForMood(mood)
+            avatarLibrary?.get(prefs.avatarGender, picked, "Base")
+                ?: avatarLibrary?.getForMood(prefs.avatarGender, mood)
                 ?: avatarLibrary?.get(prefs.avatarGender, MoodDetector.moodToExpressionName(mood), "Base")
         }
         BoxWithConstraints(
@@ -946,12 +990,11 @@ fun LiveModeScreen(
             }
         }
 
-        // Foreground HUD overlay
+        // Foreground HUD overlay (goes true edge-to-edge when Hide Eye is ON!)
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .statusBarsPadding()
-                .navigationBarsPadding()
+                .then(if (guiHidden) Modifier else Modifier.statusBarsPadding().navigationBarsPadding())
                 .padding(horizontal = 16.dp, vertical = 12.dp)
                 .graphicsLayer { alpha = contentAlpha },
             horizontalAlignment = Alignment.CenterHorizontally,

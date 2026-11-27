@@ -99,7 +99,10 @@ private sealed interface SubOverlay {
 }
 
 @Composable
-fun CelliumApp(viewModel: CelliumViewModel) {
+fun CelliumApp(
+    viewModel: CelliumViewModel,
+    externalChatOpenNonce: Long = 0L,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val visuals = LocalCelliumVisuals.current
@@ -161,12 +164,16 @@ fun CelliumApp(viewModel: CelliumViewModel) {
         OnboardingScreen(
             providers = onboardingProviders,
             initialTermsAccepted = prefs.termsAccepted,
+            initialAvatarGender = prefs.avatarGender,
             googleAuthBusy = googleBusy,
             googleAuthError = googleErr,
             signedInEmail = currentUser?.email,
             onAcceptTerms = { scope.launch { viewModel.prefsStore.acceptTerms() } },
             onContinueAsGuest = { scope.launch { viewModel.prefsStore.setGuestMode(true) } },
             onContinueWithGoogle = { triggerGoogleSignIn() },
+            onSelectAvatarGender = { gender ->
+                scope.launch { viewModel.prefsStore.updateAvatarGender(gender) }
+            },
             onSaveProviderConfig = { profile -> viewModel.saveProviderProfile(profile) },
             onFetchModels = { profile -> viewModel.fetchLiveModels(profile) },
             onCompleteOnboarding = { selectedId ->
@@ -181,6 +188,13 @@ fun CelliumApp(viewModel: CelliumViewModel) {
 
     var currentTab by rememberSaveable { mutableStateOf(CelliumTab.CHAT) }
     var subOverlay by remember { mutableStateOf<SubOverlay>(SubOverlay.None) }
+
+    LaunchedEffect(externalChatOpenNonce) {
+        if (externalChatOpenNonce > 0L) {
+            subOverlay = SubOverlay.None
+            currentTab = CelliumTab.CHAT
+        }
+    }
 
     LaunchedEffect(currentTab, subOverlay) {
         val tabKey = when (subOverlay) {

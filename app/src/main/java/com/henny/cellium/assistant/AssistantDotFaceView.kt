@@ -13,20 +13,21 @@ import android.view.View
 import com.henny.cellium.avatar.AvatarExpression
 import com.henny.cellium.avatar.AvatarKind
 import com.henny.cellium.avatar.AvatarLibrary
+import com.henny.cellium.avatar.ExpressionDirector
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.random.Random
 
 /**
  * Pure Android Canvas View rendering Cel's fully animated dot-matrix face for true system-wide
  * WindowManager overlays and VoiceInteractionSession.
- * Uses a dedicated main-looper Handler ticker so pixel animations NEVER stall on overlays,
- * with crisp non-spiraling spring morphing, lively breathing, natural blinking, talking mouth
- * modulation, tear/sweat/steam/laugh/sob particle motion, explicit expression overrides
- * (for Hell Abyss scared/relieved reactions), and state rings.
+ * Features crisp non-spiraling spring morphing, anchored blush during blinks, anti-repetition
+ * mood-to-expression resolution, talking mouth modulation, tear/sweat/steam/laugh/sob motion,
+ * explicit expression overrides, and pixel-scatter disintegration on Hell Pit drop.
  */
 class AssistantDotFaceView(
     context: Context,
@@ -34,13 +35,23 @@ class AssistantDotFaceView(
 ) : View(context) {
 
     private val library: AvatarLibrary = AvatarLibrary.load(context)
-    private var gender: String = "Female"
+    private var gender: String = "Chibi"
     private var mood: String = "idle"
     private var explicitExpressionName: String? = null
+    private var resolvedMoodExpressionName: String = ExpressionDirector.pickExpressionForMood("idle")
     private var talking: Boolean = false
     private var listening: Boolean = false
     private var micReady: Boolean = false
     private var handsFree: Boolean = false
+
+    // Disintegration animation state (Hell Pit drop)
+    private var disintegrating: Boolean = false
+    private var disintegrateStartMs: Long = 0L
+    private val disintegrateDurationMs: Long = 560L
+    private var disintegrateOnComplete: (() -> Unit)? = null
+    private var disintegrateVx = FloatArray(0)
+    private var disintegrateVy = FloatArray(0)
+    private var disintegrateFade = FloatArray(0)
 
     private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -65,6 +76,7 @@ class AssistantDotFaceView(
     private var lastFrameMs = startMs
     private var animRunning = false
     private val tickerHandler = Handler(Looper.getMainLooper())
+    private var manualBlinkUntilMs = 0L
 
     // Smooth interpolated particle coordinates (x, y) in avatar 600x400 space (zero per-frame heap churn)
     private val currentPositions = ArrayList<FloatArray>()
@@ -73,7 +85,7 @@ class AssistantDotFaceView(
         override fun run() {
             if (!animRunning) return
             invalidate()
-            tickerHandler.postDelayed(this, 33L)
+            tickerHandler.postDelayed(this, if (disintegrating) 16L else 33L)
         }
     }
 
@@ -99,16 +111,58 @@ class AssistantDotFaceView(
         micReady = isMicReady
         handsFree = isHandsFree
         accentColor = primaryColor
-        explicitExpressionName = if (moodChanged && expressionOverride == explicitExpressionName) {
-            null
+        if (moodChanged && expressionOverride == explicitExpressionName) {
+            explicitExpressionName = null
+            resolvedMoodExpressionName = ExpressionDirector.pickExpressionForMood(newMood, resolvedMoodExpressionName)
         } else {
-            expressionOverride
+            explicitExpressionName = expressionOverride
+            if (moodChanged) {
+                resolvedMoodExpressionName = ExpressionDirector.pickExpressionForMood(newMood, resolvedMoodExpressionName)
+            }
         }
         invalidate()
     }
 
     fun setExplicitExpression(name: String?) {
         explicitExpressionName = name
+        if (name != null) {
+            ExpressionDirector.recordExpression(name)
+        }
+        invalidate()
+    }
+
+    fun triggerManualBlink() {
+        manualBlinkUntilMs = SystemClock.uptimeMillis() + 210L
+        invalidate()
+    }
+
+    fun startDisintegration(onComplete: () -> Unit) {
+        if (disintegrating) return
+        disintegrating = true
+        disintegrateStartMs = SystemClock.uptimeMillis()
+        disintegrateOnComplete = onComplete
+        val n = currentPositions.size.coerceAtLeast(1)
+        disintegrateVx = FloatArray(n)
+        disintegrateVy = FloatArray(n)
+        disintegrateFade = FloatArray(n)
+        val rng = Random(disintegrateStartMs)
+        for (i in 0 until n) {
+            val pos = currentPositions.getOrNull(i)
+            val dx = (pos?.get(0) ?: 300f) - 300f
+            val dy = (pos?.get(1) ?: 200f) - 200f
+            val angle = rng.nextFloat() * (2f * PI.toFloat())
+            val burst = 120f + rng.nextFloat() * 260f
+            disintegrateVx[i] = dx * 1.4f + cos(angle) * burst
+            disintegrateVy[i] = dy * 1.1f + sin(angle) * burst - 90f
+            disintegrateFade[i] = 0.72f + rng.nextFloat() * 0.55f
+        }
+        startTicker()
+        invalidate()
+    }
+
+    fun resetDisintegration() {
+        disintegrating = false
+        disintegrateOnComplete = null
         invalidate()
     }
 
@@ -159,6 +213,54 @@ class AssistantDotFaceView(
         val cy = h * 0.5f
         val radius = min(w, h) * 0.45f
 
+        val disProg = if (disintegrating) {
+            ((nowMs - disintegrateStartMs).toFloat() / disintegrateDurationMs.toFloat()).coerceIn(0f, 1f)
+        } else 0f
+
+        if (disintegrating) {
+            // Backing orb shrinks and fades cleanly into embers as dots burst outward
+            val bgScale = (1f - disProg * 1.35f).coerceIn(0f, 1f)
+            if (bgScale > 0.02f) {
+                bgPaint.alpha = (226 * bgScale).toInt().coerceIn(0, 226)
+                canvas.drawCircle(cx, cy, radius * bgScale, bgPaint)
+                ringPaint.color = Color.argb((220 * bgScale).toInt().coerceIn(0, 220), 239, 68, 68)
+                canvas.drawCircle(cx, cy, (radius - 2f) * bgScale, ringPaint)
+                bgPaint.alpha = 226
+            }
+            val unitScale = (min(w, h) / 480f) * 1.15f
+            val baseDotHalf = (3.4f * unitScale).coerceAtLeast(1.4f)
+            val tSec = disProg * (disintegrateDurationMs / 1000f)
+            val gravity = 520f
+            for (i in currentPositions.indices) {
+                if (i >= disintegrateVx.size) break
+                val pos = currentPositions[i]
+                val fadeRate = disintegrateFade[i]
+                val alphaF = (1f - disProg * fadeRate * 1.2f).coerceIn(0f, 1f)
+                if (alphaF <= 0.02f) continue
+                val px = pos[0] + disintegrateVx[i] * tSec
+                val py = pos[1] + disintegrateVy[i] * tSec + 0.5f * gravity * tSec * tSec
+                val sx = cx + (px - 300f) * unitScale
+                val sy = cy + (py - 200f) * unitScale
+                val dotHalf = (baseDotHalf * (0.45f + 0.65f * alphaF)).coerceAtLeast(1.0f)
+                val alphaInt = (alphaF * 255f).toInt().coerceIn(0, 255)
+                val emberR = (248 * (1f - disProg * 0.1f)).toInt().coerceIn(0, 255)
+                val emberG = (180 * (1f - disProg * 0.7f)).toInt().coerceIn(0, 255)
+                val emberB = (255 * (1f - disProg * 0.85f)).toInt().coerceIn(0, 255)
+                glowPaint.color = Color.argb((alphaInt * 0.35f).toInt(), emberR, emberG, emberB)
+                canvas.drawCircle(sx, sy, dotHalf * 2.1f, glowPaint)
+                dotPaint.color = Color.argb(alphaInt, emberR, emberG, emberB)
+                rect.set(sx - dotHalf, sy - dotHalf, sx + dotHalf, sy + dotHalf)
+                canvas.drawRoundRect(rect, dotHalf * 0.45f, dotHalf * 0.45f, dotPaint)
+            }
+            if (disProg >= 1f) {
+                val cb = disintegrateOnComplete
+                disintegrateOnComplete = null
+                stopTicker()
+                cb?.let { post(it) }
+            }
+            return
+        }
+
         // Circular dark obsidian glass backing
         canvas.drawCircle(cx, cy, radius, bgPaint)
 
@@ -196,7 +298,15 @@ class AssistantDotFaceView(
         ringPaint.color = ringColor
         canvas.drawCircle(cx, cy, radius - 2f, ringPaint)
 
-        val baseExpr: AvatarExpression = explicitExpressionName?.let { library.get(gender, it) }
+        val baseExpr: AvatarExpression = explicitExpressionName?.let { raw ->
+            val modIdx = raw.indexOf(" - ")
+            if (modIdx > 0) {
+                library.get(gender, raw.substring(0, modIdx), raw.substring(modIdx + 3))
+            } else {
+                library.get(gender, raw)
+            }
+        }
+            ?: library.get(gender, resolvedMoodExpressionName)
             ?: library.getForMood(gender, mood)
             ?: return
         val expr = if (talking) {
@@ -224,11 +334,16 @@ class AssistantDotFaceView(
         val morphAlpha = (1f - (1f - 0.22f).pow(dtMs / 16.67f)).coerceIn(0.08f, 0.36f)
         val maxStep = 22f * (dtMs / 16.67f)
 
-        // Lively blink cycle every 3.5s (disabled when asleep)
+        // Lively blink cycle every 3.5s (disabled when asleep) + manual studio blink
         val cyclePos = elapsedSec % 3.5f
-        val blinkT = if (mood != "sleepy" && expr.blinkEnabled && cyclePos < 0.22f) {
+        val manualBlinkT = if (nowMs < manualBlinkUntilMs) {
+            val rem = (manualBlinkUntilMs - nowMs).toFloat() / 210f
+            sin((1f - rem).coerceIn(0f, 1f) * PI).toFloat().coerceIn(0f, 1f)
+        } else 0f
+        val autoBlinkT = if (mood != "sleepy" && expr.blinkEnabled && cyclePos < 0.22f) {
             sin((cyclePos / 0.22f) * PI).toFloat().coerceIn(0f, 1f)
         } else 0f
+        val blinkT = maxOf(autoBlinkT, manualBlinkT)
 
         // Visible floating breathing & micro-expression bounce (scaled for compact floating circles!)
         val breathSpeed = if (mood == "sleepy") 1.5f else 2.7f
@@ -295,8 +410,9 @@ class AssistantDotFaceView(
                     val depth = if (pt.left) expr.leftDepth else expr.rightDepth
                     val dip = if (pt.left) expr.leftEyebrowDip else expr.rightEyebrowDip
                     when (pt.kind) {
-                        AvatarKind.EYELID, AvatarKind.BLUSH, AvatarKind.PERM_BLUSH -> py += depth * blinkT
+                        AvatarKind.EYELID -> py += depth * blinkT
                         AvatarKind.EYEBROW -> py += dip * blinkT
+                        AvatarKind.BLUSH, AvatarKind.PERM_BLUSH -> Unit
                         AvatarKind.STEM, AvatarKind.BOTTOM_BAR, AvatarKind.MID_BAR -> {
                             alpha = ((1f - blinkT * (1f - expr.fadeOpacity)) * 255f).toInt().coerceIn(0, 255)
                         }

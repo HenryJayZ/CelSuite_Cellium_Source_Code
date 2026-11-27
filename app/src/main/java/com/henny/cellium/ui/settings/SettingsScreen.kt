@@ -100,6 +100,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material.icons.rounded.Brush
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material3.FilterChip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import com.henny.cellium.ai.KaggleImageEngine
 import com.henny.cellium.BuildConfig
 import com.henny.cellium.core.CelliumTtsEngine
 import com.henny.cellium.core.ContextModifyConfig
@@ -123,6 +130,7 @@ import com.henny.cellium.ui.theme.CelTextSecondary
 import com.henny.cellium.ui.theme.JetBrainsMono
 import com.henny.cellium.ui.theme.LocalCelliumVisuals
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.util.Locale
 
 private enum class SettingsCategory(
@@ -130,16 +138,18 @@ private enum class SettingsCategory(
     val keywords: String,
     val icon: ImageVector,
     val accentHex: Long,
+    val isAdvanced: Boolean = false,
 ) {
     PROVIDERS("AI Providers & Keys", "providers keys models openrouter gemini pollinations starred hidden retry", Icons.Rounded.Key, 0xFFA855F7),
-    OFFLINE("Offline AI & RAM", "offline local gguf task mediapipe llama ram memory free mount", Icons.Rounded.Memory, 0xFF38BDF8),
-    APPEARANCE("Appearance & Glass", "theme wallpaper glass opacity glow particles fps word wrap floating cel", Icons.Rounded.Palette, 0xFFF472B6),
-    VOICE("Voice, Live & Assistant", "voice tts pitch rate mood engine animalese typing sound wake word okay cel assistant", Icons.Rounded.RecordVoiceOver, 0xFF34D399),
     PERSONAS("Personas & Memories", "persona edit delete restore memories prompt", Icons.Rounded.Psychology, 0xFFC084FC),
-    CONTEXT("Context & Engine Modify", "context modify system prompt history gguf temperature top-p mmap flash attention", Icons.Rounded.Tune, 0xFFFBBF24),
-    AGENT("Agent & Shizuku", "agent shizuku shell workspace folder directory anti-kill ram guard", Icons.Rounded.Shield, 0xFF10B981),
+    IMAGINE_GPU("Image Gen & Kaggle GPU", "kaggle image gen sdxl gpu cache checkpoint preset lora civitai huggingface illume", Icons.Rounded.Brush, 0xFFF59E0B),
+    VOICE("Voice, Live & Assistant", "voice tts pitch rate mood engine animalese typing sound wake word okay cel assistant shuffle", Icons.Rounded.RecordVoiceOver, 0xFF34D399),
+    APPEARANCE("Appearance & Floating Cel", "theme wallpaper glass opacity glow particles fps word wrap floating cel idle peek", Icons.Rounded.Palette, 0xFFF472B6),
     CLOUD("Cloud Sync & Storage", "cloud sync google firestore quota storage delete backup account", Icons.Rounded.CloudSync, 0xFF60A5FA),
-    SYSTEM("System, Commands & Backup", "battery optimization permissions notifications slash compact template json export import", Icons.Rounded.SettingsApplications, 0xFFFB7185),
+    OFFLINE("Offline AI & RAM", "offline local gguf task mediapipe llama ram memory free mount", Icons.Rounded.Memory, 0xFF38BDF8, isAdvanced = true),
+    CONTEXT("Context & Engine Modify", "context modify system prompt history gguf temperature top-p mmap flash attention", Icons.Rounded.Tune, 0xFFFBBF24, isAdvanced = true),
+    AGENT("Agent & Shizuku", "agent shizuku shell workspace folder directory anti-kill ram guard", Icons.Rounded.Shield, 0xFF10B981, isAdvanced = true),
+    SYSTEM("System, Commands & Backup", "battery optimization permissions notifications slash compact template json export import", Icons.Rounded.SettingsApplications, 0xFFFB7185, isAdvanced = true),
 }
 
 @SuppressLint("BatteryLife")
@@ -209,13 +219,60 @@ fun SettingsScreen(
         pm?.isIgnoringBatteryOptimizations(context.packageName) == true
     }
 
+    val kaggleJsonImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            runCatching {
+                val raw = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val obj = JSONObject(raw)
+                val u = obj.optString("username").trim()
+                val k = obj.optString("key").trim()
+                if (u.isNotBlank() && k.isNotBlank()) {
+                    viewModel.saveKaggleCredentials(u, k)
+                    viewModel.showSettingsFeedback("Imported Kaggle credentials for $u (encrypted in Keystore).")
+                } else {
+                    viewModel.showSettingsFeedback("kaggle.json must contain 'username' and 'key'.", isError = true)
+                }
+            }.onFailure { err ->
+                viewModel.showSettingsFeedback("Failed to import kaggle.json: ${err.localizedMessage}", isError = true)
+            }
+        }
+    }
+
+    LaunchedEffect(activeCategory) {
+        if (activeCategory == SettingsCategory.IMAGINE_GPU) {
+            val (u, k) = viewModel.kaggleEngine.getCredentials(prefs)
+            if (u.isNotBlank() && k.isNotBlank() && uiState.kaggleCacheStatusMap.isEmpty()) {
+                viewModel.refreshKaggleCache()
+            }
+        }
+    }
+
+    fun subtitleForCategory(cat: SettingsCategory): String = when (cat) {
+        SettingsCategory.PROVIDERS -> "${uiState.activeProvider?.name ?: "None"} · Retry ${prefs.maxAutoRetries}x"
+        SettingsCategory.OFFLINE -> "${uiState.registeredLocalModels.size} models · Live RAM $processRamMb MB"
+        SettingsCategory.APPEARANCE -> "Theme: ${prefs.themePresetId} · Floating ${if (prefs.floatingMiniCel) "ON" else "OFF"}"
+        SettingsCategory.VOICE -> "Chat: ${CelliumTtsEngine.resolveVoiceLabel(prefs.ttsEngine, prefs.ttsVoiceName)} · Wake ${if (prefs.wakeWordEnabled) "ON" else "OFF"}"
+        SettingsCategory.PERSONAS -> "${uiState.customPersonas.size} personas · ${uiState.memories.size} memories"
+        SettingsCategory.IMAGINE_GPU -> {
+            val (u, k) = viewModel.kaggleEngine.getCredentials(prefs)
+            val credTag = if (u.isNotBlank() && k.isNotBlank()) "Kaggle: $u" else "No Kaggle key yet"
+            "$credTag · Chat tool ${if (prefs.imageGenEnabled) "ON" else "OFF"}"
+        }
+        SettingsCategory.CONTEXT -> "History ${prefs.contextModify.historyLimit} turns · n_ctx ${prefs.contextModify.ggufContextLength}"
+        SettingsCategory.AGENT -> "Shizuku: ${uiState.shizukuStatus.name} · Agent ${if (prefs.agentModeEnabled) "ON" else "OFF"}"
+        SettingsCategory.CLOUD -> if (user != null) "Signed in: ${user.email ?: user.displayName}" else "Guest Mode · Optional Google Sync"
+        SettingsCategory.SYSTEM -> "Battery ${if (batteryUnrestricted) "Unrestricted" else "Standard"} · ${uiState.promptTemplates.size} slash cmds"
+    }
+
     if (activeCategory == null) {
-        // ── CLEAN CATEGORY HUB ──
-        val visibleCategories = remember(hubSearch) {
-            val q = hubSearch.trim().lowercase()
-            if (q.isEmpty()) SettingsCategory.entries
+        // ── CLEAN BREATHABLE GROUPED SETTINGS HUB WITH SIMPLE / ADVANCED TOGGLE (#3) ──
+        val searchQuery = hubSearch.trim().lowercase()
+        val searchMatches = remember(searchQuery) {
+            if (searchQuery.isEmpty()) emptyList()
             else SettingsCategory.entries.filter {
-                it.title.lowercase().contains(q) || it.keywords.contains(q)
+                it.title.lowercase().contains(searchQuery) || it.keywords.contains(searchQuery)
             }
         }
 
@@ -230,86 +287,259 @@ fun SettingsScreen(
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 item {
-                    Text("Cel.Cellium Settings", style = MaterialTheme.typography.titleLarge, color = CelTextPrimary)
-                    Text(
-                        "${BuildConfig.VERSION_NAME} · Local-First Room SQLite · CelSuite.HenryJayz.Cellium",
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
-                        color = CelTextSecondary,
-                    )
-                }
-
-            item {
-                OutlinedTextField(
-                    value = hubSearch,
-                    onValueChange = { hubSearch = it },
-                    placeholder = { Text("Search settings (wake word, GGUF, keys, cloud...)") },
-                    leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, tint = CelLavender) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth().testTag("settings_hub_search"),
-                )
-            }
-
-            // Quick Studios Row
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    StudioQuickTile(
-                        icon = Icons.Rounded.Face,
-                        title = "Avatar Studio",
-                        subtitle = "3,800+ dot-matrix",
-                        accent = visuals.primary,
-                        onClick = {
-                            viewModel.soundEngine.playPop()
-                            onOpenAvatarStudio()
-                        },
-                        modifier = Modifier.weight(1f).testTag("settings_open_avatar_studio"),
-                    )
-                    StudioQuickTile(
-                        icon = Icons.Rounded.BarChart,
-                        title = "Stats & Logs",
-                        subtitle = "${uiState.totalMessageCount} msgs · Console",
-                        accent = Color(0xFF38BDF8),
-                        onClick = {
-                            viewModel.soundEngine.playPop()
-                            onOpenStats()
-                        },
-                        modifier = Modifier.weight(1f).testTag("settings_open_stats"),
-                    )
-                }
-            }
-
-            // Category Rows
-            visibleCategories.forEach { cat ->
-                item(key = cat.name) {
-                    val subtitle = when (cat) {
-                        SettingsCategory.PROVIDERS -> "${uiState.activeProvider?.name ?: "None"} · Retry ${prefs.maxAutoRetries}x"
-                        SettingsCategory.OFFLINE -> "${uiState.registeredLocalModels.size} models · Live RAM $processRamMb MB"
-                        SettingsCategory.APPEARANCE -> "Theme: ${prefs.themePresetId} · Wrap ${if (prefs.codeWordWrap) "ON" else "OFF"}"
-                        SettingsCategory.VOICE -> "Chat: ${CelliumTtsEngine.resolveVoiceLabel(prefs.ttsEngine, prefs.ttsVoiceName)} · Live: ${CelliumTtsEngine.resolveVoiceLabel(prefs.liveTtsEngine, prefs.liveTtsVoiceName)}"
-                        SettingsCategory.PERSONAS -> "${uiState.customPersonas.size} personas · ${uiState.memories.size} memories"
-                        SettingsCategory.CONTEXT -> "History ${prefs.contextModify.historyLimit} turns · n_ctx ${prefs.contextModify.ggufContextLength}"
-                        SettingsCategory.AGENT -> "Shizuku: ${uiState.shizukuStatus.name} · Agent ${if (prefs.agentModeEnabled) "ON" else "OFF"}"
-                        SettingsCategory.CLOUD -> if (user != null) "Signed in: ${user.email ?: user.displayName}" else "Guest Mode · Optional Google Sync"
-                        SettingsCategory.SYSTEM -> "Battery ${if (batteryUnrestricted) "Unrestricted" else "Standard"} · ${uiState.promptTemplates.size} slash cmds"
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Settings", style = MaterialTheme.typography.headlineSmall, color = CelTextPrimary, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "${BuildConfig.VERSION_NAME} · Local-First · CelSuite.HenryJayz.Cellium",
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                            color = CelTextSecondary,
+                        )
                     }
-                    SettingsCategoryRow(
-                        icon = cat.icon,
-                        title = cat.title,
-                        subtitle = subtitle,
-                        accent = Color(cat.accentHex),
-                        onClick = {
-                            viewModel.soundEngine.playClick()
-                            activeCategory = cat
-                        },
+                }
+
+                // Simple / Advanced Mode Segmented Switcher
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(CelTerminalBg.copy(alpha = 0.82f))
+                            .border(1.dp, visuals.subtleBorder, RoundedCornerShape(16.dp))
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        val simpleSelected = !prefs.settingsAdvancedMode
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (simpleSelected) visuals.primary else Color.Transparent)
+                                .clickable {
+                                    viewModel.soundEngine.playClick()
+                                    scope.launch { viewModel.prefsStore.updateSettingsAdvancedMode(false) }
+                                }
+                                .padding(vertical = 9.dp)
+                                .testTag("settings_mode_simple"),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "Simple",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (simpleSelected) Color.White else CelTextSecondary,
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (!simpleSelected) visuals.primary else Color.Transparent)
+                                .clickable {
+                                    viewModel.soundEngine.playClick()
+                                    scope.launch { viewModel.prefsStore.updateSettingsAdvancedMode(true) }
+                                }
+                                .padding(vertical = 9.dp)
+                                .testTag("settings_mode_advanced"),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "Advanced",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (!simpleSelected) Color.White else CelTextSecondary,
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    OutlinedTextField(
+                        value = hubSearch,
+                        onValueChange = { hubSearch = it },
+                        placeholder = { Text("Search settings (kaggle, wake word, GGUF, keys, cloud...)") },
+                        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null, tint = CelLavender) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth().testTag("settings_hub_search"),
                     )
                 }
-            }
+
+                if (searchQuery.isNotEmpty()) {
+                    if (searchMatches.isEmpty()) {
+                        item {
+                            Text(
+                                text = "No settings matched \"$hubSearch\".",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = CelTextMuted,
+                                modifier = Modifier.padding(vertical = 8.dp),
+                            )
+                        }
+                    } else {
+                        searchMatches.forEach { cat ->
+                            item(key = "search_${cat.name}") {
+                                SettingsCategoryRow(
+                                    icon = cat.icon,
+                                    title = cat.title,
+                                    subtitle = subtitleForCategory(cat),
+                                    accent = Color(cat.accentHex),
+                                    onClick = {
+                                        viewModel.soundEngine.playClick()
+                                        activeCategory = cat
+                                    },
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // Quick Studios Row
+                    item {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            StudioQuickTile(
+                                icon = Icons.Rounded.Face,
+                                title = "Avatar Studio",
+                                subtitle = "Style: ${prefs.avatarGender} · 3,800+ faces",
+                                accent = visuals.primary,
+                                onClick = {
+                                    viewModel.soundEngine.playPop()
+                                    onOpenAvatarStudio()
+                                },
+                                modifier = Modifier.weight(1f).testTag("settings_open_avatar_studio"),
+                            )
+                            if (prefs.settingsAdvancedMode) {
+                                StudioQuickTile(
+                                    icon = Icons.Rounded.BarChart,
+                                    title = "Stats & Logs",
+                                    subtitle = "${uiState.totalMessageCount} msgs · Console",
+                                    accent = Color(0xFF38BDF8),
+                                    onClick = {
+                                        viewModel.soundEngine.playPop()
+                                        onOpenStats()
+                                    },
+                                    modifier = Modifier.weight(1f).testTag("settings_open_stats"),
+                                )
+                            } else {
+                                StudioQuickTile(
+                                    icon = Icons.Rounded.Brush,
+                                    title = "Kaggle GPU Art",
+                                    subtitle = if (prefs.imageGenEnabled) "SDXL Cloud Ready" else "Configure GPU",
+                                    accent = Color(0xFFF59E0B),
+                                    onClick = {
+                                        viewModel.soundEngine.playPop()
+                                        activeCategory = SettingsCategory.IMAGINE_GPU
+                                    },
+                                    modifier = Modifier.weight(1f).testTag("settings_open_kaggle_quick"),
+                                )
+                            }
+                        }
+                    }
+
+                    // Group 1: AI & Models
+                    item(key = "group_ai") {
+                        SettingsGroupCard(title = "AI & Models") {
+                            SettingsGroupRow(
+                                cat = SettingsCategory.PROVIDERS,
+                                subtitle = subtitleForCategory(SettingsCategory.PROVIDERS),
+                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.PROVIDERS },
+                            )
+                            HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.55f))
+                            SettingsGroupRow(
+                                cat = SettingsCategory.PERSONAS,
+                                subtitle = subtitleForCategory(SettingsCategory.PERSONAS),
+                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.PERSONAS },
+                            )
+                            HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.55f))
+                            SettingsGroupRow(
+                                cat = SettingsCategory.IMAGINE_GPU,
+                                subtitle = subtitleForCategory(SettingsCategory.IMAGINE_GPU),
+                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.IMAGINE_GPU },
+                            )
+                        }
+                    }
+
+                    // Group 2: Voice & Sounds
+                    item(key = "group_voice") {
+                        SettingsGroupCard(title = "Voice & Sounds") {
+                            SettingsGroupRow(
+                                cat = SettingsCategory.VOICE,
+                                subtitle = subtitleForCategory(SettingsCategory.VOICE),
+                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.VOICE },
+                            )
+                        }
+                    }
+
+                    // Group 3: Avatar & Appearance
+                    item(key = "group_appearance") {
+                        SettingsGroupCard(title = "Avatar & Appearance") {
+                            SettingsGroupRow(
+                                cat = SettingsCategory.APPEARANCE,
+                                subtitle = subtitleForCategory(SettingsCategory.APPEARANCE),
+                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.APPEARANCE },
+                            )
+                        }
+                    }
+
+                    // Group 4: Account & Sync
+                    item(key = "group_account") {
+                        SettingsGroupCard(title = "Account & Sync") {
+                            SettingsGroupRow(
+                                cat = SettingsCategory.CLOUD,
+                                subtitle = subtitleForCategory(SettingsCategory.CLOUD),
+                                onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.CLOUD },
+                            )
+                        }
+                    }
+
+                    // Advanced Power Tools Group (revealed when Advanced is toggled ON)
+                    if (prefs.settingsAdvancedMode) {
+                        item(key = "group_advanced") {
+                            SettingsGroupCard(title = "Power User & System") {
+                                SettingsGroupRow(
+                                    cat = SettingsCategory.OFFLINE,
+                                    subtitle = subtitleForCategory(SettingsCategory.OFFLINE),
+                                    onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.OFFLINE },
+                                )
+                                HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.55f))
+                                SettingsGroupRow(
+                                    cat = SettingsCategory.CONTEXT,
+                                    subtitle = subtitleForCategory(SettingsCategory.CONTEXT),
+                                    onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.CONTEXT },
+                                )
+                                HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.55f))
+                                SettingsGroupRow(
+                                    cat = SettingsCategory.AGENT,
+                                    subtitle = subtitleForCategory(SettingsCategory.AGENT),
+                                    onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.AGENT },
+                                )
+                                HorizontalDivider(color = visuals.subtleBorder.copy(alpha = 0.55f))
+                                SettingsGroupRow(
+                                    cat = SettingsCategory.SYSTEM,
+                                    subtitle = subtitleForCategory(SettingsCategory.SYSTEM),
+                                    onClick = { viewModel.soundEngine.playClick(); activeCategory = SettingsCategory.SYSTEM },
+                                )
+                            }
+                        }
+                    } else {
+                        item(key = "advanced_hint") {
+                            TextButton(
+                                onClick = {
+                                    viewModel.soundEngine.playClick()
+                                    scope.launch { viewModel.prefsStore.updateSettingsAdvancedMode(true) }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    text = "Show Advanced Settings (Offline GGUF, Context Knobs, Shizuku, Backup & Logs)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CelLavender,
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     } else {
@@ -373,6 +603,270 @@ fun SettingsScreen(
 
                     SettingsCategory.VOICE -> {
                         item { VoiceAndAudioLabCard(prefs = prefs, viewModel = viewModel) }
+                    }
+
+                    SettingsCategory.IMAGINE_GPU -> {
+                        item {
+                            val initCreds = remember(prefs.kaggleUsername, prefs.kaggleKey) {
+                                viewModel.kaggleEngine.getCredentials(prefs)
+                            }
+                            var kaggleUser by remember(initCreds.first) { mutableStateOf(initCreds.first) }
+                            var kaggleKey by remember(initCreds.second) { mutableStateOf(initCreds.second) }
+                            var hfToken by remember { mutableStateOf(viewModel.secureKaggleStore.getHfToken()) }
+                            var civitaiToken by remember { mutableStateOf(viewModel.secureKaggleStore.getCivitaiToken()) }
+
+                            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                                // 1. Chat Tool & General Switch
+                                GlassCard(highlighted = prefs.imageGenEnabled, shape = RoundedCornerShape(22.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Icon(Icons.Rounded.Brush, contentDescription = null, tint = Color(0xFFF59E0B))
+                                        Column {
+                                            Text("AI Image Generation & Kaggle Cloud GPU", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
+                                            Text("PC-parity SDXL GPU pipeline (30h/week free T4 x2 / P100)", style = MaterialTheme.typography.labelSmall, color = CelTextSecondary)
+                                        }
+                                    }
+                                    Spacer(Modifier.height(10.dp))
+                                    SettingSwitchRow("Enable AI Image Generation in Chat (/imagine & tool)", prefs.imageGenEnabled) { enabled ->
+                                        scope.launch {
+                                            viewModel.prefsStore.updateImageGenEnabled(enabled)
+                                            viewModel.notifyPrefsChangedForSync()
+                                        }
+                                    }
+                                    SettingSwitchRow("Stealth Auto-Wipe Notebook After Render", prefs.kaggleAutoClean) { clean ->
+                                        scope.launch {
+                                            viewModel.prefsStore.updateKaggleFullSettings(autoClean = clean)
+                                            viewModel.notifyPrefsChangedForSync()
+                                        }
+                                    }
+                                    Text(
+                                        text = "Stealth Auto-Wipe pushes a tiny CPU-only placeholder after downloading your JPEGs so no prompts or outputs remain on Kaggle.",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = CelTextMuted,
+                                    )
+                                }
+
+                                // 2. Encrypted Kaggle Credentials (Android Keystore AES-256-GCM)
+                                GlassCard(shape = RoundedCornerShape(22.dp)) {
+                                    Text("Kaggle API Credentials (Encrypted)", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
+                                    Text(
+                                        text = "Stored in hardware-backed Android Keystore (AES-256-GCM). Use your Kaggle username & Legacy API Key from kaggle.com/settings.",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = CelTextSecondary,
+                                    )
+                                    Spacer(Modifier.height(10.dp))
+                                    OutlinedTextField(
+                                        value = kaggleUser,
+                                        onValueChange = { kaggleUser = it },
+                                        label = { Text("Kaggle Username") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp),
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    OutlinedTextField(
+                                        value = kaggleKey,
+                                        onValueChange = { kaggleKey = it },
+                                        label = { Text("Kaggle Legacy API Key") },
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp),
+                                    )
+                                    Spacer(Modifier.height(10.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                        Button(
+                                            onClick = {
+                                                viewModel.saveKaggleCredentials(
+                                                    username = kaggleUser,
+                                                    apiKey = kaggleKey,
+                                                    hfToken = hfToken,
+                                                    civitaiToken = civitaiToken,
+                                                )
+                                                viewModel.showSettingsFeedback("Kaggle credentials saved to Android Keystore.")
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = visuals.primary),
+                                            shape = RoundedCornerShape(12.dp),
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Text("Save", maxLines = 1, softWrap = false)
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                viewModel.saveKaggleCredentials(
+                                                    username = kaggleUser,
+                                                    apiKey = kaggleKey,
+                                                    hfToken = hfToken,
+                                                    civitaiToken = civitaiToken,
+                                                )
+                                                viewModel.testKaggleConnection()
+                                            },
+                                            shape = RoundedCornerShape(12.dp),
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Text("Test API", maxLines = 1, softWrap = false)
+                                        }
+                                        OutlinedButton(
+                                            onClick = { kaggleJsonImportLauncher.launch(arrayOf("application/json", "*/*")) },
+                                            shape = RoundedCornerShape(12.dp),
+                                        ) {
+                                            Text("JSON", maxLines = 1, softWrap = false)
+                                        }
+                                    }
+                                    uiState.kaggleTestResult?.let { msg ->
+                                        Spacer(Modifier.height(8.dp))
+                                        val isOk = msg.startsWith("Connected", ignoreCase = true) || msg.contains("verified", ignoreCase = true)
+                                        Text(
+                                            text = msg,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (isOk) CelEmeraldThought else CelAmber,
+                                        )
+                                    }
+                                }
+
+                                // 3. Active SDXL Preset & Optional Tokens
+                                GlassCard(shape = RoundedCornerShape(22.dp)) {
+                                    Text("Default Checkpoint Preset", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
+                                    Spacer(Modifier.height(8.dp))
+                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        KaggleImageEngine.MODEL_PRESETS.forEach { preset ->
+                                            FilterChip(
+                                                selected = prefs.kagglePreset == preset.label,
+                                                onClick = {
+                                                    scope.launch {
+                                                        viewModel.prefsStore.updateKaggleFullSettings(
+                                                            preset = preset.label,
+                                                            modelMode = if (preset.mode == "custom") prefs.kaggleModelMode else preset.mode,
+                                                            hfModel = preset.hfModel.ifBlank { null },
+                                                            civitaiUrl = if (preset.mode == "civitai") preset.civitaiUrl else null,
+                                                            loraUrl = if (preset.mode == "civitai") preset.loraUrl else null,
+                                                            steps = preset.steps,
+                                                            guidance = preset.guidance,
+                                                        )
+                                                        viewModel.notifyPrefsChangedForSync()
+                                                    }
+                                                },
+                                                label = { Text(preset.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.height(10.dp))
+                                    OutlinedTextField(
+                                        value = hfToken,
+                                        onValueChange = { hfToken = it },
+                                        label = { Text("Optional HuggingFace Token (gated models)") },
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp),
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    OutlinedTextField(
+                                        value = civitaiToken,
+                                        onValueChange = { civitaiToken = it },
+                                        label = { Text("Optional Civitai API Token (gated checkpoints/LoRAs)") },
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp),
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    OutlinedButton(
+                                        onClick = {
+                                            viewModel.secureKaggleStore.saveHfToken(hfToken)
+                                            viewModel.secureKaggleStore.saveCivitaiToken(civitaiToken)
+                                            viewModel.showSettingsFeedback("Optional HF & Civitai tokens encrypted & saved.")
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                    ) {
+                                        Text("Save Optional Tokens", maxLines = 1, softWrap = false)
+                                    }
+                                }
+
+                                // 4. Phase-5 Cloud Model Cache Manager (Zero GPU Quota)
+                                GlassCard(shape = RoundedCornerShape(22.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("Phase-5 Cloud Model Cache", style = MaterialTheme.typography.titleMedium, color = CelTextPrimary)
+                                            Text(
+                                                text = "Pre-caches Civitai checkpoints into private Kaggle Datasets (CPU-only, 0 GPU quota) so renders load in ~10s!",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = CelTextSecondary,
+                                            )
+                                        }
+                                        IconButton(onClick = { viewModel.refreshKaggleCache() }) {
+                                            Icon(Icons.Rounded.Refresh, contentDescription = "Refresh cache", tint = CelLavender)
+                                        }
+                                    }
+                                    if (uiState.kaggleCacheStatusText.isNotBlank()) {
+                                        Spacer(Modifier.height(6.dp))
+                                        Text(
+                                            text = uiState.kaggleCacheStatusText,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMono),
+                                            color = CelLavender,
+                                        )
+                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                    listOf(KaggleImageEngine.PRESET_NOVA_CARTOON, KaggleImageEngine.PRESET_JUGGERNAUT).forEach { presetLabel ->
+                                        val entry = uiState.kaggleCacheStatusMap[presetLabel]
+                                        val isBusy = uiState.kaggleCacheBusyPreset == presetLabel
+                                        val isHealthy = entry?.healthy == true
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 4.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(CelTerminalBg.copy(alpha = 0.72f))
+                                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isHealthy) Icons.Rounded.CheckCircle else Icons.Rounded.CloudSync,
+                                                contentDescription = null,
+                                                tint = if (isHealthy) CelEmeraldThought else CelTextMuted,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(presetLabel, style = MaterialTheme.typography.labelMedium, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                Text(
+                                                    text = if (isHealthy) {
+                                                        "Cached · ${String.format(Locale.US, "%.2f", (entry?.bytes ?: 0L) / 1_073_741_824.0)} GB ready"
+                                                    } else if (isBusy) {
+                                                        "Building cloud dataset (CPU-only)..."
+                                                    } else {
+                                                        "Not cached (downloads per run)"
+                                                    },
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = if (isHealthy) CelEmeraldThought else CelTextMuted,
+                                                )
+                                            }
+                                            if (isHealthy) {
+                                                IconButton(
+                                                    onClick = { viewModel.deleteKaggleCache(presetLabel) },
+                                                    enabled = uiState.kaggleCacheBusyPreset == null,
+                                                    modifier = Modifier.size(30.dp),
+                                                ) {
+                                                    Icon(Icons.Rounded.Delete, contentDescription = "Delete cache", tint = CelDangerRed, modifier = Modifier.size(16.dp))
+                                                }
+                                            } else {
+                                                OutlinedButton(
+                                                    onClick = { viewModel.buildKaggleCache(presetLabel) },
+                                                    enabled = uiState.kaggleCacheBusyPreset == null,
+                                                    shape = RoundedCornerShape(10.dp),
+                                                ) {
+                                                    if (isBusy) CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                                                    else Text("Cache", maxLines = 1, softWrap = false)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     SettingsCategory.PERSONAS -> {
@@ -835,7 +1329,42 @@ fun SettingsScreen(
                                     Spacer(Modifier.height(8.dp))
 
                                     val cloudItems = summary?.items.orEmpty()
-                                    if (cloudItems.isEmpty()) {
+                                    val storageErr = uiState.cloudStorageError
+                                    if (!storageErr.isNullOrBlank()) {
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = CelDangerRed.copy(alpha = 0.14f),
+                                            border = androidx.compose.foundation.BorderStroke(1.dp, CelDangerRed.copy(alpha = 0.55f)),
+                                            modifier = Modifier.fillMaxWidth(),
+                                        ) {
+                                            Column(
+                                                modifier = Modifier.padding(10.dp),
+                                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                            ) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                ) {
+                                                    Icon(Icons.Rounded.ErrorOutline, contentDescription = null, tint = CelDangerRed, modifier = Modifier.size(17.dp))
+                                                    Text("Cloud Inspection Error", style = MaterialTheme.typography.labelLarge, color = CelDangerRed)
+                                                }
+                                                Text(
+                                                    text = storageErr,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = CelTextPrimary,
+                                                )
+                                                OutlinedButton(
+                                                    onClick = { viewModel.refreshCloudStorage() },
+                                                    enabled = !uiState.cloudStorageLoading,
+                                                    shape = RoundedCornerShape(10.dp),
+                                                ) {
+                                                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
+                                                    Spacer(Modifier.width(5.dp))
+                                                    Text("Retry Inspection", maxLines = 1, softWrap = false)
+                                                }
+                                            }
+                                        }
+                                    } else if (cloudItems.isEmpty()) {
                                         Text(
                                             text = if (uiState.cloudStorageLoading) "Inspecting your Firestore documents..." else "No cloud items yet. Tap Sync Now above to back up.",
                                             style = MaterialTheme.typography.bodySmall,
@@ -1231,6 +1760,57 @@ fun SettingsScreen(
             },
             dismissButton = { TextButton(onClick = { showTemplateDialog = false }) { Text("Cancel", maxLines = 1, softWrap = false) } },
         )
+    }
+}
+
+@Composable
+private fun SettingsGroupCard(
+    title: String,
+    content: @Composable () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = title.uppercase(Locale.US),
+            style = MaterialTheme.typography.labelSmall,
+            color = CelLavender,
+            modifier = Modifier.padding(start = 6.dp),
+        )
+        GlassCard(shape = RoundedCornerShape(22.dp), contentPadding = 6.dp) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SettingsGroupRow(
+    cat: SettingsCategory,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
+    val accent = Color(cat.accentHex)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(RoundedCornerShape(11.dp))
+                .background(accent.copy(alpha = 0.18f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(cat.icon, contentDescription = cat.title, tint = accent, modifier = Modifier.size(19.dp))
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(cat.title, style = MaterialTheme.typography.titleSmall, color = CelTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, style = MaterialTheme.typography.labelSmall, color = CelTextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null, tint = CelTextMuted, modifier = Modifier.size(20.dp))
     }
 }
 
