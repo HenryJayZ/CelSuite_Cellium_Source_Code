@@ -412,19 +412,21 @@ class CelliumTtsEngine(
         sharedSoundEngine ?: CelliumSoundEngine(appContext)
     }
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
-        .build()
+    private val httpClient = CelliumHttp.clientWithTimeouts(
+        connectSec = 12L,
+        readSec = 25L,
+        writeSec = 15L,
+    )
 
     @Volatile private var systemTts: TextToSpeech? = null
     @Volatile private var systemReady: Boolean = false
+    @Volatile private var systemInitFailed: Boolean = false
     @Volatile private var activePlayer: MediaPlayer? = null
     @Volatile private var speakJob: Job? = null
     @Volatile private var activeWebSocket: WebSocket? = null
 
     private var pendingSystemOnDone: (() -> Unit)? = null
+    private val pendingSystemOnReady = mutableListOf<(TextToSpeech?) -> Unit>()
 
     companion object {
         const val ENGINE_SYNTH = "synth"
@@ -451,9 +453,13 @@ class CelliumTtsEngine(
             else -> "System Offline"
         }
 
+        private val ALL_VOICES_BY_ID: Map<String, TtsVoicePreset> by lazy {
+            (SYNTH_VOICES + EDGE_VOICES + POLLY_VOICES + TIKTOK_VOICES + GOOGLE_VOICES)
+                .associateBy { it.id.lowercase() }
+        }
+
         fun resolveVoiceLabel(engine: String, voiceId: String): String {
-            val all = SYNTH_VOICES + EDGE_VOICES + POLLY_VOICES + TIKTOK_VOICES + GOOGLE_VOICES
-            all.firstOrNull { it.id.equals(voiceId, ignoreCase = true) }?.let { return it.label }
+            ALL_VOICES_BY_ID[voiceId.lowercase()]?.let { return it.label }
             return when (engine.lowercase()) {
                 ENGINE_SYNTH -> SYNTH_VOICES.first().label
                 ENGINE_EDGE -> voiceId.removeSuffix("Neural").substringAfterLast('-').ifBlank { "Emma Multilingual" }
@@ -594,36 +600,61 @@ class CelliumTtsEngine(
         }
     }
 
-    private fun ensureSystemTts(onReady: ((TextToSpeech) -> Unit)? = null) {
+    private fun ensureSystemTts(onReady: ((TextToSpeech?) -> Unit)? = null) {
         val existing = systemTts
         if (existing != null && systemReady) {
             onReady?.invoke(existing)
             return
         }
-        if (existing != null) return
-        var created: TextToSpeech? = null
-        created = TextToSpeech(appContext) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                systemReady = true
-                created?.language = Locale.US
-                created?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) {}
-                    override fun onDone(utteranceId: String?) {
-                        val cb = pendingSystemOnDone
-                        pendingSystemOnDone = null
-                        cb?.invoke()
-                    }
-                    @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) {
-                        val cb = pendingSystemOnDone
-                        pendingSystemOnDone = null
-                        cb?.invoke()
-                    }
-                })
-                created?.let { onReady?.invoke(it) }
+        if (systemInitFailed) {
+            onReady?.invoke(null)
+            return
+        }
+        if (onReady != null) {
+            synchronized(pendingSystemOnReady) {
+                pendingSystemOnReady.add(onReady)
             }
         }
-        systemTts = created
+        if (existing != null) return
+        var created: TextToSpeech? = null
+        created = runCatching {
+            TextToSpeech(appContext) { status ->
+                val callbacks = synchronized(pendingSystemOnReady) {
+                    pendingSystemOnReady.toList().also { pendingSystemOnReady.clear() }
+                }
+                if (status == TextToSpeech.SUCCESS) {
+                    systemReady = true
+                    created?.language = Locale.US
+                    created?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {}
+                        override fun onDone(utteranceId: String?) {
+                            val cb = pendingSystemOnDone
+                            pendingSystemOnDone = null
+                            cb?.invoke()
+                        }
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) {
+                            val cb = pendingSystemOnDone
+                            pendingSystemOnDone = null
+                            cb?.invoke()
+                        }
+                    })
+                    callbacks.forEach { it(created) }
+                } else {
+                    systemInitFailed = true
+                    callbacks.forEach { it(null) }
+                }
+            }
+        }.getOrNull()
+        if (created == null) {
+            systemInitFailed = true
+            val callbacks = synchronized(pendingSystemOnReady) {
+                pendingSystemOnReady.toList().also { pendingSystemOnReady.clear() }
+            }
+            callbacks.forEach { it(null) }
+        } else {
+            systemTts = created
+        }
     }
 
     fun stop() {
@@ -1203,6 +1234,11 @@ class CelliumTtsEngine(
         onComplete: (() -> Unit)?,
     ) = withContext(Dispatchers.Main) {
         ensureSystemTts { engine ->
+            if (engine == null) {
+                onStart?.invoke()
+                onComplete?.invoke()
+                return@ensureSystemTts
+            }
             engine.setPitch(pitch.coerceIn(0.25f, 2.50f))
             engine.setSpeechRate(speechRate.coerceIn(0.50f, 2.20f))
             if (voiceName.isNotBlank() &&
@@ -1218,7 +1254,14 @@ class CelliumTtsEngine(
                 scope.launch(Dispatchers.Main) { onComplete?.invoke() }
             }
             onStart?.invoke()
-            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "cel_sys_${System.currentTimeMillis()}")
+            val status = runCatching {
+                engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "cel_sys_${System.currentTimeMillis()}")
+            }.getOrDefault(TextToSpeech.ERROR)
+            if (status == TextToSpeech.ERROR) {
+                val cb = pendingSystemOnDone
+                pendingSystemOnDone = null
+                cb?.invoke()
+            }
         }
     }
 

@@ -1,7 +1,9 @@
 package com.henny.cellium.assistant
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -9,6 +11,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
@@ -27,10 +30,12 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.util.TypedValue
+import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -39,7 +44,9 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.content.ContextCompat
 import com.henny.cellium.MainActivity
+import com.henny.cellium.R
 import com.henny.cellium.ai.ProviderPresets
 import com.henny.cellium.ai.UniversalLlmClient
 import com.henny.cellium.ai.WebToolsClient
@@ -49,6 +56,7 @@ import com.henny.cellium.core.CelliumSoundEngine
 import com.henny.cellium.core.CelliumSttEngine
 import com.henny.cellium.core.CelliumTtsEngine
 import com.henny.cellium.core.ContextModifyConfig
+import com.henny.cellium.core.DevLogBuffer
 import com.henny.cellium.core.PreferencesStore
 import com.henny.cellium.data.BuiltInPersonas
 import com.henny.cellium.data.CustomPersona
@@ -62,11 +70,16 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 import java.util.UUID
 import kotlin.math.abs
 
@@ -88,30 +101,111 @@ class CelliumRecognitionService : RecognitionService() {
 /**
  * Default Digital Assistant Service for Android (Gemini replacement).
  * Registered via Settings -> Apps -> Default Apps -> Digital Assistant App -> Cellium.
+ * Also hosts openWakeWord ("Okay Cel") natively with ZERO foreground notification whenever active.
  */
 class CelliumVoiceInteractionService : VoiceInteractionService() {
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var prefsJob: Job? = null
+    private var wakeController: WakeWordLoopController? = null
+
     override fun onReady() {
         super.onReady()
         activeServiceRef = java.lang.ref.WeakReference(this)
+        _isBoundAsDefaultAssistant.value = true
+        DevLogBuffer.add("INFO", "Assistant", "CelliumVoiceInteractionService ready (bound as Default Assistant).")
+        // Stop any redundant foreground WakeWordService notification since we are system-bound!
+        runCatching { stopService(Intent(this, WakeWordService::class.java)) }
+        observeWakeWordPref()
+    }
+
+    private fun observeWakeWordPref() {
+        prefsJob?.cancel()
+        prefsJob = serviceScope.launch {
+            PreferencesStore(applicationContext).preferencesFlow.collectLatest { p ->
+                val hasMic = ContextCompat.checkSelfPermission(
+                    applicationContext,
+                    Manifest.permission.RECORD_AUDIO,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (p.wakeWordEnabled && hasMic) {
+                    startNativeWakeWordInternal()
+                } else {
+                    stopNativeWakeWordInternal()
+                }
+            }
+        }
+    }
+
+    internal fun startNativeWakeWordInternal() {
+        val hasMic = ContextCompat.checkSelfPermission(
+            applicationContext,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasMic) return
+        val runner = wakeController ?: WakeWordLoopController(
+            appContext = applicationContext,
+            scope = serviceScope,
+            onWakeDetected = {
+                val showed = runCatching {
+                    showSession(
+                        Bundle().apply { putBoolean("from_wake_word", true) },
+                        VoiceInteractionSession.SHOW_WITH_ASSIST or VoiceInteractionSession.SHOW_WITH_SCREENSHOT,
+                    )
+                    true
+                }.getOrDefault(false)
+                if (!showed) {
+                    FloatingCelOverlayService.start(applicationContext, autoListen = true)
+                }
+            },
+        ).also { wakeController = it }
+        runner.start()
+    }
+
+    internal fun stopNativeWakeWordInternal() {
+        wakeController?.stop()
+        wakeController = null
     }
 
     override fun onShutdown() {
+        prefsJob?.cancel()
+        prefsJob = null
+        stopNativeWakeWordInternal()
         if (activeServiceRef?.get() === this) {
             activeServiceRef = null
+            _isBoundAsDefaultAssistant.value = false
         }
+        serviceScope.cancel()
         super.onShutdown()
     }
 
     override fun onLaunchVoiceAssistFromKeyguard() {
-        showSession(
-            Bundle().apply { putBoolean("from_keyguard", true) },
-            VoiceInteractionSession.SHOW_WITH_ASSIST or VoiceInteractionSession.SHOW_WITH_SCREENSHOT,
-        )
+        runCatching {
+            showSession(
+                Bundle().apply { putBoolean("from_keyguard", true) },
+                VoiceInteractionSession.SHOW_WITH_ASSIST or VoiceInteractionSession.SHOW_WITH_SCREENSHOT,
+            )
+        }
     }
 
     companion object {
         @Volatile
         private var activeServiceRef: java.lang.ref.WeakReference<CelliumVoiceInteractionService>? = null
+
+        private val _isBoundAsDefaultAssistant = MutableStateFlow(false)
+        val isBoundFlow: StateFlow<Boolean> = _isBoundAsDefaultAssistant.asStateFlow()
+
+        fun isBoundAsDefaultAssistant(): Boolean = activeServiceRef?.get() != null
+
+        fun syncWakeWordState(context: Context) {
+            val svc = activeServiceRef?.get() ?: return
+            svc.serviceScope.launch {
+                val p = PreferencesStore(context.applicationContext).preferencesFlow.first()
+                if (p.wakeWordEnabled) svc.startNativeWakeWordInternal() else svc.stopNativeWakeWordInternal()
+            }
+        }
+
+        fun stopNativeWakeWord() {
+            activeServiceRef?.get()?.stopNativeWakeWordInternal()
+        }
 
         fun requestShowSession(fromEarpiece: Boolean = false): Boolean {
             val svc = activeServiceRef?.get() ?: return false
@@ -122,14 +216,18 @@ class CelliumVoiceInteractionService : VoiceInteractionService() {
                     VoiceInteractionSession.SHOW_WITH_ASSIST or VoiceInteractionSession.SHOW_WITH_SCREENSHOT,
                 )
                 true
+            }.onFailure { err ->
+                DevLogBuffer.add("WARN", "Assistant", "showSession failed: ${err.localizedMessage}")
             }.getOrDefault(false)
         }
     }
 }
 
 class CelliumVoiceInteractionSessionService : VoiceInteractionSessionService() {
-    override fun onNewSession(args: Bundle?): VoiceInteractionSession =
-        CelliumVoiceInteractionSession(this)
+    override fun onNewSession(args: Bundle?): VoiceInteractionSession {
+        DevLogBuffer.add("INFO", "Assistant", "CelliumVoiceInteractionSessionService creating new session.")
+        return CelliumVoiceInteractionSession(this)
+    }
 }
 
 /**
@@ -352,6 +450,12 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private val webTools = WebToolsClient()
     private var moodRelaxRunnable: Runnable? = null
 
+    // Themed context prevents EditText/Material crashes when VoiceInteractionSession passes a raw Service context
+    private val uiContext: Context by lazy {
+        ContextThemeWrapper(context, R.style.Theme_Cellium_AssistantSession)
+    }
+    private var rootContainer: FrameLayout? = null
+
     private var faceView: AssistantDotFaceView? = null
     private var speechBubble: TextView? = null
     private var screenChip: TextView? = null
@@ -370,6 +474,8 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var showListenRunnable: Runnable? = null
+    private var deviceSilenceFlushJob: Job? = null
+    private val deviceSpeechBuffer = StringBuilder()
     private var sttLaunchJob: Job? = null
     private var cloudSttJob: Job? = null
     private var askJob: Job? = null
@@ -390,14 +496,31 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private var bubbleIsRetryAction = false
 
     private fun dp(v: Float): Int = TypedValue.applyDimension(
-        TypedValue.COMPLEX_UNIT_DIP, v, context.resources.displayMetrics
+        TypedValue.COMPLEX_UNIT_DIP, v, uiContext.resources.displayMetrics
     ).toInt()
 
     override fun onCreate() {
         super.onCreate()
-        soundEngine = CelliumSoundEngine(context)
-        celliumTts = CelliumTtsEngine(context, sharedSoundEngine = soundEngine)
-        celliumStt = CelliumSttEngine(context)
+        runCatching { setTheme(R.style.Theme_Cellium_AssistantSession) }
+        runCatching {
+            soundEngine = CelliumSoundEngine(context.applicationContext)
+            celliumTts = CelliumTtsEngine(context.applicationContext, sharedSoundEngine = soundEngine)
+            celliumStt = CelliumSttEngine(context.applicationContext)
+        }.onFailure { err ->
+            DevLogBuffer.add("ERROR", "Assistant", "Session audio init error: ${err.localizedMessage}")
+        }
+    }
+
+    override fun onPrepareShow(args: Bundle?, showFlags: Int) {
+        super.onPrepareShow(args, showFlags)
+        setUiEnabled(true)
+        setKeepAwake(true)
+    }
+
+    override fun onComputeInsets(outInsets: Insets) {
+        super.onComputeInsets(outInsets)
+        outInsets.contentInsets.set(0, 0, 0, 0)
+        outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_FRAME
     }
 
     override fun onHandleScreenshot(screenshot: Bitmap?) {
@@ -413,14 +536,30 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         }
     }
 
+    private fun configureSessionWindow() {
+        runCatching {
+            window?.window?.apply {
+                setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            }
+        }
+    }
+
     override fun onCreateContentView(): View {
-        val root = FrameLayout(context).apply {
+        configureSessionWindow()
+        val root = FrameLayout(uiContext).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            )
             setBackgroundColor(Color.argb(95, 4, 3, 10))
         }
+        rootContainer = root
 
         // Always-on Gemini-style multi-region circle-to-crop overlay
         val overlay = ScreenCropOverlayView(
-            context = context,
+            context = uiContext,
             onDrawingStarted = {
                 // 4b: Drawing NEVER transcribes — immediately cancel any active/pending STT
                 cancelListeningQuietly()
@@ -445,19 +584,19 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             )
         )
 
-        val celRow = LinearLayout(context).apply {
+        val celRow = LinearLayout(uiContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setOnClickListener { /* consume */ }
         }
 
         val faceSize = dp(92f)
-        val face = AssistantDotFaceView(context).apply {
+        val face = AssistantDotFaceView(uiContext).apply {
             layoutParams = LinearLayout.LayoutParams(faceSize, faceSize)
         }
         faceView = face
 
-        val bubble = TextView(context).apply {
+        val bubble = TextView(uiContext).apply {
             text = "Circle anything on screen, speak, or type below."
             setTextColor(Color.parseColor("#F5F0FF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
@@ -535,7 +674,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         root.addView(celRow, celLp)
 
         val baseBottomPad = dp(18f)
-        val bottomCol = LinearLayout(context).apply {
+        val bottomCol = LinearLayout(uiContext).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14f), dp(6f), dp(14f), baseBottomPad)
             setOnClickListener { /* consume */ }
@@ -544,12 +683,12 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         // #6: Gemini-style swipe-up handle -> opens exact active conversation in main Chat tab!
         var handleDownY = 0f
         var handleTriggered = false
-        val swipeHandleRow = LinearLayout(context).apply {
+        val swipeHandleRow = LinearLayout(uiContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(0, dp(4f), 0, dp(6f))
             addView(
-                View(context).apply {
+                View(uiContext).apply {
                     background = GradientDrawable().apply {
                         setColor(Color.argb(175, 192, 132, 252))
                         cornerRadius = dp(3f).toFloat()
@@ -558,7 +697,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 }
             )
             setOnClickListener {
-                soundEngine.playOpen()
+                if (::soundEngine.isInitialized) soundEngine.playOpen()
                 openActiveSessionInMainChat()
             }
             setOnTouchListener { _, ev ->
@@ -571,14 +710,14 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     MotionEvent.ACTION_MOVE -> {
                         if (!handleTriggered && (handleDownY - ev.rawY) > dp(44f)) {
                             handleTriggered = true
-                            soundEngine.playOpen()
+                            if (::soundEngine.isInitialized) soundEngine.playOpen()
                             openActiveSessionInMainChat()
                         }
                         true
                     }
                     MotionEvent.ACTION_UP -> {
                         if (!handleTriggered && abs(handleDownY - ev.rawY) < dp(12f)) {
-                            soundEngine.playOpen()
+                            if (::soundEngine.isInitialized) soundEngine.playOpen()
                             openActiveSessionInMainChat()
                         }
                         true
@@ -596,12 +735,12 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         )
 
         // 4e & 4f: Cropped / Screenshot Thumbnail Preview Strip above chat box!
-        val stripRow = LinearLayout(context).apply {
+        val stripRow = LinearLayout(uiContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         previewStripRow = stripRow
-        val stripScroll = HorizontalScrollView(context).apply {
+        val stripScroll = HorizontalScrollView(uiContext).apply {
             isHorizontalScrollBarEnabled = false
             visibility = View.GONE
             addView(stripRow)
@@ -615,7 +754,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             ).apply { bottomMargin = dp(8f) }
         )
 
-        val chipRow = LinearLayout(context).apply {
+        val chipRow = LinearLayout(uiContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
         }
@@ -626,7 +765,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             setStroke(dp(1f), stroke)
         }
 
-        val sChip = TextView(context).apply {
+        val sChip = TextView(uiContext).apply {
             text = "Full Screen: ON"
             setTextColor(Color.parseColor("#D8B4FE"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
@@ -634,7 +773,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             background = chipBg(Color.argb(215, 28, 18, 48), Color.argb(165, 192, 132, 252))
             visibility = if (capturedScreenshot != null) View.VISIBLE else View.GONE
             setOnClickListener {
-                soundEngine.playClick()
+                if (::soundEngine.isInitialized) soundEngine.playClick()
                 includeScreenVision = !includeScreenVision
                 updateScreenChipAppearance()
                 rebuildAttachmentPreviewStrip()
@@ -642,7 +781,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         }
         screenChip = sChip
 
-        val clrChip = TextView(context).apply {
+        val clrChip = TextView(uiContext).apply {
             text = "Clear Crops"
             setTextColor(Color.parseColor("#FCA5A5"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
@@ -650,35 +789,35 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             background = chipBg(Color.argb(215, 56, 16, 24), Color.argb(175, 248, 113, 113))
             visibility = View.GONE
             setOnClickListener {
-                soundEngine.playClick()
+                if (::soundEngine.isInitialized) soundEngine.playClick()
                 clearAllCrops()
             }
         }
         clearCropsChip = clrChip
 
         // 4s: Quick chat switcher chip
-        val chatChip = TextView(context).apply {
+        val chatChip = TextView(uiContext).apply {
             text = "Chat: New"
             setTextColor(Color.parseColor("#93C5FD"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
             background = chipBg(Color.argb(215, 16, 30, 56), Color.argb(175, 96, 165, 250))
             setOnClickListener {
-                soundEngine.playClick()
+                if (::soundEngine.isInitialized) soundEngine.playClick()
                 cancelListeningQuietly()
                 openChatPickerOverlay()
             }
         }
         chatSwitchChip = chatChip
 
-        val liveChip = TextView(context).apply {
+        val liveChip = TextView(uiContext).apply {
             text = "Go Live"
             setTextColor(Color.parseColor("#34D399"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setPadding(dp(11f), dp(6f), dp(11f), dp(6f))
             background = chipBg(Color.argb(220, 10, 46, 36), Color.argb(185, 52, 211, 153))
             setOnClickListener {
-                soundEngine.playOpen()
+                if (::soundEngine.isInitialized) soundEngine.playOpen()
                 // 4n: Immediately abort all pop-up work BEFORE launching Floating Cel!
                 cancelAllActiveWork()
                 if (Settings.canDrawOverlays(context)) {
@@ -691,26 +830,25 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     hide()
                 } else {
                     showBubble("Grant 'Display over other apps' so Cel can float live!")
-                    runCatching {
-                        context.startActivity(
-                            Intent(
-                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                Uri.parse("package:${context.packageName}"),
-                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
+                    val permIntent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${context.packageName}"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    runCatching { startAssistantActivity(permIntent) }.onFailure {
+                        runCatching { context.startActivity(permIntent) }
                     }
                 }
             }
         }
 
-        val openChatChip = TextView(context).apply {
+        val openChatChip = TextView(uiContext).apply {
             text = "Open Chat"
             setTextColor(Color.parseColor("#E9D5FF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
             background = chipBg(Color.argb(220, 44, 22, 74), Color.argb(185, 192, 132, 252))
             setOnClickListener {
-                soundEngine.playOpen()
+                if (::soundEngine.isInitialized) soundEngine.playOpen()
                 openActiveSessionInMainChat()
             }
         }
@@ -727,7 +865,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         chipRow.addView(openChatChip, chipLp())
         chipRow.addView(liveChip, chipLp())
 
-        val chipScroll = HorizontalScrollView(context).apply {
+        val chipScroll = HorizontalScrollView(uiContext).apply {
             isHorizontalScrollBarEnabled = false
             addView(chipRow)
         }
@@ -739,7 +877,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             ).apply { bottomMargin = dp(8f) }
         )
 
-        val pill = LinearLayout(context).apply {
+        val pill = LinearLayout(uiContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12f), dp(8f), dp(10f), dp(8f))
@@ -750,19 +888,19 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             }
         }
 
-        val micBtn = TextView(context).apply {
+        val micBtn = TextView(uiContext).apply {
             text = "Mic"
             setTextColor(Color.parseColor("#C084FC"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setPadding(dp(8f), dp(6f), dp(8f), dp(6f))
             setOnClickListener {
-                soundEngine.playClick()
+                if (::soundEngine.isInitialized) soundEngine.playClick()
                 isTypingMode = false
                 if (isListening) stopListeningForSubmit() else startListening()
             }
         }
 
-        val sendBtn = TextView(context).apply {
+        val sendBtn = TextView(uiContext).apply {
             text = "Send"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
@@ -774,7 +912,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             }
             visibility = View.GONE
             setOnClickListener {
-                soundEngine.playSend()
+                if (::soundEngine.isInitialized) soundEngine.playSend()
                 val q = inputEdit?.text?.toString()?.trim().orEmpty()
                 if (q.isNotEmpty()) {
                     inputEdit?.setText("")
@@ -786,7 +924,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         }
         sendBtnView = sendBtn
 
-        val edit = EditText(context).apply {
+        val edit = EditText(uiContext).apply {
             hint = "Circle screen, speak, or type..."
             setHintTextColor(Color.parseColor("#8A80A4"))
             setTextColor(Color.WHITE)
@@ -841,7 +979,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         )
 
         // Overlay chat picker container (#4s)
-        val pickerHost = FrameLayout(context).apply {
+        val pickerHost = FrameLayout(uiContext).apply {
             setBackgroundColor(Color.argb(180, 6, 4, 14))
             visibility = View.GONE
             setOnClickListener { visibility = View.GONE }
@@ -887,19 +1025,20 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private fun openActiveSessionInMainChat() {
         val sid = assistSessionId
         cancelAllActiveWork()
-        runCatching {
-            val intent = Intent(context.applicationContext, MainActivity::class.java).apply {
-                addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP
-                )
-                putExtra(MainActivity.EXTRA_OPEN_CHAT_TAB, true)
-                if (!sid.isNullOrBlank()) {
-                    putExtra(MainActivity.EXTRA_OPEN_SESSION_ID, sid)
-                }
+        val intent = Intent(context.applicationContext, MainActivity::class.java).apply {
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+            )
+            putExtra(MainActivity.EXTRA_OPEN_CHAT_TAB, true)
+            if (!sid.isNullOrBlank()) {
+                putExtra(MainActivity.EXTRA_OPEN_SESSION_ID, sid)
             }
-            context.startActivity(intent)
+        }
+        // Use startAssistantActivity first so Android 14/15/16 BAL restrictions never block opening Cel!
+        runCatching { startAssistantActivity(intent) }.onFailure {
+            runCatching { context.startActivity(intent) }
         }
         hide()
     }
@@ -987,7 +1126,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         accentColor: Int,
         onRemove: () -> Unit,
     ): View {
-        val card = FrameLayout(context).apply {
+        val card = FrameLayout(uiContext).apply {
             background = GradientDrawable().apply {
                 setColor(Color.argb(235, 16, 12, 30))
                 cornerRadius = dp(12f).toFloat()
@@ -998,13 +1137,13 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             }
             setPadding(dp(2f), dp(2f), dp(2f), dp(2f))
         }
-        val img = ImageView(context).apply {
+        val img = ImageView(uiContext).apply {
             setImageBitmap(bitmap)
             scaleType = ImageView.ScaleType.CENTER_CROP
         }
         card.addView(img, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
-        val tag = TextView(context).apply {
+        val tag = TextView(uiContext).apply {
             text = label
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
@@ -1021,7 +1160,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
             )
         )
 
-        val closeX = TextView(context).apply {
+        val closeX = TextView(uiContext).apply {
             text = "×"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -1032,7 +1171,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 shape = GradientDrawable.OVAL
             }
             setOnClickListener {
-                soundEngine.playClick()
+                if (::soundEngine.isInitialized) soundEngine.playClick()
                 onRemove()
             }
         }
@@ -1054,7 +1193,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 dao.getAllSessionsOnce().filter { !it.isArena && !it.isLocked }.take(12)
             }
             host.removeAllViews()
-            val card = LinearLayout(context).apply {
+            val card = LinearLayout(uiContext).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(16f), dp(16f), dp(16f), dp(16f))
                 background = GradientDrawable().apply {
@@ -1064,7 +1203,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 }
                 setOnClickListener { /* consume */ }
             }
-            card.addView(TextView(context).apply {
+            card.addView(TextView(uiContext).apply {
                 text = "Switch Active Chat"
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
@@ -1072,7 +1211,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                 setPadding(0, 0, 0, dp(10f))
             })
 
-            fun makeRow(label: String, sub: String, selected: Boolean, onTap: () -> Unit): View = LinearLayout(context).apply {
+            fun makeRow(label: String, sub: String, selected: Boolean, onTap: () -> Unit): View = LinearLayout(uiContext).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
                 background = GradientDrawable().apply {
@@ -1083,7 +1222,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                 ).apply { bottomMargin = dp(6f) }
-                addView(TextView(context).apply {
+                addView(TextView(uiContext).apply {
                     text = label
                     setTextColor(Color.WHITE)
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -1091,7 +1230,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     maxLines = 1
                 })
                 if (sub.isNotBlank()) {
-                    addView(TextView(context).apply {
+                    addView(TextView(uiContext).apply {
                         text = sub
                         setTextColor(Color.parseColor("#B8AED0"))
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
@@ -1099,13 +1238,13 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     })
                 }
                 setOnClickListener {
-                    soundEngine.playClick()
+                    if (::soundEngine.isInitialized) soundEngine.playClick()
                     onTap()
                     host.visibility = View.GONE
                 }
             }
 
-            val listCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            val listCol = LinearLayout(uiContext).apply { orientation = LinearLayout.VERTICAL }
             listCol.addView(
                 makeRow("+ New Assistant Chat", "Start a fresh thread", assistSessionId == null) {
                     assistSessionId = null
@@ -1126,7 +1265,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                     }
                 )
             }
-            val scroller = ScrollView(context).apply {
+            val scroller = ScrollView(uiContext).apply {
                 addView(listCol)
             }
             card.addView(scroller, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(300f)))
@@ -1140,6 +1279,10 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
 
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
+        DevLogBuffer.add("INFO", "Assistant", "CelliumVoiceInteractionSession onShow (flags=$showFlags)")
+        configureSessionWindow()
+        rootContainer?.visibility = View.VISIBLE
+        rootContainer?.requestLayout()
         WakeWordService.setPaused(context.applicationContext, true)
         isVisible = true
         isTypingMode = false
@@ -1153,17 +1296,21 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         rebuildAttachmentPreviewStrip()
 
         scope.launch {
-            val prefs = PreferencesStore(context.applicationContext).preferencesFlow.first()
-            soundEngine.enabled = prefs.soundsEnabled
-            soundEngine.hapticsEnabled = prefs.hapticsEnabled
-            soundEngine.masterVolume = prefs.sfxVolume
-            soundEngine.startupSoundId = prefs.startupSoundId
-            soundEngine.startupSoundCustomPath = prefs.startupSoundCustomPath
-            soundEngine.startupSoundShuffleEnabled = prefs.startupSoundShuffleEnabled
-            soundEngine.startupSoundExcludedIds = prefs.startupSoundExcludedIds
-            soundEngine.deletedStartupSoundIds = prefs.deletedStartupSoundIds
-            soundEngine.playAssistantSummon()
-            faceView?.updateState(newGender = prefs.avatarGender, newMood = "happy")
+            runCatching {
+                val prefs = PreferencesStore(context.applicationContext).preferencesFlow.first()
+                if (::soundEngine.isInitialized) {
+                    soundEngine.enabled = prefs.soundsEnabled
+                    soundEngine.hapticsEnabled = prefs.hapticsEnabled
+                    soundEngine.masterVolume = prefs.sfxVolume
+                    soundEngine.startupSoundId = prefs.startupSoundId
+                    soundEngine.startupSoundCustomPath = prefs.startupSoundCustomPath
+                    soundEngine.startupSoundShuffleEnabled = prefs.startupSoundShuffleEnabled
+                    soundEngine.startupSoundExcludedIds = prefs.startupSoundExcludedIds
+                    soundEngine.deletedStartupSoundIds = prefs.deletedStartupSoundIds
+                    soundEngine.playAssistantSummon()
+                }
+                faceView?.updateState(newGender = prefs.avatarGender, newMood = "happy")
+            }
         }
 
         showListenRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -1191,6 +1338,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
 
     override fun onHide() {
         isVisible = false
+        rootContainer?.visibility = View.GONE
         // 4h: Closing Cel IMMEDIATELY aborts any background LLM / STT / TTS work!
         cancelAllActiveWork()
         WakeWordService.setPaused(context.applicationContext, false)
@@ -1212,6 +1360,9 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     private fun cancelListeningQuietly() {
         showListenRunnable?.let { mainHandler.removeCallbacks(it) }
         showListenRunnable = null
+        deviceSilenceFlushJob?.cancel()
+        deviceSilenceFlushJob = null
+        deviceSpeechBuffer.clear()
         isListening = false
         sttLaunchJob?.cancel()
         sttLaunchJob = null
@@ -1225,6 +1376,19 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
     }
 
     private fun stopListeningForSubmit() {
+        deviceSilenceFlushJob?.cancel()
+        deviceSilenceFlushJob = null
+        val buffered = deviceSpeechBuffer.toString().trim()
+        if (buffered.isNotEmpty()) {
+            deviceSpeechBuffer.clear()
+            isListening = false
+            mainHandler.post {
+                runCatching { speechRecognizer?.cancel() }
+                faceView?.updateState(isListening = false, isMicReady = false)
+            }
+            askCel(buffered)
+            return
+        }
         isListening = false
         if (::celliumStt.isInitialized) celliumStt.requestStopRecording()
         mainHandler.post {
@@ -1235,6 +1399,10 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
 
     private fun startListening() {
         if (!isVisible) return
+        if (ContextCompat.checkSelfPermission(context.applicationContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            showBubble("Grant Microphone permission in Cel to speak, or type below.")
+            return
+        }
         if (::celliumTts.isInitialized) celliumTts.stop()
         cancelListeningQuietly()
         isListening = true
@@ -1268,7 +1436,7 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
                         apiKey = apiKey,
                         modelOverride = prefs.sttModel,
                         preSpeechTimeoutMs = 60_000L,
-                        silenceAutoStopMs = 3_500L,
+                        silenceAutoStopMs = 2_400L,
                         onReadyForSpeech = {
                             mainHandler.post {
                                 if (isListening && isVisible && !isTypingMode) {
@@ -1308,63 +1476,120 @@ class CelliumVoiceInteractionSession(context: Context) : VoiceInteractionSession
         }
     }
 
+    private fun buildDeviceSpeechIntent(): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2_500L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2_500L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60_000L)
+    }
+
+    private fun scheduleDeviceUtteranceFlush() {
+        deviceSilenceFlushJob?.cancel()
+        deviceSilenceFlushJob = scope.launch {
+            delay(2_200L)
+            if (!isVisible || isTypingMode) return@launch
+            val combined = deviceSpeechBuffer.toString().trim()
+            deviceSpeechBuffer.clear()
+            isListening = false
+            runCatching { speechRecognizer?.cancel() }
+            if (combined.isNotEmpty()) {
+                askCel(combined)
+            } else {
+                faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
+                showBubble("Didn't catch that — tap Mic or type!")
+            }
+        }
+    }
+
     private fun startDeviceSpeechRecognizer() {
         mainHandler.post {
             if (!isVisible || isTypingMode) return@post
             runCatching {
                 speechRecognizer?.destroy()
-                val sr = SpeechRecognizer.createSpeechRecognizer(context)
+                val sr = CelliumSttEngine.createBestDeviceSpeechRecognizer(uiContext)
+                    ?: throw IllegalStateException("No speech recognition service available")
                 speechRecognizer = sr
                 sr.setRecognitionListener(object : RecognitionListener {
                     override fun onReadyForSpeech(params: Bundle?) {
                         mainHandler.post {
                             if (isListening && isVisible && !isTypingMode) {
                                 faceView?.updateState(newMood = "listening", isListening = true, isMicReady = true)
-                                showBubble("Listening...")
+                                if (deviceSpeechBuffer.isEmpty()) showBubble("Listening...")
                             }
                         }
                     }
-                    override fun onBeginningOfSpeech() = Unit
-                    override fun onRmsChanged(rmsdB: Float) = Unit
+                    override fun onBeginningOfSpeech() {
+                        // User resumed speaking during the 2.2s breath grace window — cancel pending flush!
+                        deviceSilenceFlushJob?.cancel()
+                        deviceSilenceFlushJob = null
+                    }
+                    override fun onRmsChanged(rmsdB: Float) {
+                        if (rmsdB > 4.5f && deviceSilenceFlushJob != null && deviceSpeechBuffer.isNotEmpty()) {
+                            scheduleDeviceUtteranceFlush()
+                        }
+                    }
                     override fun onBufferReceived(buffer: ByteArray?) = Unit
                     override fun onEndOfSpeech() {
-                        isListening = false
-                        if (isVisible && !isTypingMode) {
-                            faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
-                            showBubble("Transcribing...")
+                        if (isVisible && !isTypingMode && deviceSpeechBuffer.isEmpty()) {
+                            faceView?.updateState(newMood = "listening", isListening = true, isMicReady = true)
                         }
                     }
                     override fun onError(error: Int) {
+                        if (!isVisible || isTypingMode || !isListening) return
+                        if (deviceSpeechBuffer.isNotEmpty()) {
+                            // Still in 2.2s breath grace window — let flush timer finish sending!
+                            if (deviceSilenceFlushJob?.isActive != true) scheduleDeviceUtteranceFlush()
+                            return
+                        }
                         isListening = false
                         faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                     }
                     override fun onResults(results: Bundle?) {
-                        isListening = false
-                        if (!isVisible || isTypingMode) return
+                        if (!isVisible || isTypingMode || !isListening) return
                         val raw = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
                         val cleaned = CelliumSttEngine.sanitizeTranscript(raw)
                         if (cleaned.isNotEmpty()) {
-                            askCel(cleaned)
+                            if (deviceSpeechBuffer.isNotEmpty()) deviceSpeechBuffer.append(' ')
+                            deviceSpeechBuffer.append(cleaned)
+                            showBubble("\"${deviceSpeechBuffer}\"")
+                            // Re-arm silently and wait 2.2s of true silence so catching breath never cuts off speech
+                            scheduleDeviceUtteranceFlush()
+                            mainHandler.postDelayed({
+                                if (isVisible && !isTypingMode && isListening) {
+                                    runCatching { speechRecognizer?.startListening(buildDeviceSpeechIntent()) }
+                                }
+                            }, 90L)
+                        } else if (deviceSpeechBuffer.isNotEmpty()) {
+                            if (deviceSilenceFlushJob?.isActive != true) scheduleDeviceUtteranceFlush()
                         } else {
+                            isListening = false
                             faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                             showBubble("Didn't catch that — tap Mic or type!")
                         }
                     }
                     override fun onPartialResults(partialResults: Bundle?) {
                         if (!isListening || !isVisible || isTypingMode) return
-                        val p = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-                        if (p.isNotBlank()) showBubble("\"$p\"")
+                        val p = CelliumSttEngine.sanitizeTranscript(
+                            partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                        )
+                        if (p.isNotBlank()) {
+                            if (deviceSilenceFlushJob != null) {
+                                deviceSilenceFlushJob?.cancel()
+                                deviceSilenceFlushJob = null
+                            }
+                            val preview = if (deviceSpeechBuffer.isNotEmpty()) "${deviceSpeechBuffer} $p" else p
+                            showBubble("\"$preview\"")
+                        }
                     }
                     override fun onEvent(eventType: Int, params: Bundle?) = Unit
                 })
-                sr.startListening(
-                    Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
-                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
-                    }
-                )
+                sr.startListening(buildDeviceSpeechIntent())
+            }.onFailure {
+                isListening = false
+                faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
+                showBubble("Mic unavailable — type below or switch STT in Settings.")
             }
         }
     }

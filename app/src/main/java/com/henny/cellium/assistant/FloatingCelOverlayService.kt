@@ -97,7 +97,12 @@ import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.sin
 
-private const val OVERLAY_CHANNEL_ID = "cellium_floating_cel"
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+
+private const val LEGACY_OVERLAY_CHANNEL_ID = "cellium_floating_cel"
+private const val OVERLAY_CHANNEL_ID = "cellium_floating_cel_silent_v2"
 private const val OVERLAY_NOTIF_ID = 4109
 
 /**
@@ -290,6 +295,9 @@ class FloatingCelOverlayService : Service() {
     private var sttLaunchJob: Job? = null
     private var cloudSttJob: Job? = null
     private var rearmAutoListenRunnable: Runnable? = null
+    private val deviceSpeechBuffer = StringBuilder()
+    private var deviceSilenceFlushRunnable: Runnable? = null
+    private var deviceRearmRunnable: Runnable? = null
 
     private lateinit var soundEngine: CelliumSoundEngine
     private lateinit var celliumTts: CelliumTtsEngine
@@ -651,11 +659,15 @@ class FloatingCelOverlayService : Service() {
 
     private fun startForegroundCompat(withMediaProjection: Boolean) {
         val nm = getSystemService(NotificationManager::class.java)
+        runCatching { nm.deleteNotificationChannel(LEGACY_OVERLAY_CHANNEL_ID) }
         if (nm.getNotificationChannel(OVERLAY_CHANNEL_ID) == null) {
             nm.createNotificationChannel(
-                NotificationChannel(OVERLAY_CHANNEL_ID, "Floating Cel", NotificationManager.IMPORTANCE_LOW).apply {
+                NotificationChannel(OVERLAY_CHANNEL_ID, "Floating Cel", NotificationManager.IMPORTANCE_MIN).apply {
                     description = "System-wide floating Cel companion overlay"
                     setShowBadge(false)
+                    enableLights(false)
+                    enableVibration(false)
+                    lockscreenVisibility = Notification.VISIBILITY_SECRET
                 }
             )
         }
@@ -669,23 +681,39 @@ class FloatingCelOverlayService : Service() {
         )
         val notif: Notification = NotificationCompat.Builder(this, OVERLAY_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_cellium_brand)
-            .setContentTitle("Floating Cel Active")
-            .setContentText("Tap Cel for Auto Chat, Talk, Type, or Switch Chat.")
-            .setOngoing(true)
+            .setContentTitle("Floating Cel")
+            .setContentText("Tap Cel to talk or drag down to hide.")
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
+            .setOngoing(Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
             .setSilent(true)
             .setContentIntent(openIntent)
             .addAction(0, "Hide", stopIntent)
             .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val fgsType = if (withMediaProjection) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val hasMicPerm = ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.RECORD_AUDIO,
+                ) == PackageManager.PERMISSION_GRANTED
+                val fgsType = when {
+                    withMediaProjection && hasMicPerm ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                    withMediaProjection ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                    hasMicPerm ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    else ->
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                }
+                startForeground(OVERLAY_NOTIF_ID, notif, fgsType)
             } else {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                startForeground(OVERLAY_NOTIF_ID, notif)
             }
-            startForeground(OVERLAY_NOTIF_ID, notif, fgsType)
-        } else {
-            startForeground(OVERLAY_NOTIF_ID, notif)
+        }.onFailure {
+            runCatching { startForeground(OVERLAY_NOTIF_ID, notif) }
         }
     }
 
@@ -1675,71 +1703,150 @@ class FloatingCelOverlayService : Service() {
         }
     }
 
+    private fun clearDeviceSpeechAccumulator() {
+        deviceSilenceFlushRunnable?.let { mainHandler.removeCallbacks(it) }
+        deviceSilenceFlushRunnable = null
+        deviceRearmRunnable?.let { mainHandler.removeCallbacks(it) }
+        deviceRearmRunnable = null
+        deviceSpeechBuffer.setLength(0)
+    }
+
+    private fun buildDeviceSpeechIntent(): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2800L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2800L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 45000L)
+    }
+
+    private fun flushDeviceSpeechAccumulator() {
+        val combined = deviceSpeechBuffer.toString().trim()
+        clearDeviceSpeechAccumulator()
+        isListening = false
+        runCatching { speechRecognizer?.cancel() }
+        WakeWordService.setPaused(this, false)
+        hideListeningPill()
+        if (combined.isNotEmpty()) {
+            askCel(combined)
+        } else {
+            faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
+            if (handsFreeEnabled) {
+                scheduleAutoListen(450L)
+            }
+        }
+    }
+
+    private fun scheduleDeviceSilenceFlush(delayMs: Long = 2_200L) {
+        deviceSilenceFlushRunnable?.let { mainHandler.removeCallbacks(it) }
+        val r = Runnable {
+            if (isListening && deviceSpeechBuffer.isNotEmpty()) {
+                flushDeviceSpeechAccumulator()
+            }
+        }
+        deviceSilenceFlushRunnable = r
+        mainHandler.postDelayed(r, delayMs)
+    }
+
     private fun startDeviceSpeechRecognizer() {
         mainHandler.post {
             if (!isListening) return@post
+            clearDeviceSpeechAccumulator()
             runCatching {
                 speechRecognizer?.destroy()
-                val sr = SpeechRecognizer.createSpeechRecognizer(this)
+                val sr = CelliumSttEngine.createBestDeviceSpeechRecognizer(this)
+                    ?: error("No system speech recognizer available")
                 speechRecognizer = sr
                 sr.setRecognitionListener(object : RecognitionListener {
                     override fun onReadyForSpeech(params: Bundle?) {
                         mainHandler.post {
                             if (isListening) {
                                 faceView?.updateState(newMood = "listening", isListening = true, isMicReady = true)
-                                showListeningPill("Listening...")
+                                if (deviceSpeechBuffer.isEmpty()) showListeningPill("Listening...")
                             }
                         }
                     }
-                    override fun onBeginningOfSpeech() = Unit
-                    override fun onRmsChanged(rmsdB: Float) = Unit
+                    override fun onBeginningOfSpeech() {
+                        deviceSilenceFlushRunnable?.let { mainHandler.removeCallbacks(it) }
+                        deviceSilenceFlushRunnable = null
+                    }
+                    override fun onRmsChanged(rmsdB: Float) {
+                        if (isListening && deviceSpeechBuffer.isNotEmpty() && rmsdB > 4.5f) {
+                            scheduleDeviceSilenceFlush(2_200L)
+                        }
+                    }
                     override fun onBufferReceived(buffer: ByteArray?) = Unit
                     override fun onEndOfSpeech() {
-                        isListening = false
-                        faceView?.updateState(newMood = "thinking", isListening = false, isMicReady = false)
-                        showListeningPill("Transcribing...")
+                        if (isListening && deviceSpeechBuffer.isEmpty()) {
+                            showListeningPill("Listening...")
+                        }
                     }
                     override fun onError(error: Int) {
+                        if (!isListening) return
+                        if (deviceSpeechBuffer.isNotEmpty()) {
+                            if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                                deviceRearmRunnable?.let { mainHandler.removeCallbacks(it) }
+                                val r = Runnable {
+                                    if (isListening) runCatching { speechRecognizer?.startListening(buildDeviceSpeechIntent()) }
+                                }
+                                deviceRearmRunnable = r
+                                mainHandler.postDelayed(r, 160L)
+                            } else if (deviceSilenceFlushRunnable == null) {
+                                scheduleDeviceSilenceFlush(650L)
+                            }
+                            return
+                        }
                         isListening = false
                         WakeWordService.setPaused(this@FloatingCelOverlayService, false)
                         hideListeningPill()
                         faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
                         if (handsFreeEnabled) {
-                            // 4q: True always-listening loop — never disables Auto Mode on silence/timeout!
                             scheduleAutoListen(600L)
                         }
                     }
                     override fun onResults(results: Bundle?) {
-                        isListening = false
-                        WakeWordService.setPaused(this@FloatingCelOverlayService, false)
-                        hideListeningPill()
+                        if (!isListening) return
                         val raw = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-                        val cleaned = CelliumSttEngine.sanitizeTranscript(raw)
-                        if (cleaned.isNotEmpty()) {
-                            askCel(cleaned)
-                        } else {
-                            faceView?.updateState(newMood = "idle", isListening = false, isMicReady = false)
-                            if (handsFreeEnabled) {
-                                scheduleAutoListen(450L)
+                        val segment = CelliumSttEngine.sanitizeTranscript(raw)
+                        if (segment.isNotEmpty()) {
+                            if (deviceSpeechBuffer.isNotEmpty()) deviceSpeechBuffer.append(' ')
+                            deviceSpeechBuffer.append(segment)
+                            showListeningPill("\"${deviceSpeechBuffer}\"")
+                            // Wait 2.2s of true silence so breathing never cuts off the user!
+                            scheduleDeviceSilenceFlush(2_200L)
+                            deviceRearmRunnable?.let { mainHandler.removeCallbacks(it) }
+                            val r = Runnable {
+                                if (isListening && deviceSpeechBuffer.isNotEmpty()) {
+                                    runCatching { speechRecognizer?.startListening(buildDeviceSpeechIntent()) }
+                                }
                             }
+                            deviceRearmRunnable = r
+                            mainHandler.postDelayed(r, 90L)
+                        } else if (deviceSpeechBuffer.isNotEmpty()) {
+                            if (deviceSilenceFlushRunnable == null) {
+                                scheduleDeviceSilenceFlush(1_200L)
+                            }
+                        } else {
+                            flushDeviceSpeechAccumulator()
                         }
                     }
                     override fun onPartialResults(partialResults: Bundle?) {
                         if (!isListening) return
-                        val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-                        if (partial.isNotBlank()) showListeningPill("\"$partial\"")
+                        val partial = CelliumSttEngine.sanitizeTranscript(
+                            partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                        )
+                        if (partial.isNotBlank()) {
+                            deviceSilenceFlushRunnable?.let { mainHandler.removeCallbacks(it) }
+                            deviceSilenceFlushRunnable = null
+                            val prefix = deviceSpeechBuffer.toString().trim()
+                            val combined = if (prefix.isBlank()) partial else "$prefix $partial"
+                            showListeningPill("\"$combined\"")
+                        }
                     }
                     override fun onEvent(eventType: Int, params: Bundle?) = Unit
                 })
-                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2800L)
-                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2800L)
-                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 45000L)
-                }
-                sr.startListening(intent)
+                sr.startListening(buildDeviceSpeechIntent())
             }.onFailure {
+                clearDeviceSpeechAccumulator()
                 isListening = false
                 WakeWordService.setPaused(this, false)
                 hideListeningPill()
@@ -1753,6 +1860,7 @@ class FloatingCelOverlayService : Service() {
     private fun cancelListening() {
         rearmAutoListenRunnable?.let { mainHandler.removeCallbacks(it) }
         rearmAutoListenRunnable = null
+        clearDeviceSpeechAccumulator()
         isListening = false
         sttLaunchJob?.cancel()
         sttLaunchJob = null
@@ -1769,6 +1877,10 @@ class FloatingCelOverlayService : Service() {
 
     /** Stops recording intentionally to transcribe & send what user just spoke. */
     private fun stopListeningForSubmit() {
+        if (deviceSpeechBuffer.isNotEmpty()) {
+            mainHandler.post { flushDeviceSpeechAccumulator() }
+            return
+        }
         isListening = false
         if (::celliumStt.isInitialized) celliumStt.requestStopRecording()
         mainHandler.post {
@@ -2205,15 +2317,19 @@ class FloatingCelOverlayService : Service() {
                 putExtra(EXTRA_HANDS_FREE, enableHandsFree)
                 putExtra(EXTRA_SCREEN_VISION, requestScreenVision)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            }.onFailure {
+                runCatching { context.startService(intent) }
             }
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, FloatingCelOverlayService::class.java))
+            runCatching { context.stopService(Intent(context, FloatingCelOverlayService::class.java)) }
         }
 
         fun supplyMediaProjection(context: Context, resultCode: Int, data: Intent) {
@@ -2222,10 +2338,14 @@ class FloatingCelOverlayService : Service() {
                 putExtra(EXTRA_RESULT_CODE, resultCode)
                 putExtra(EXTRA_RESULT_DATA, data)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            }.onFailure {
+                runCatching { context.startService(intent) }
             }
         }
     }

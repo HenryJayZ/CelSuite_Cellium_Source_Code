@@ -7,11 +7,12 @@ import android.media.projection.MediaProjectionManager
 import android.os.Bundle
 import android.provider.Settings
 import com.henny.cellium.MainActivity
+import com.henny.cellium.core.DevLogBuffer
 
 /**
  * Translucent trampoline Activity for:
  * 1. Requesting Android MediaProjection consent so Floating Cel can capture Live Screen Vision frames.
- * 2. Handling ACTION_ASSIST / ACTION_VOICE_ASSIST fallback intents when launched from system shortcuts.
+ * 2. Handling ACTION_ASSIST / ACTION_VOICE_ASSIST / Bluetooth earpiece voice trigger intents.
  */
 class AssistantConsentActivity : Activity() {
 
@@ -31,8 +32,14 @@ class AssistantConsentActivity : Activity() {
         when (action) {
             ACTION_REQUEST_SCREEN_VISION -> {
                 val mpm = getSystemService(MediaProjectionManager::class.java)
+                if (mpm == null) {
+                    finish()
+                    return
+                }
                 @Suppress("DEPRECATION")
-                startActivityForResult(mpm.createScreenCaptureIntent(), REQ_MEDIA_PROJECTION)
+                runCatching {
+                    startActivityForResult(mpm.createScreenCaptureIntent(), REQ_MEDIA_PROJECTION)
+                }.onFailure { finish() }
             }
             Intent.ACTION_VOICE_COMMAND,
             ACTION_VOICE_SEARCH_HANDS_FREE,
@@ -42,14 +49,28 @@ class AssistantConsentActivity : Activity() {
                 val fromEarpiece = action == Intent.ACTION_VOICE_COMMAND ||
                     action == ACTION_VOICE_SEARCH_HANDS_FREE ||
                     action == Intent.ACTION_SEARCH_LONG_PRESS
+                DevLogBuffer.add("INFO", "Assistant", "AssistantConsentActivity received $action")
                 val launchedNativeSession = CelliumVoiceInteractionService.requestShowSession(fromEarpiece)
                 if (!launchedNativeSession) {
-                    if (Settings.canDrawOverlays(this)) {
-                        FloatingCelOverlayService.start(this, autoListen = true)
-                    } else {
-                        startActivity(
-                            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
+                    val launchedFloating = if (Settings.canDrawOverlays(this)) {
+                        runCatching {
+                            FloatingCelOverlayService.start(this, autoListen = true)
+                            true
+                        }.getOrDefault(false)
+                    } else false
+                    if (!launchedFloating) {
+                        runCatching {
+                            startActivity(
+                                Intent(this, MainActivity::class.java).apply {
+                                    addFlags(
+                                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                                            Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                    )
+                                    putExtra(MainActivity.EXTRA_OPEN_LIVE_TAB, true)
+                                }
+                            )
+                        }
                     }
                 }
                 finish()
@@ -78,7 +99,7 @@ class AssistantConsentActivity : Activity() {
                 action = ACTION_REQUEST_SCREEN_VISION
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(intent)
+            runCatching { context.startActivity(intent) }
         }
     }
 }

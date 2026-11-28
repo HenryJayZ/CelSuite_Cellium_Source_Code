@@ -116,7 +116,11 @@
         <service
             android:name=".assistant.CelliumVoiceInteractionSessionService"
             android:exported="true"
-            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionSessionService" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".assistant.CelliumRecognitionService"
@@ -132,7 +136,7 @@
         <service
             android:name=".assistant.FloatingCelOverlayService"
             android:exported="false"
-            android:foregroundServiceType="microphone|mediaProjection" />
+            android:foregroundServiceType="dataSync|microphone|mediaProjection" />
 
         <!-- openWakeWord TFLite ("Okay Cel") Low-Power Audio Service -->
         <service

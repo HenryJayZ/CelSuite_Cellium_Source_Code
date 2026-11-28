@@ -40,6 +40,16 @@ abstract class CelliumDatabase : RoomDatabase() {
             }
         }
 
+        private val INDEX_CALLBACK = object : RoomDatabase.Callback() {
+            override fun onOpen(db: SupportSQLiteDatabase) {
+                super.onOpen(db)
+                runCatching {
+                    db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(sessionId, createdAtMs)")
+                    db.execSQL("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updatedAtMs DESC)")
+                }
+            }
+        }
+
         fun getInstance(context: Context): CelliumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -47,6 +57,7 @@ abstract class CelliumDatabase : RoomDatabase() {
                     CelliumDatabase::class.java,
                     "cel_cellium_local.db",
                 ).addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                    .addCallback(INDEX_CALLBACK)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }

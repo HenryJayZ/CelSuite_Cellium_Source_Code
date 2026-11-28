@@ -14,7 +14,7 @@ android {
         applicationId = "CelSuite.HenryJayz.Cellium"
         minSdk = 26
         targetSdk = 36
-        versionCode = 10
+        versionCode = 11
         versionName = "v2611.27.1"
 
         ndk {

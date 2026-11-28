@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import com.henny.cellium.core.CelliumHttp
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -57,10 +58,10 @@ class OnDeviceLlmEngine(
     private val shizukuBridge: ShizukuBridge,
 ) {
     private val appContext = context.applicationContext
-    private val downloadClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS)
-        .build()
+    private val downloadClient = CelliumHttp.clientWithTimeouts(
+        connectSec = 30L,
+        readSec = 0L,
+    )
 
     @Volatile
     private var llmInference: LlmInference? = null

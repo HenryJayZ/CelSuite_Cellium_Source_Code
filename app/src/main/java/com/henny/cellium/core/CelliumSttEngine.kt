@@ -1,10 +1,15 @@
 package com.henny.cellium.core
 
 import android.annotation.SuppressLint
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.speech.RecognitionService
+import android.speech.SpeechRecognizer
 import android.util.Base64
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -50,11 +55,11 @@ class CelliumSttEngine(context: Context) {
     @Suppress("unused")
     private val appContext = context.applicationContext
     private val json = Json { ignoreUnknownKeys = true }
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val httpClient = CelliumHttp.clientWithTimeouts(
+        connectSec = 20L,
+        readSec = 45L,
+        writeSec = 30L,
+    )
 
     @Volatile private var manualStopRequested = false
     @Volatile private var cancelRequested = false
@@ -74,6 +79,46 @@ class CelliumSttEngine(context: Context) {
         const val ENGINE_HUGGINGFACE = "huggingface_whisper"
 
         private const val MODEL_CACHE_TTL_MS = 10 * 60 * 1000L
+
+        private val PREFERRED_RECOGNIZER_PACKAGES = listOf(
+            "com.google.android.tts",
+            "com.google.android.as",
+            "com.google.android.googlequicksearchbox",
+            "com.samsung.android.bixby.agent",
+            "com.samsung.android.scs",
+        )
+
+        /**
+         * Creates a system SpeechRecognizer explicitly bound to a real external RecognitionService
+         * (excluding Cellium's own stub CelliumRecognitionService, which Android can otherwise select
+         * automatically whenever Cellium is set as the Default Digital Assistant).
+         */
+        fun createBestDeviceSpeechRecognizer(context: Context): SpeechRecognizer? {
+            val appCtx = context.applicationContext
+            val externalComponent: ComponentName? = runCatching {
+                val pm = appCtx.packageManager
+                val queryIntent = Intent(RecognitionService.SERVICE_INTERFACE)
+                val resolved = pm.queryIntentServices(queryIntent, PackageManager.MATCH_ALL)
+                    .mapNotNull { it.serviceInfo }
+                    .filter { si -> si.packageName != appCtx.packageName && si.enabled }
+                val best = PREFERRED_RECOGNIZER_PACKAGES.firstNotNullOfOrNull { pkg ->
+                    resolved.firstOrNull { it.packageName == pkg }
+                } ?: resolved.firstOrNull()
+                best?.let { ComponentName(it.packageName, it.name) }
+            }.getOrNull()
+
+            if (externalComponent != null) {
+                val created = runCatching {
+                    SpeechRecognizer.createSpeechRecognizer(context, externalComponent)
+                }.getOrNull()
+                if (created != null) return created
+            }
+            return if (SpeechRecognizer.isRecognitionAvailable(context)) {
+                runCatching { SpeechRecognizer.createSpeechRecognizer(context) }.getOrNull()
+            } else {
+                null
+            }
+        }
 
         val ALL_ENGINES: List<SttEngineOption> = listOf(
             SttEngineOption(
@@ -381,8 +426,9 @@ class CelliumSttEngine(context: Context) {
             return@withContext Result.failure(IllegalStateException("Microphone initialization failed."))
         }
 
-        val pcmOut = ByteArrayOutputStream()
+        val pcmOut = ByteArrayOutputStream(64 * 1024)
         val buf = ShortArray(1024)
+        val byteScratch = ByteArray(buf.size * 2)
         var speechDetected = false
         var speechStartMs = 0L
         var consecutiveSpeechFrames = 0
@@ -404,14 +450,13 @@ class CelliumSttEngine(context: Context) {
                 val read = recorder.read(buf, 0, buf.size)
                 if (read > 0) {
                     var sumSq = 0.0
-                    val bytes = ByteArray(read * 2)
                     for (i in 0 until read) {
                         val s = buf[i].toInt()
                         sumSq += s.toDouble() * s.toDouble()
-                        bytes[i * 2] = (s and 0xFF).toByte()
-                        bytes[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
+                        byteScratch[i * 2] = (s and 0xFF).toByte()
+                        byteScratch[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
                     }
-                    pcmOut.write(bytes)
+                    pcmOut.write(byteScratch, 0, read * 2)
 
                     val rms = sqrt(sumSq / read).toFloat()
                     val now = System.currentTimeMillis()
@@ -433,11 +478,10 @@ class CelliumSttEngine(context: Context) {
                             ambientRms = (ambientRms * 0.96f + rms.coerceIn(55f, 600f) * 0.04f)
                         }
 
-                        // Peak-envelope VAD: latch immediately on 1 crisp peak (e.g. "Sure", "Okay", "Yes")
-                        // OR 2 consecutive moderate speech frames so 1-word replies never hang for 60s.
-                        val crispPeakThreshold = maxOf(500f, ambientRms * 2.80f)
-                        val onsetThreshold = maxOf(290f, ambientRms * 2.00f)
-                        val holdThreshold = maxOf(190f, ambientRms * 1.38f)
+                        // Peak-envelope VAD with natural breath grace window (>= 2.2s silence required)
+                        val crispPeakThreshold = maxOf(460f, ambientRms * 2.60f)
+                        val onsetThreshold = maxOf(260f, ambientRms * 1.85f)
+                        val holdThreshold = maxOf(135f, ambientRms * 1.20f)
 
                         if (!speechDetected) {
                             if (rms >= crispPeakThreshold) {
@@ -462,13 +506,8 @@ class CelliumSttEngine(context: Context) {
                             if (rms >= holdThreshold) {
                                 lastSpeechMs = now
                             }
-                            val spokenSoFarMs = (lastSpeechMs - speechStartMs).coerceAtLeast(0L)
-                            // Short 1-word bursts finish slightly faster once clean silence returns
-                            val effectiveSilenceMs = if (spokenSoFarMs < 750L) {
-                                minOf(silenceAutoStopMs, 1_650L)
-                            } else {
-                                silenceAutoStopMs
-                            }
+                            // Always wait at least 2.2s of true silence so natural breath pauses never cut off speech
+                            val effectiveSilenceMs = maxOf(silenceAutoStopMs, 2_200L)
                             if (now - lastSpeechMs >= effectiveSilenceMs) {
                                 break
                             }

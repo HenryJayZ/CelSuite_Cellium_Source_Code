@@ -59,6 +59,19 @@
 -dontwarn androidx.credentials.**
 -dontwarn com.google.android.libraries.identity.googleid.**
 
+# Preserve Default Digital Assistant, VoiceInteractionSession & Overlay Services
+-keep class com.henny.cellium.assistant.** { *; }
+-keep class * extends android.service.voice.VoiceInteractionService { *; }
+-keep class * extends android.service.voice.VoiceInteractionSessionService { *; }
+-keep class * extends android.service.voice.VoiceInteractionSession { *; }
+-keep class * extends android.speech.RecognitionService { *; }
+
+# Strip verbose debug logging in release builds for lower runtime overhead
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+}
+
 # Preserve OkHttp & Kotlin Coroutines
 -dontwarn okhttp3.**
 -dontwarn okio.**

@@ -26,10 +26,12 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     private val viewModel: CelliumViewModel by viewModels()
     private val openChatNonceFlow = kotlinx.coroutines.flow.MutableStateFlow(0L)
+    private val openLiveNonceFlow = kotlinx.coroutines.flow.MutableStateFlow(0L)
 
     companion object {
         const val EXTRA_OPEN_SESSION_ID = "com.henny.cellium.OPEN_SESSION_ID"
         const val EXTRA_OPEN_CHAT_TAB = "com.henny.cellium.OPEN_CHAT_TAB"
+        const val EXTRA_OPEN_LIVE_TAB = "com.henny.cellium.OPEN_LIVE_TAB"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,6 +46,7 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             val openChatNonce by openChatNonceFlow.collectAsStateWithLifecycle()
+            val openLiveNonce by openLiveNonceFlow.collectAsStateWithLifecycle()
             val visualPrefs by remember(viewModel) {
                 viewModel.preferences
                     .map { p ->
@@ -63,7 +66,11 @@ class MainActivity : ComponentActivity() {
                     .distinctUntilChanged()
             }.collectAsStateWithLifecycle(initialValue = remember { CelliumPreferences() })
             CelliumTheme(prefs = visualPrefs) {
-                CelliumApp(viewModel = viewModel, externalChatOpenNonce = openChatNonce)
+                CelliumApp(
+                    viewModel = viewModel,
+                    externalChatOpenNonce = openChatNonce,
+                    externalLiveOpenNonce = openLiveNonce,
+                )
             }
         }
     }
@@ -90,10 +97,13 @@ class MainActivity : ComponentActivity() {
         val notifSession = intent.getStringExtra(CelliumNotificationManager.EXTRA_SESSION_ID)
         val targetSessionId = explicitSession?.takeIf { it.isNotBlank() } ?: notifSession
         val forceChatTab = intent.getBooleanExtra(EXTRA_OPEN_CHAT_TAB, false)
+        val forceLiveTab = intent.getBooleanExtra(EXTRA_OPEN_LIVE_TAB, false)
         if (!targetSessionId.isNullOrBlank()) {
             viewModel.openSessionFromExternal(targetSessionId)
             CelliumNotificationManager.clearSessionNotification(this, targetSessionId)
             openChatNonceFlow.value = System.currentTimeMillis()
+        } else if (forceLiveTab) {
+            openLiveNonceFlow.value = System.currentTimeMillis()
         } else if (forceChatTab) {
             openChatNonceFlow.value = System.currentTimeMillis()
         }

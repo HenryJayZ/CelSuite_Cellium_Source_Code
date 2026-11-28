@@ -21,6 +21,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
+import com.henny.cellium.core.CelliumHttp
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -63,10 +64,10 @@ class MultiImagineClient(private val context: Context) {
     private val appContext = context.applicationContext
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(150, TimeUnit.SECONDS)
-        .build()
+    private val client = CelliumHttp.clientWithTimeouts(
+        connectSec = 30L,
+        readSec = 150L,
+    )
 
     fun galleryDir(): File {
         val dir = appContext.getExternalFilesDir("artworks") ?: File(appContext.filesDir, "gallery")

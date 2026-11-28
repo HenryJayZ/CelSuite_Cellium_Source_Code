@@ -6,6 +6,7 @@ import android.util.Base64
 import java.io.File
 import com.henny.cellium.avatar.AVATAR_MOODS
 import com.henny.cellium.avatar.MoodDetector
+import com.henny.cellium.core.CelliumHttp
 import com.henny.cellium.core.ContextModifyConfig
 import com.henny.cellium.core.DevLogBuffer
 import com.henny.cellium.data.PersonaSpec
@@ -53,11 +54,11 @@ class UniversalLlmClient {
     private val mediaTypeJson = "application/json; charset=utf-8".toMediaType()
     private val activeCalls = CopyOnWriteArrayList<Call>()
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(25, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val client = CelliumHttp.clientWithTimeouts(
+        connectSec = 25L,
+        readSec = 120L,
+        writeSec = 30L,
+    )
 
     fun cancelActiveRequests() {
         val snapshot = activeCalls.toList()

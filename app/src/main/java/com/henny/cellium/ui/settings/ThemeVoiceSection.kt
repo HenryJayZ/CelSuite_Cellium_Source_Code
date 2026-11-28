@@ -1,9 +1,11 @@
 package com.henny.cellium.ui.settings
 
 import android.Manifest
+import android.app.role.RoleManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -89,6 +91,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.henny.cellium.assistant.CelliumVoiceInteractionService
 import com.henny.cellium.assistant.FloatingCelOverlayService
 import com.henny.cellium.assistant.WakeWordService
 import com.henny.cellium.core.CelliumPreferences
@@ -376,6 +379,15 @@ fun VoiceAndAudioLabCard(
     val liveWakeScore by WakeWordService.liveScore.collectAsStateWithLifecycle()
     val wakeRunning by WakeWordService.isRunning.collectAsStateWithLifecycle()
     val wakeMicActive by WakeWordService.micActive.collectAsStateWithLifecycle()
+    val isDefaultAssistantBound by CelliumVoiceInteractionService.isBoundFlow.collectAsStateWithLifecycle()
+
+    val assistantRoleLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (CelliumVoiceInteractionService.isBoundAsDefaultAssistant()) {
+            viewModel.showSettingsFeedback("Cel.Cellium is now your Default Assistant (zero-notification wake word ready).")
+        }
+    }
 
     fun nextUniquePreviewLine(): String {
         val candidates = VOICE_PREVIEW_LINES.indices.filter { it != lastPreviewIdx }
@@ -1873,19 +1885,86 @@ fun VoiceAndAudioLabCard(
             }
             Spacer(Modifier.height(10.dp))
 
-            OutlinedButton(
-                onClick = {
-                    val intent = Intent(Settings.ACTION_VOICE_INPUT_SETTINGS)
-                    runCatching { context.startActivity(intent) }.onFailure {
-                        runCatching { context.startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)) }
-                    }
-                },
+            Surface(
                 shape = RoundedCornerShape(12.dp),
+                color = (if (isDefaultAssistantBound) CelEmeraldThought else CelAmber).copy(alpha = 0.14f),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Icon(Icons.Rounded.Assistant, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Set Cel.Cellium as Default Assistant (Zero Mic Dot)", maxLines = 1, softWrap = false)
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(if (isDefaultAssistantBound) CelEmeraldThought else CelAmber)
+                    )
+                    Text(
+                        text = if (isDefaultAssistantBound) {
+                            "Default Assistant Active — Hold Home works anywhere & wake word runs with zero notification."
+                        } else {
+                            "Not bound as Default Assistant yet — tap below to select Cel.Cellium."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isDefaultAssistantBound) CelEmeraldThought else CelAmber,
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        var launched = false
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            val rm = context.getSystemService(RoleManager::class.java)
+                            if (rm != null && rm.isRoleAvailable(RoleManager.ROLE_ASSISTANT) && !rm.isRoleHeld(RoleManager.ROLE_ASSISTANT)) {
+                                runCatching {
+                                    assistantRoleLauncher.launch(rm.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT))
+                                    launched = true
+                                }
+                            }
+                        }
+                        if (!launched) {
+                            val intent = Intent(Settings.ACTION_VOICE_INPUT_SETTINGS)
+                            runCatching { context.startActivity(intent) }.onFailure {
+                                runCatching { context.startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)) }
+                            }
+                        }
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Rounded.Assistant, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        if (isDefaultAssistantBound) "Assistant Settings" else "Set Default Assistant",
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        val summoned = CelliumVoiceInteractionService.requestShowSession()
+                        if (!summoned) {
+                            viewModel.showSettingsFeedback(
+                                "Set Cel.Cellium as Default Digital Assistant first so Android binds it.",
+                                isError = true,
+                            )
+                        }
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Text("Test Summon", maxLines = 1, softWrap = false)
+                }
             }
 
             Spacer(Modifier.height(10.dp))
@@ -1900,7 +1979,12 @@ fun VoiceAndAudioLabCard(
                     } else {
                         scope.launch { viewModel.prefsStore.updateWakeWordSettings(enabled = true) }
                         WakeWordService.start(context)
-                        viewModel.showSettingsFeedback("Okay Cel wake word listening started.")
+                        val note = if (CelliumVoiceInteractionService.isBoundAsDefaultAssistant()) {
+                            "Okay Cel active via Default Assistant (zero notification)."
+                        } else {
+                            "Okay Cel wake word listening started."
+                        }
+                        viewModel.showSettingsFeedback(note)
                     }
                 } else {
                     scope.launch { viewModel.prefsStore.updateWakeWordSettings(enabled = false) }
@@ -2025,7 +2109,7 @@ fun VoiceAndAudioLabCard(
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Icon(Icons.Rounded.GraphicEq, contentDescription = null, tint = CelEmeraldThought, modifier = Modifier.size(15.dp).padding(top = 2.dp))
                 Text(
-                    text = "Active model: ${if (prefs.wakeWordCustomPath.isBlank()) "Built-in oh_kay_sell.tflite" else File(prefs.wakeWordCustomPath).name} (exact 1760-sample openWakeWord LiteRT). Why Android shows the green mic dot: Google's 'Okay Google' runs inside a hardware low-power DSP (AlwaysOnHotwordDetector / SoundTrigger) locked strictly to OEM-signed system apps. Every third-party app must open AudioRecord on the CPU, which always triggers Android 12+'s green dot. Keep Smart Screen-On Only ON to drop the mic when locked, or use Power/Home Default Assistant for zero-dot instant summon.",
+                    text = "Active model: ${if (prefs.wakeWordCustomPath.isBlank()) "Built-in oh_kay_sell.tflite" else File(prefs.wakeWordCustomPath).name} (exact 1760-sample openWakeWord LiteRT). When Cel.Cellium is set as your Default Digital Assistant, \"Okay Cel\" runs natively inside Android's VoiceInteractionService with zero persistent notification, just like Google Gemini. Keep Smart Screen-On Only ON to save battery when locked.",
                     style = MaterialTheme.typography.labelSmall,
                     color = CelTextMuted,
                 )

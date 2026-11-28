@@ -103,6 +103,7 @@ private sealed interface SubOverlay {
 fun CelliumApp(
     viewModel: CelliumViewModel,
     externalChatOpenNonce: Long = 0L,
+    externalLiveOpenNonce: Long = 0L,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -203,6 +204,13 @@ fun CelliumApp(
         if (externalChatOpenNonce > 0L) {
             subOverlay = SubOverlay.None
             currentTab = CelliumTab.CHAT
+        }
+    }
+
+    LaunchedEffect(externalLiveOpenNonce) {
+        if (externalLiveOpenNonce > 0L) {
+            subOverlay = SubOverlay.None
+            currentTab = CelliumTab.LIVE
         }
     }
 

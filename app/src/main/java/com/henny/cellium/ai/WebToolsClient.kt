@@ -11,6 +11,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import com.henny.cellium.core.CelliumHttp
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -42,11 +43,11 @@ data class WebImageResult(
  */
 class WebToolsClient {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
+    private val client = CelliumHttp.clientWithTimeouts(
+        connectSec = 15L,
+        readSec = 25L,
+        followRedirects = true,
+    )
 
     private val freshQueryHints = listOf(
         "latest", "current", "news", "today", "2025", "2026", "version", "release",

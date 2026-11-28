@@ -239,7 +239,12 @@ private class LiveCameraController(
         val scale = maxDim.toFloat() / maxOf(w, h).toFloat()
         val dstW = (w * scale).toInt().coerceAtLeast(1)
         val dstH = (h * scale).toInt().coerceAtLeast(1)
-        return runCatching { Bitmap.createScaledBitmap(raw, dstW, dstH, true) }.getOrDefault(raw)
+        val scaled = runCatching { Bitmap.createScaledBitmap(raw, dstW, dstH, true) }.getOrNull()
+        if (scaled != null && scaled !== raw) {
+            raw.recycle()
+            return scaled
+        }
+        return raw
     }
 
     private fun ensureThread(): Handler {
@@ -455,9 +460,23 @@ fun LiveModeScreen(
     var userStoppedDeviceStt by remember { mutableStateOf(false) }
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
     var cloudSttJob by remember { mutableStateOf<Job?>(null) }
+    val deviceSpeechBuffer = remember { StringBuilder() }
+    var deviceSilenceFlushJob by remember { mutableStateOf<Job?>(null) }
+    var deviceRearmJob by remember { mutableStateOf<Job?>(null) }
+    var deviceHasDetectedSpeech by remember { mutableStateOf(false) }
+
+    fun clearDeviceSpeechAccumulator() {
+        deviceSilenceFlushJob?.cancel()
+        deviceSilenceFlushJob = null
+        deviceRearmJob?.cancel()
+        deviceRearmJob = null
+        deviceSpeechBuffer.setLength(0)
+        deviceHasDetectedSpeech = false
+    }
 
     fun cancelAllListeningWithoutSending() {
         userStoppedDeviceStt = true
+        clearDeviceSpeechAccumulator()
         cloudSttJob?.cancel()
         cloudSttJob = null
         viewModel.sttEngine.cancelRecording()
@@ -661,10 +680,34 @@ fun LiveModeScreen(
         sendLivePrompt(cleaned)
     }
 
+    fun flushDeviceSpeechAccumulator() {
+        deviceSilenceFlushJob?.cancel()
+        deviceSilenceFlushJob = null
+        deviceRearmJob?.cancel()
+        deviceRearmJob = null
+        val combined = deviceSpeechBuffer.toString().trim()
+        deviceSpeechBuffer.setLength(0)
+        deviceHasDetectedSpeech = false
+        userStoppedDeviceStt = true
+        runCatching { recognizer?.cancel() }
+        handleSttTranscript(combined)
+    }
+
+    fun scheduleDeviceSilenceFlush(delayMs: Long = 2_200L) {
+        deviceSilenceFlushJob?.cancel()
+        deviceSilenceFlushJob = scope.launch(Dispatchers.Main) {
+            delay(delayMs)
+            if (!isExiting && !userStoppedDeviceStt && deviceSpeechBuffer.isNotEmpty()) {
+                flushDeviceSpeechAccumulator()
+            }
+        }
+    }
+
     startListening = {
         if (hasAudioPerm && !isExiting) {
             errorMsg = null
             viewModel.ttsEngine.stop()
+            clearDeviceSpeechAccumulator()
             cloudSttJob?.cancel()
             phase = LivePhase.PREPARING_MIC
             stageLabel = "Starting mic..."
@@ -674,12 +717,19 @@ fun LiveModeScreen(
 
             val sttEngineId = viewModel.preferences.value.sttEngine
             if (sttEngineId == CelliumSttEngine.ENGINE_DEVICE) {
-                runCatching { recognizer?.startListening(buildDeviceSpeechIntent()) }
-                    .onFailure {
-                        phase = LivePhase.IDLE
-                        stageLabel = ""
-                        errorMsg = "Device speech recognition unavailable. Switch STT engine in Settings -> Voice."
-                    }
+                val sr = recognizer
+                if (sr == null) {
+                    phase = LivePhase.IDLE
+                    stageLabel = ""
+                    errorMsg = "Device speech recognition unavailable. Switch STT engine in Settings -> Voice."
+                } else {
+                    runCatching { sr.startListening(buildDeviceSpeechIntent()) }
+                        .onFailure {
+                            phase = LivePhase.IDLE
+                            stageLabel = ""
+                            errorMsg = "Device speech recognition unavailable. Switch STT engine in Settings -> Voice."
+                        }
+                }
             } else {
                 val opt = CelliumSttEngine.ALL_ENGINES.firstOrNull { it.id == sttEngineId }
                 val apiKey = viewModel.resolveSttApiKey(sttEngineId)
@@ -695,7 +745,7 @@ fun LiveModeScreen(
                             modelOverride = viewModel.preferences.value.sttModel,
                             maxDurationMs = 180_000L,
                             preSpeechTimeoutMs = 60_000L,
-                            silenceAutoStopMs = 3_200L,
+                            silenceAutoStopMs = 2_400L,
                             manualStopOnly = false,
                             onReadyForSpeech = {
                                 scope.launch(Dispatchers.Main) {
@@ -773,62 +823,118 @@ fun LiveModeScreen(
     }
 
     DisposableEffect(context) {
-        val sr = if (SpeechRecognizer.isRecognitionAvailable(context)) {
-            SpeechRecognizer.createSpeechRecognizer(context).apply {
-                setRecognitionListener(object : RecognitionListener {
-                    override fun onReadyForSpeech(params: Bundle?) {
+        val sr = CelliumSttEngine.createBestDeviceSpeechRecognizer(context)?.apply {
+            setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    if (!userStoppedDeviceStt) {
                         phase = LivePhase.LISTENING
                         stageLabel = "Listening..."
                     }
-                    override fun onBeginningOfSpeech() {}
-                    override fun onRmsChanged(rmsdB: Float) {
-                        if (phase == LivePhase.LISTENING) {
-                            mouthOpenness = ((rmsdB + 2f) / 14f).coerceIn(0.08f, 0.75f)
+                }
+                override fun onBeginningOfSpeech() {
+                    deviceHasDetectedSpeech = true
+                    deviceSilenceFlushJob?.cancel()
+                    deviceSilenceFlushJob = null
+                }
+                override fun onRmsChanged(rmsdB: Float) {
+                    if (phase == LivePhase.LISTENING) {
+                        mouthOpenness = ((rmsdB + 2f) / 14f).coerceIn(0.08f, 0.75f)
+                        if (deviceSpeechBuffer.isNotEmpty() && rmsdB > 4.5f) {
+                            // User is continuing to speak — reset the 2.2s breath grace timer
+                            scheduleDeviceSilenceFlush(2_200L)
                         }
                     }
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-                    override fun onEndOfSpeech() {
-                        if (!userStoppedDeviceStt) {
-                            phase = LivePhase.TRANSCRIBING
-                            stageLabel = "Transcribing..."
-                        }
+                }
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {
+                    // Stay in LISTENING during the 2.2s breath grace window instead of jarring to Transcribing
+                    if (!userStoppedDeviceStt && deviceSpeechBuffer.isEmpty()) {
+                        stageLabel = "Listening..."
                     }
-                    override fun onError(error: Int) {
-                        val retryable = error == SpeechRecognizer.ERROR_NO_MATCH ||
-                            error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
-                            error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
-                        val autoOn = viewModel.preferences.value.liveHandsFreeLoop
-                        val elapsed = System.currentTimeMillis() - listenStartedAtMs
-                        if (!isExiting && !userStoppedDeviceStt && retryable && (autoOn || elapsed < 60_000L)) {
-                            scope.launch(Dispatchers.Main) {
-                                delay(220L)
+                }
+                override fun onError(error: Int) {
+                    if (isExiting || userStoppedDeviceStt) return
+                    val retryable = error == SpeechRecognizer.ERROR_NO_MATCH ||
+                        error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+                        error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
+                    // If we already captured speech in the buffer, NEVER drop it — let the 2.2s grace timer finish!
+                    if (deviceSpeechBuffer.isNotEmpty()) {
+                        if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                            deviceRearmJob?.cancel()
+                            deviceRearmJob = scope.launch(Dispatchers.Main) {
+                                delay(160L)
                                 if (!isExiting && !userStoppedDeviceStt && typedInput.isBlank()) {
                                     runCatching { recognizer?.startListening(buildDeviceSpeechIntent()) }
                                 }
                             }
-                        } else {
-                            phase = LivePhase.IDLE
-                            stageLabel = ""
-                            mouthOpenness = 0.05f
+                        } else if (deviceSilenceFlushJob?.isActive != true) {
+                            scheduleDeviceSilenceFlush(650L)
                         }
+                        return
                     }
-                    override fun onPartialResults(partialResults: Bundle?) {
-                        val txt = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                        val cleaned = CelliumSttEngine.sanitizeTranscript(txt.orEmpty())
-                        if (cleaned.isNotBlank()) userTranscript = cleaned
+                    val autoOn = viewModel.preferences.value.liveHandsFreeLoop
+                    val elapsed = System.currentTimeMillis() - listenStartedAtMs
+                    if (retryable && (autoOn || elapsed < 60_000L)) {
+                        deviceRearmJob?.cancel()
+                        deviceRearmJob = scope.launch(Dispatchers.Main) {
+                            delay(220L)
+                            if (!isExiting && !userStoppedDeviceStt && typedInput.isBlank()) {
+                                runCatching { recognizer?.startListening(buildDeviceSpeechIntent()) }
+                            }
+                        }
+                    } else {
+                        phase = LivePhase.IDLE
+                        stageLabel = ""
+                        mouthOpenness = 0.05f
                     }
-                    override fun onResults(results: Bundle?) {
-                        if (userStoppedDeviceStt) return
-                        val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-                        handleSttTranscript(spoken)
+                }
+                override fun onPartialResults(partialResults: Bundle?) {
+                    if (userStoppedDeviceStt) return
+                    val txt = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                    val cleaned = CelliumSttEngine.sanitizeTranscript(txt.orEmpty())
+                    if (cleaned.isNotBlank()) {
+                        deviceHasDetectedSpeech = true
+                        deviceSilenceFlushJob?.cancel()
+                        deviceSilenceFlushJob = null
+                        val prefix = deviceSpeechBuffer.toString().trim()
+                        userTranscript = if (prefix.isBlank()) cleaned else "$prefix $cleaned"
                     }
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
-                })
-            }
-        } else null
+                }
+                override fun onResults(results: Bundle?) {
+                    if (isExiting || userStoppedDeviceStt) return
+                    val raw = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                    val segment = CelliumSttEngine.sanitizeTranscript(raw)
+                    if (segment.isNotBlank()) {
+                        deviceHasDetectedSpeech = true
+                        if (deviceSpeechBuffer.isNotEmpty()) deviceSpeechBuffer.append(' ')
+                        deviceSpeechBuffer.append(segment)
+                        userTranscript = deviceSpeechBuffer.toString()
+                        phase = LivePhase.LISTENING
+                        stageLabel = "Listening..."
+                        // Hold for 2.2s of true silence so catching a breath NEVER cuts off the user!
+                        scheduleDeviceSilenceFlush(2_200L)
+                        deviceRearmJob?.cancel()
+                        deviceRearmJob = scope.launch(Dispatchers.Main) {
+                            delay(90L)
+                            if (!isExiting && !userStoppedDeviceStt && typedInput.isBlank() && deviceSpeechBuffer.isNotEmpty()) {
+                                runCatching { recognizer?.startListening(buildDeviceSpeechIntent()) }
+                            }
+                        }
+                    } else if (deviceSpeechBuffer.isNotEmpty()) {
+                        if (deviceSilenceFlushJob?.isActive != true) {
+                            scheduleDeviceSilenceFlush(1_200L)
+                        }
+                    } else {
+                        handleSttTranscript("")
+                    }
+                }
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+        }
         recognizer = sr
 
         onDispose {
+            clearDeviceSpeechAccumulator()
             cloudSttJob?.cancel()
             viewModel.sttEngine.cancelRecording()
             viewModel.cancelLiveStream()
@@ -1185,7 +1291,7 @@ fun LiveModeScreen(
                             accent = visuals.primary,
                             onRetry = {
                                 val retryText = failedPrompt ?: return@LiveSmartChatBubble
-                                val retryBmp = failedBitmap
+                                val retryBmp = failedBitmap?.takeUnless { it.isRecycled }
                                 sendLivePrompt(retryText, explicitBitmap = retryBmp, isRetry = true)
                             },
                         )
@@ -1238,7 +1344,7 @@ fun LiveModeScreen(
                         onRetry = {
                             viewModel.soundEngine.playClick()
                             val retryText = failedPrompt ?: return@LiveSmartChatBubble
-                            val retryBmp = failedBitmap
+                            val retryBmp = failedBitmap?.takeUnless { it.isRecycled }
                             sendLivePrompt(retryText, explicitBitmap = retryBmp, isRetry = true)
                         },
                     )
@@ -1305,10 +1411,17 @@ fun LiveModeScreen(
                                     audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                 } else if (phase == LivePhase.LISTENING || phase == LivePhase.PREPARING_MIC) {
                                     if (prefs.sttEngine == CelliumSttEngine.ENGINE_DEVICE) {
-                                        userStoppedDeviceStt = true
-                                        recognizer?.stopListening()
-                                        phase = LivePhase.IDLE
-                                        stageLabel = ""
+                                        if (deviceSpeechBuffer.isNotEmpty()) {
+                                            // User tapped mic to finish early — submit accumulated utterance immediately!
+                                            flushDeviceSpeechAccumulator()
+                                        } else {
+                                            userStoppedDeviceStt = true
+                                            clearDeviceSpeechAccumulator()
+                                            runCatching { recognizer?.cancel() }
+                                            phase = LivePhase.IDLE
+                                            stageLabel = ""
+                                            mouthOpenness = 0.05f
+                                        }
                                     } else {
                                         viewModel.sttEngine.requestStopRecording()
                                     }
